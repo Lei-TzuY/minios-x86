@@ -1,0 +1,21 @@
+# Compiled objects and binaries
+*.o
+*.elf
+kernel.bin
+
+# Generated embed sources (produced from user ELFs by gen_embed.py)
+*_embed.c
+
+# Generated filesystem / disk images
+ata-test.img
+fat16.img
+
+# Bootable ISO build
+isodir/
+*.iso
+
+# Scratch / editor / OS cruft
+runlog.sh
+*.swp
+*~
+.DS_Store
