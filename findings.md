@@ -313,6 +313,54 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   日誌（證明真的走了繼承的重導向而非預設裝置），並在最後刪除暫存檔——若繼承的
   參照洩漏，unlink 會失敗、檔案殘留，RAMFS 節點數斷言會抓到。
 
+### F14 [P0][安全性] SYS_SIGRETURN 完全未驗證就解參照使用者 ESP —— 任何程式都能
+用一行組語讓**整台機器停機**（與 F2 同類，但我在前幾輪只修了寫入側、漏掉讀取側）
+- 檔案: syscall.c `sys_sigreturn`
+- `const sigcontext_t *sc = (const sigcontext_t *)(regs->useresp + 4);` 之後直接
+  讀取 40 bytes，**沒有任何邊界檢查**。而且 SYS_SIGRETURN 是一般系統呼叫，
+  任何程式都能直接 `int $0x80`（eax=24）觸發——**根本不需要身處訊號處理常式中**
+  （程式碼也沒檢查 `in_signal`）。
+  攻擊只要三行：把 ESP 設成未映射位址（例如 0x1000）再 int $0x80。從 ring 3
+  進入中斷時 CPU 會透過 TSS 切到核心堆疊，所以錯誤的 ESP 完全不妨礙 int 本身。
+  核心接著在 **CS=0x08（ring 0）** 情境下讀取該位址 → page fault →
+  paging.c 的 handler 判定 `(regs->cs & 0x3) != 3` 為核心錯誤 →
+  「PAGE FAULT! ... System Halted.」→ **整台虛擬機/機器停在 hlt 迴圈**。
+  這是使用者可觸發、影響整個核心（非僅該行程）的 DoS，嚴重度與 F2 相同。
+- **自我檢討**：F2 修的是 `signal_deliver` 建立訊號框的**寫入**側，我當時沒有
+  同步檢查對稱的**讀取**側（sys_sigreturn），這是那一輪審查的疏漏。
+- 修復: 在解參照前驗證整個 sigcontext 框都落在
+  [USER_STACK_BOTTOM, USER_STACK_TOP)（堆疊區是需求分頁，範圍內的位址讀取安全），
+  不合法就 `task_exit(-1)` 只終止該行程——與 F2 的寫入側檢查對稱。
+  已驗算合法路徑（trampoline 送出 sigreturn 時 useresp = 原 esp - sizeof - 4）
+  必定通過此檢查，不會誤殺正常訊號流程。
+- 狀態: **已修＋已驗證**。新增 user/sigretguard.c **實際執行該攻擊**（內嵌組語
+  把 esp 設為 0x1000 後 int $0x80）。實測日誌：`[sigretguard arming]` →
+  `[program exited]`（只有該行程死亡）→ 緊接著 `> ls /proc` **系統繼續運作**，
+  且 `[sigretguard SURVIVED]` 不存在。修復前這裡日誌會直接停住（整機停機），
+  所以這個測試對回歸有非常強的鑑別力。
+
+### F15 [P3][未定義行為] sys_sbrk 對 INT32_MIN 取負值是有號溢位 UB
+- 檔案: syscall.c `sys_sbrk`
+- `uint32_t dec = (uint32_t)(-increment);` 其中 increment 是直接來自使用者暫存器
+  的 int32_t。當 increment == INT32_MIN 時 `-increment` 是有號溢位（UB）。
+  實務上 gcc 會產生 `neg` 指令而回繞成 0x80000000，接著界限檢查會擋下來，
+  所以目前行為正確——但那是「碰巧」，不是語言保證。
+- 修復: 改用 `0u - (uint32_t)increment`（無號運算，對所有負值都定義良好且給出
+  正確的絕對值）。此檔其他地方（如 paging_zero_user 的 `size > UINT32_MAX - vaddr`）
+  本來就很小心處理這類溢位，這裡補齊一致性。
+- 狀態: 已修。
+
+### F16 [P3][使用者空間] umalloc 向 sbrk 要求記憶體時的 int 溢位可能變成「縮小堆積」
+- 檔案: user/umalloc.h `umalloc_morecore`
+- `sys_sbrk((int)(nu * sizeof(Header)))`：nu 為 unsigned，sizeof(Header)==8。
+  當 nu >= 2^28（即 malloc 要求約 2GB 以上）時 `nu * 8` 轉成 int 會變**負值**，
+  被 sbrk 解讀成**縮小**堆積，並回傳一個看似合法的指標——程式接著就會寫入
+  不屬於自己的記憶體。屬使用者空間問題（分頁機制使其無法傷害核心）。
+- 修復: 轉型前先檢查 `nu > 0x7FFFFFFF / sizeof(Header)` 就直接回傳失敗。
+- 狀態: 已修。觸發需要約 2GB 的配置請求，在這個 32 位元、堆積上限約 1MB 的系統
+  上不會自然發生，故未另寫測試（誠實記錄的驗證缺口）；malloctest/tail/sort
+  等既有的配置器測試修改後全數通過。
+
 ## 功能擴充（已實作）
 
 ### FEAT1 執行檔改走 VFS 查找：可從任何已掛載的檔案系統執行程式

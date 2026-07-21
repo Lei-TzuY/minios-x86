@@ -219,3 +219,32 @@
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**；
   管線與重導向（redirected / piped via dup2 / redirok / `1 3 6`）不受影響。
   節點數斷言 54，README 程式數 46。
+
+## Session 8 — 2026-07-21
+
+- **修 F14（P0，安全性）——本輪最重要，也是對前幾輪的自我更正**：
+  `SYS_SIGRETURN` 在解參照使用者 ESP 前**完全沒有驗證**。而且它是一般系統呼叫，
+  任何程式都能直接 `int $0x80`（eax=24）觸發，**根本不需要身處訊號處理常式中**。
+  攻擊只要把 ESP 設成未映射位址再 int（從 ring 3 進中斷時 CPU 會透過 TSS 切到
+  核心堆疊，錯誤的 ESP 不妨礙 int 本身），核心就會在 **ring 0** 讀取該位址 →
+  page fault → 被判定為核心錯誤 → **整台機器停機**。
+  **這與 F2 是同一類問題**：F2 修的是 signal_deliver 建立訊號框的「寫入」側，
+  我當時沒有同步檢查對稱的「讀取」側，是那一輪審查的疏漏。
+  修法：解參照前驗證整個 sigcontext 框落在 [USER_STACK_BOTTOM, USER_STACK_TOP)，
+  不合法就 task_exit(-1) 只終止該行程。已驗算合法 trampoline 路徑必定通過。
+  新增 user/sigretguard.c **實際執行該攻擊**：實測 `[sigretguard arming]` →
+  `[program exited]`（只有該行程死亡）→ 緊接著 `> ls /proc` 系統繼續運作。
+  修復前日誌會在此直接停住，因此這個測試對回歸鑑別力極強。
+
+- **修 F15（P3）**：`sys_sbrk` 的 `-increment` 在 increment == INT32_MIN 時是
+  有號溢位 UB（值直接來自使用者暫存器）。改用 `0u - (uint32_t)increment`。
+  原本靠 gcc 產生 neg 指令回繞而「碰巧正確」，現在是語言保證正確。
+
+- **修 F16（P3，使用者空間）**：`umalloc_morecore` 的 `(int)(nu * sizeof(Header))`
+  在配置量約 2GB 以上時會溢位成負值，被 sbrk 解讀為**縮小**堆積並回傳看似合法
+  的指標。轉型前先擋掉。
+
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
+  另確認動到 umalloc.h 後 malloctest/tail/sort（`[malloc test passed]`、`1 12 62`、
+  `alpha`/`charlie`）與 sbrk 相關路徑（`[demand paging ok]`）全數不受影響。
+  節點數斷言 55、README 程式數 47。

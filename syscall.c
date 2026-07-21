@@ -520,7 +520,11 @@ int32_t sys_sbrk(int32_t increment) {
     if (increment == 0) return (int32_t)old_break;
 
     if (increment < 0) {
-        uint32_t dec = (uint32_t)(-increment);
+        /* Negate in unsigned arithmetic: `-increment` is undefined when
+         * increment is INT32_MIN, and this value comes straight from a user
+         * register. The unsigned form yields the correct magnitude for every
+         * negative input. */
+        uint32_t dec = 0u - (uint32_t)increment;
         if (dec > old_break - process->heap_start) return -1;
         process->heap_break = old_break - dec;
         return (int32_t)old_break;
@@ -760,9 +764,27 @@ static int32_t sys_signal(int signum, uint32_t handler, uint32_t trampoline) {
  * via SYS_SIGRETURN). regs->useresp points just below the saved context. */
 static void sys_sigreturn(registers_t *regs) {
     process_t *process = process_get_current();
-    const sigcontext_t *sc = (const sigcontext_t *)(regs->useresp + 4);
+    const sigcontext_t *sc;
 
     if (!process) return;
+
+    /* regs->useresp is a plain user register and SYS_SIGRETURN is reachable by
+     * any program issuing int $0x80 directly -- it need not be inside a signal
+     * handler at all. Validate that the whole saved-context frame lies in the
+     * user stack before dereferencing it. Reading an unmapped or out-of-range
+     * address here would fault with CS still 0x08, which the page-fault handler
+     * classifies as a kernel fault and answers by halting the entire machine.
+     * The stack region itself is demand-paged, so an in-range address is safe
+     * to touch. A frame that fails this check means the context is unusable, so
+     * terminate just this process (mirrors the write-side check in
+     * signal_deliver). */
+    if (regs->useresp < USER_STACK_BOTTOM ||
+        regs->useresp > USER_STACK_TOP ||
+        USER_STACK_TOP - regs->useresp < 4 + sizeof(sigcontext_t)) {
+        task_exit(-1);
+    }
+
+    sc = (const sigcontext_t *)(regs->useresp + 4);
     regs->eip = sc->eip;
     regs->eflags = sc->eflags;
     regs->eax = sc->eax;
