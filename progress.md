@@ -154,3 +154,28 @@
 
 - **驗證**：`make clean && make -j4` = 0 warning / 0 error；`make test`
   **真實離開碼 0**（可靠腳本擷取）。節點數斷言更新為 52。
+
+- **已 commit**：分支 `kernel-safety-fixes`，commit 6dfa529，涵蓋 Session 1-4
+  的全部修復、5 支新測試程式與文件。（開分支而非直接進 main，方便檢視後合併。）
+
+## Session 5 — 2026-07-21
+
+- **修 F12（P2，資料完整性/資訊洩漏）**：FAT16 是三個檔案系統中**唯一沒有開啟
+  計數**的（RAMFS 用 impl 參照位元、DiskFS 用 diskfs_open_refs，兩者的 remove
+  都會在檔案開啟時拒絕）。fat16 的節點完全沒接 open/close callback，
+  `fat16_vfs_unlink` 因此毫無檢查就把叢集鏈歸還 free pool；之後任何寫入若配置
+  到那些叢集，仍持舊描述子的行程會讀到**另一個檔案的內容**——靜默的跨檔案資料
+  洩漏／損毀。
+  修法：新增 `fat16_node_refs[]` 與 `fat16_vfs_open/close`，接到檔案節點上；
+  `fat16_vfs_unlink` 在檔案仍開啟時拒絕（與另兩個檔案系統一致）。
+  同時消除 F4 的殘留風險：`fat16_make_node` 需要**新** slot 時改為只挑
+  `refs == 0` 者，全滿則回傳 NULL（呼叫端視為找不到），寧可查找失敗也不要靜默
+  把開啟中的描述子指向別的檔案。
+  新增 user/fatref.c：開啟 /fat/hello.txt 後嘗試 unlink，驗證被拒
+  （`[fatref inuse unlink refused]`）、描述子仍讀出正確內容（`[fatref content ok]`）、
+  檔案確實還在（`[fatref file intact]`）。測試**刻意不真的刪除**該檔，因此後續
+  既有 FAT16 測試全部照常通過（實測 log 確認 hello.txt / docs/note.txt /
+  fatwrite / ush 下 cd fat 都正常）。
+
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
+  節點數斷言更新為 53。

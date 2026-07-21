@@ -14,7 +14,7 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
        cat_embed.o fault_embed.o badptr_embed.o worker_embed.o spawner_embed.o \
        orphan_embed.o sleeptest_embed.o fstest_embed.o echo_embed.o \
        malloctest_embed.o wc_embed.o grep_embed.o \
-       head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o ush_embed.o
+       head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o ush_embed.o
 
 .PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot test-shell
 
@@ -172,6 +172,9 @@ user/pathlim.elf: user/pathlim.c user/user_syscall.h user/crt0.s user/Makefile
 
 user/redirref.elf: user/redirref.c user/user_syscall.h user/crt0.s user/Makefile
 	$(MAKE) -C user redirref.elf
+
+user/fatref.elf: user/fatref.c user/user_syscall.h user/crt0.s user/Makefile
+	$(MAKE) -C user fatref.elf
 
 user/ush.elf: user/ush.c user/user_syscall.h user/crt0.s user/Makefile
 	$(MAKE) -C user ush.elf
@@ -434,6 +437,12 @@ redirref_embed.c: user/redirref.elf gen_embed.py
 redirref_embed.o: redirref_embed.c
 	$(CC) -c $< -o $@ $(CFLAGS)
 
+fatref_embed.c: user/fatref.elf gen_embed.py
+	python3 gen_embed.py user/fatref.elf fatref_elf > $@
+
+fatref_embed.o: fatref_embed.c
+	$(CC) -c $< -o $@ $(CFLAGS)
+
 ush_embed.c: user/ush.elf gen_embed.py
 	python3 gen_embed.py user/ush.elf ush_elf > $@
 
@@ -459,7 +468,7 @@ $(ATA_IMAGE): gen_ata_image.py
 
 # Utility targets
 clean:
-	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c ush_embed.c fat16.img fat16_image_embed.c
+	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c ush_embed.c fat16.img fat16_image_embed.c
 	rm -rf isodir miniOS.iso
 	$(MAKE) -C user clean
 
@@ -593,6 +602,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	    send_keys p a t h l i m ret; sleep 1.5; \
 	    send_keys r e d i r r e f ret; sleep 1.5; \
 	    send_keys r m spc r r dot t m p ret; sleep 0.6; \
+	    send_keys f a t r e f ret; sleep 1.5; \
 	    send_keys l s spc slash p r o c ret; sleep 0.8; \
 	    send_keys c a t spc slash p r o c slash p r o c e s s e s ret; sleep 0.8; \
 	    send_keys c a t spc slash p r o c slash s e l f slash s t a t u s ret; sleep 0.8; \
@@ -685,6 +695,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "^ramgrow$$" $$log && \
 	grep -q "^pathlim$$" $$log && \
 	grep -q "^redirref$$" $$log && \
+	grep -q "^fatref$$" $$log && \
 	grep -q "^ush$$" $$log && \
 	grep -q "^readme.txt$$" $$log && \
 	grep -q "^disk$$" $$log && \
@@ -740,6 +751,13 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	! grep -q "redirref inuse unlink WRONGLY" $$log && \
 	! grep -q "\[redirref stdin read FAIL\]" $$log && \
 	! grep -q "rm: cannot remove: rr.tmp" $$log && \
+	grep -q "\[fatref inuse unlink refused\]" $$log && \
+	grep -q "\[fatref content ok\]" $$log && \
+	grep -q "\[fatref file intact\]" $$log && \
+	grep -q "\[fatref done\]" $$log && \
+	! grep -q "fatref inuse unlink WRONGLY" $$log && \
+	! grep -q "\[fatref content FAIL\]" $$log && \
+	! grep -q "\[fatref file intact FAIL\]" $$log && \
 	grep -q "^hello.txt$$" $$log && \
 	grep -q "Hello from FAT16!" $$log && \
 	grep -q "nested fat note" $$log && \
@@ -834,7 +852,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "Processes: running=0 zombies=0 peak=4" $$log && \
 	grep -q "Tasks: blocked=0" $$log && \
 	grep -q "Timers: sleeping=0" $$log && \
-	grep -q "RAMFS nodes=52" $$log && \
+	grep -q "RAMFS nodes=53" $$log && \
 	test $$(grep -c "\[heap test passed\]" $$log) -eq 2 && \
 	grep -q "\[pmm high-memory test passed\]" $$log && \
 	grep -q "\[ata pio read/write test passed\]" $$log && \

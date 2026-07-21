@@ -158,6 +158,8 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   寫一個「開超過 16 個 fd 觸發別名」的專屬回歸測試——這需要新增遠多於現有
   測試量的 FAT16 操作，而現有整合測試已涵蓋所有正常使用模式；此為誠實記錄
   的驗證缺口（同 F2）。
+- **後續**: Session 5 的 F12 為 fat16 補上完整的開啟計數，`fat16_make_node`
+  改為只挑 `refs == 0` 的 slot，本項殘留風險已一併消除。
 
 ### F7 [P1][正確性/記憶體安全] execv 從「仍有存活執行緒」的行程呼叫時，會摧毀
 其他 thread 仍在使用的共享 address space（與 F1 同一類的 use-after-free）
@@ -269,6 +271,27 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   （`[redirref stdin reads file]`）。測試腳本在程式結束後再由 shell 執行
   `rm rr.tmp`，並斷言**不得**出現 "cannot remove"，藉此同時證明參照在行程
   結束時確實被釋放（沒有反向的洩漏）。既有 shell/ush 重導向測試全數不受影響。
+
+### F12 [P2][資料完整性/資訊洩漏] FAT16 是三個檔案系統中唯一沒有開啟計數的，
+`unlink` 會在檔案仍被開啟時就釋放叢集鏈 → 舊描述子可讀到別的檔案的資料
+- 檔案: fat16.c（新增 `fat16_node_refs` / `fat16_vfs_open` / `fat16_vfs_close`
+  / `fat16_entry_is_open`，並修改 `fat16_make_node` 與 `fat16_vfs_unlink`）
+- RAMFS 用節點 `impl` 的參照位元、DiskFS 用 `diskfs_open_refs[]`，兩者的
+  remove 路徑都會在檔案仍開啟時拒絕。FAT16 的節點**完全沒有接上 open/close
+  callback**，`fat16_vfs_unlink` 因此毫無檢查地把叢集鏈逐一
+  `fat16_set_cluster(cluster, 0)` 歸還free pool。此後任何寫入若配置到那些
+  叢集，仍持有舊描述子的行程讀下去就會讀到**另一個檔案的內容**——不是當機，
+  而是靜默的跨檔案資料洩漏／損毀。
+- 同時修掉 F4 的殘留風險：`fat16_make_node` 先前雖已優先重用「同一目錄項」的
+  slot（F4 的修法），但當需要**新** slot 時仍是無條件推進 round-robin 游標，
+  只要查找超過 FAT16_NODE_POOL(16) 個不同目錄項，就可能覆寫掉仍被某 fd 持有
+  的節點。現在改為只挑 `refs == 0` 的 slot；全部都被開啟時回傳 NULL
+  （呼叫端視為「找不到」），寧可查找失敗也不要靜默指向錯誤的檔案。
+- 狀態: **已修＋已驗證**。新增 user/fatref.c：開啟 `/fat/hello.txt` 後嘗試
+  unlink，驗證必須被拒（`[fatref inuse unlink refused]`）、描述子仍能讀出正確
+  內容（`[fatref content ok]`）、且檔案確實還在（`[fatref file intact]`）。
+  測試刻意**不真的刪除**該檔，因此後續既有的 FAT16 測試（cat fat/hello.txt、
+  fat/docs/note.txt、寫入 fat/new.txt、ush 下 cd fat）全部照常通過。
 
 ## 排程公平性（已實作）
 

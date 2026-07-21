@@ -101,6 +101,15 @@ Status: complete
   （後者證明沒有反向的參照洩漏）。
 - 節點數斷言更新為 52；clean build 0 warning/0 error、`make test` 真實離開碼 0。
 
+## Phase 8: Session 5 — FAT16 開啟計數（三個檔案系統的行為一致化）
+Status: complete
+- **F12（P2）**：fat16 是唯一沒有開啟計數的檔案系統，unlink 會在檔案仍開啟時
+  釋放叢集鏈 → 那些叢集可被配置給新檔案，舊描述子讀到別的檔案內容（靜默的
+  跨檔案資料洩漏）。補上 refs + open/close callback，unlink 在開啟時拒絕。
+  同時讓 fat16_make_node 只挑 refs==0 的 slot，消除 F4 的殘留風險。
+- 新增 user/fatref.c（刻意不真的刪檔，避免影響既有 FAT16 測試）。
+- 節點數斷言更新為 53；clean build 0 warning/0 error、`make test` 真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目
