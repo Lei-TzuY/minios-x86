@@ -179,10 +179,23 @@ void task_block_current(const void *wait_channel) {
     if (ready_queue == task) ready_queue = next;
 
     task->next = 0;
-    task->blocked_next = blocked_tasks;
+    task->blocked_next = 0;
     task->wait_channel = wait_channel;
     task->state = TASK_BLOCKED;
-    blocked_tasks = task;
+    /* Append at the tail so `blocked_tasks` runs oldest-waiter first. Head
+     * insertion would make task_wake_one() (which wakes the first match) pick
+     * the most recent waiter, i.e. LIFO: with a steady stream of new waiters
+     * on the same channel an early waiter could be passed over indefinitely.
+     * Appending gives FIFO wakeups, the fair and conventional choice. The walk
+     * is O(blocked tasks), which is bounded by the small task count and runs
+     * with interrupts already disabled. */
+    if (!blocked_tasks) {
+        blocked_tasks = task;
+    } else {
+        task_t *last = blocked_tasks;
+        while (last->blocked_next) last = last->blocked_next;
+        last->blocked_next = task;
+    }
 
     activate_task(next);
     switch_task(&task->esp, next->esp);
@@ -219,6 +232,26 @@ void task_wake_all(const void *wait_channel) {
         } else {
             link = &task->blocked_next;
         }
+    }
+    restore_irq(flags);
+}
+
+void task_wake_task(task_t *task) {
+    uint32_t flags = save_irq_disable();
+    task_t **link = &blocked_tasks;
+
+    if (!task) {
+        restore_irq(flags);
+        return;
+    }
+
+    while (*link) {
+        if (*link == task) {
+            *link = task->blocked_next;
+            add_ready_task(task);
+            break;
+        }
+        link = &(*link)->blocked_next;
     }
     restore_irq(flags);
 }

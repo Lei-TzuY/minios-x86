@@ -98,13 +98,24 @@ void terminal_writestring(const char* data) {
 }
 
 void terminal_write_dec(uint32_t n) {
+    /* Format directly as unsigned: int_to_ascii() takes a signed int, and
+     * routing a uint32_t through it would reinterpret any value above
+     * INT32_MAX as negative (wrong digits), with n == INT32_MIN specifically
+     * hitting a signed-overflow negation. Uptime ticks, byte counts and pids
+     * are all uint32_t and, in principle, unbounded, so format them without
+     * ever converting through a signed type. */
+    char str[11];   /* up to 10 digits for UINT32_MAX, no terminator needed */
+    int i = 0;
+
     if (n == 0) {
         terminal_putchar('0');
         return;
     }
-    char str[32];
-    int_to_ascii(n, str);
-    terminal_writestring(str);
+    while (n > 0) {
+        str[i++] = (char)('0' + n % 10);
+        n /= 10;
+    }
+    while (i > 0) terminal_putchar(str[--i]);
 }
 
 /* Print `n` right-justified in `width` columns, zero-padded (e.g. dates). */

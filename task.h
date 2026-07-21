@@ -47,6 +47,14 @@ task_t *task_get_current(void);
 void task_block_current(const void *wait_channel);
 void task_wake_one(const void *wait_channel);
 void task_wake_all(const void *wait_channel);
+/* Unblock one SPECIFIC task (no-op if it is not currently blocked).
+ * Use this when the kernel must nudge a particular task -- e.g. delivering a
+ * signal to a chosen process -- instead of task_wake_one(), which wakes an
+ * arbitrary waiter on a channel. Several unrelated tasks routinely share a
+ * wait channel (the shell blocks on a child's process_t in process_wait while
+ * that same child blocks on its own process_t in process_waitpid), so picking
+ * "some waiter" can wake the wrong one and leave the intended task asleep. */
+void task_wake_task(task_t *task);
 uint32_t task_get_blocked_count(void);
 void schedule(void);
 void task_exit(int32_t status) __attribute__((noreturn));

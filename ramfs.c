@@ -10,6 +10,13 @@
 typedef struct {
     fs_node_t *node;
     fs_node_t *parent;
+    /* Allocated size of node->ptr for a dynamic file (>= node->length), so
+     * appends can reuse spare capacity instead of reallocating the whole file
+     * on every growth. 0 for directories, static files, and freshly created
+     * dynamic files (no buffer yet). Invariant for dynamic files: the bytes in
+     * [node->length, capacity) are always zero, so a later write that grows
+     * into that spare region needs no extra zero-fill. */
+    uint32_t capacity;
 } ramfs_entry_t;
 
 static ramfs_entry_t ramfs_nodes[MAX_RAMFS_NODES];
@@ -136,29 +143,53 @@ static uint32_t ramfs_read(fs_node_t *node, uint32_t offset, uint32_t size, uint
 }
 
 static uint32_t ramfs_write(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
-    uint32_t old_length;
-
     if (size == 0) return 0;
     if (size > 0xFFFFFFFFU - offset) return 0;
 
-    /* If the file needs to grow */
-    if (offset + size > node->length) {
-        uint32_t new_length = offset + size;
-        uint8_t *new_data = (uint8_t*)kmalloc(new_length);
-        if (!new_data) return 0; /* out of memory */
+    uint32_t new_length = offset + size;
 
-        old_length = node->length;
-        if (node->ptr) {
-            memcpy(new_data, node->ptr, old_length);
-            kfree(node->ptr);
+    /* Grow the backing buffer only when the write extends past the current
+     * length. To keep repeated appends amortized O(1) instead of O(n) per
+     * write (the file was previously reallocated and fully copied on every
+     * growth, i.e. O(n^2) to build up), grow the allocation geometrically and
+     * remember the spare capacity in the node's ramfs entry. */
+    if (new_length > node->length) {
+        int idx = ramfs_find_index(node);
+        uint32_t old_length = node->length;
+        if (idx < 0) return 0;   /* not a tracked node */
+
+        if (new_length > ramfs_nodes[idx].capacity) {
+            uint32_t new_cap = ramfs_nodes[idx].capacity ?
+                               ramfs_nodes[idx].capacity : 64;
+            while (new_cap < new_length) {
+                if (new_cap > 0x80000000U) { new_cap = new_length; break; }
+                new_cap *= 2;
+            }
+
+            uint8_t *new_data = (uint8_t*)kmalloc(new_cap);
+            if (!new_data) {                 /* fall back to an exact fit */
+                new_cap = new_length;
+                new_data = (uint8_t*)kmalloc(new_cap);
+                if (!new_data) return 0;     /* out of memory */
+            }
+            if (node->ptr) {
+                memcpy(new_data, node->ptr, old_length);
+                kfree(node->ptr);
+            }
+            /* Zero everything past the old contents so the invariant
+             * "[length, capacity) is zero" holds for the new buffer. */
+            memset(new_data + old_length, 0, new_cap - old_length);
+            node->ptr = new_data;
+            ramfs_nodes[idx].capacity = new_cap;
+        } else if (offset > old_length) {
+            /* Reusing spare capacity: the gap [old_length, offset) is already
+             * zero by the invariant, but make it explicit for clarity/safety. */
+            memset((uint8_t*)node->ptr + old_length, 0, offset - old_length);
         }
-        memset(new_data + old_length, 0, new_length - old_length);
-        node->ptr = new_data;
         node->length = new_length;
     }
-    
-    uint8_t *file_data = (uint8_t*)node->ptr;
-    memcpy(file_data + offset, buffer, size);
+
+    memcpy((uint8_t*)node->ptr + offset, buffer, size);
     return size;
 }
 
@@ -225,6 +256,7 @@ static fs_node_t *ramfs_create_node(fs_node_t *parent, const char *name,
 
     ramfs_nodes[node_count].node = node;
     ramfs_nodes[node_count].parent = parent;
+    ramfs_nodes[node_count].capacity = 0;
     node_count++;
     return node;
 }
@@ -309,6 +341,7 @@ static int ramfs_remove_node(fs_node_t *node) {
     }
     ramfs_nodes[--node_count].node = NULL;
     ramfs_nodes[node_count].parent = NULL;
+    ramfs_nodes[node_count].capacity = 0;
     return 0;
 }
 
@@ -349,6 +382,7 @@ int ramfs_mount(const char *path, fs_node_t *node) {
     strcpy(node->name, name);
     ramfs_nodes[node_count].node = node;
     ramfs_nodes[node_count].parent = parent;
+    ramfs_nodes[node_count].capacity = 0;
     node_count++;
     return 0;
 }

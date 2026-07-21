@@ -192,11 +192,31 @@ static fs_node_t *fat16_vfs_create(fs_node_t *node, const char *name);
 static int fat16_vfs_unlink(fs_node_t *node, const char *name);
 
 /* Build (or recycle) a node describing a directory entry. node->ptr points at
- * the entry inside the writable image so writes can update its size/cluster. */
+ * the entry inside the writable image so writes can update its size/cluster.
+ *
+ * fs_node_t pointers handed out here are held for as long as a caller keeps
+ * them (e.g. syscall.c's open_file_t.node for an open fd), but the pool below
+ * has no reference counting -- it's a fixed-size, system-wide cache. If this
+ * always advanced the round-robin cursor, more than FAT16_NODE_POOL lookups
+ * in a session (across any files/directories, not just this one) would
+ * silently repoint a still-open fd's node at an unrelated file. Reusing the
+ * existing slot for the same directory entry (matched by `e`, its byte offset
+ * in the image) keeps repeated lookups of an already-tracked file identity
+ * stable; only a lookup of a *new* entry consumes a fresh slot. */
 static fs_node_t *fat16_make_node(uint8_t *e, const char *name) {
-    fs_node_t *node = &fat16_node_pool[fat16_node_next];
+    fs_node_t *node = NULL;
 
-    fat16_node_next = (fat16_node_next + 1) % FAT16_NODE_POOL;
+    for (uint32_t i = 0; i < FAT16_NODE_POOL; i++) {
+        if (fat16_node_pool[i].ptr == e) {
+            node = &fat16_node_pool[i];
+            break;
+        }
+    }
+    if (!node) {
+        node = &fat16_node_pool[fat16_node_next];
+        fat16_node_next = (fat16_node_next + 1) % FAT16_NODE_POOL;
+    }
+
     memset(node, 0, sizeof(*node));
     strcpy(node->name, name);
     node->impl = rd16((uint32_t)(e - fs.img) + 26);   /* first cluster */
@@ -348,9 +368,18 @@ static uint32_t fat16_vfs_write(fs_node_t *node, uint32_t offset,
         if (cl + 1 < needed) cluster = fat16_next_cluster(cluster);
     }
 
-    if (end > rd32((uint32_t)(entry - fs.img) + 28)) {
-        wr32((uint32_t)(entry - fs.img) + 28, end);
-        node->length = end;
+    /* Record only the bytes actually stored. Both loops above can stop early
+     * when the volume runs out of free clusters (fat16_alloc_cluster returns
+     * 0), in which case `written` is short of `size`. Claiming `end` here
+     * would leave the directory entry advertising data that was never written,
+     * so subsequent reads would report a length the cluster chain cannot back.
+     * The written bytes are contiguous from `offset`, so offset + written is
+     * the true end of file data. When the write fully succeeds this is exactly
+     * `end`, i.e. the normal path is unchanged. */
+    uint32_t written_end = offset + written;
+    if (written_end > rd32((uint32_t)(entry - fs.img) + 28)) {
+        wr32((uint32_t)(entry - fs.img) + 28, written_end);
+        node->length = written_end;
     }
     return written;
 }

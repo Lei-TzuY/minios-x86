@@ -76,6 +76,13 @@ typedef struct process {
     uint8_t         in_signal;       /* a handler is currently running */
     uint8_t         stopped;         /* job control: suspended by SIGSTOP */
     uint32_t        thread_count;    /* live threads sharing this address space */
+    /* Set when the main task has called exit()/returned while extra threads
+     * (SYS_THREAD_CREATE) are still running. Full teardown (address space,
+     * open files, zombie transition) is deferred until thread_count reaches
+     * zero -- see process_task_exit()/thread_on_exit() in process.c. Without
+     * this, exiting while a sibling thread is still scheduled would destroy
+     * the address space out from under it. */
+    uint8_t         main_exited;
     uint32_t        alarm_tick;      /* timer tick to raise SIGALRM (0 = none) */
     uint32_t        cpu_ticks;       /* timer ticks spent running this process */
     fork_frame_t    fork_frame;      /* user context a forked child resumes */
@@ -153,7 +160,12 @@ void process_pause(void);
 /* Threads: create a new task that shares the current process's address space
  * and open files, running `entry` on the user stack `stack_top`. Threads see
  * each other's memory directly (no copy-on-write). Returns the thread id, or -1.
- * All threads must be joined before the process exits. */
+ * Joining before the process exits is not required for correctness: if the
+ * main task exits first, process_task_exit() defers freeing the shared
+ * address space until the last remaining thread exits (see thread_count /
+ * main_exited in process_t), so a still-running sibling never sees it
+ * disappear out from under it. A parent's wait()/waitpid() on this process
+ * blocks for that entire deferred period. */
 int32_t process_thread_create(uint32_t entry, uint32_t stack_top);
 /* Block until every thread of the current process has exited. */
 void process_thread_join(void);

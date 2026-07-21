@@ -139,13 +139,19 @@ int rmdir_fs(const char *path) {
     return parent->rmdir(parent, name);
 }
 
-/* Append `comp` (length clen) as a new path component in `out`. */
-static void path_push(char *out, unsigned *olen, const char *comp,
-                      unsigned clen) {
-    if (*olen + 1 + clen + 1 > FS_MAX_PATH) return;  /* best-effort overflow guard */
+/* Append `comp` (length clen) as a new path component in `out`.
+ * Returns 0, or -1 if the component would not fit. Overflow MUST be reported
+ * rather than silently skipped: dropping a component leaves a well-formed but
+ * *different* path (an ancestor directory), and the caller would then operate
+ * on the wrong filesystem object -- e.g. rmdir("sub") under a near-limit cwd
+ * would resolve to the cwd itself. Callers turn this into a clean failure. */
+static int path_push(char *out, unsigned *olen, const char *comp,
+                     unsigned clen) {
+    if (*olen + 1 + clen + 1 > FS_MAX_PATH) return -1;
     out[(*olen)++] = '/';
     for (unsigned i = 0; i < clen; i++) out[(*olen)++] = comp[i];
     out[*olen] = '\0';
+    return 0;
 }
 
 /* Drop the last path component from `out` (handles "..", stops at root). */
@@ -155,8 +161,9 @@ static void path_pop(char *out, unsigned *olen) {
     out[*olen] = '\0';
 }
 
-/* Walk the components of `s`, applying '.', '..' and names onto `out`. */
-static void path_apply(char *out, unsigned *olen, const char *s) {
+/* Walk the components of `s`, applying '.', '..' and names onto `out`.
+ * Returns 0, or -1 if any component overflowed the output buffer. */
+static int path_apply(char *out, unsigned *olen, const char *s) {
     unsigned i = 0;
 
     while (s[i]) {
@@ -172,8 +179,9 @@ static void path_apply(char *out, unsigned *olen, const char *s) {
             path_pop(out, olen);
             continue;
         }
-        path_push(out, olen, s + start, clen);
+        if (path_push(out, olen, s + start, clen) != 0) return -1;
     }
+    return 0;
 }
 
 int vfs_resolve_path(const char *cwd, const char *path, char *out) {
@@ -188,9 +196,13 @@ int vfs_resolve_path(const char *cwd, const char *path, char *out) {
 
     out[0] = '\0';
 
-    /* Relative paths start from the working directory. */
-    if (path[0] != '/' && cwd && cwd[0]) path_apply(out, &olen, cwd);
-    path_apply(out, &olen, path);
+    /* Relative paths start from the working directory. A path that does not
+     * fit is rejected outright (see path_push) rather than silently resolving
+     * to a truncated, different path. */
+    if (path[0] != '/' && cwd && cwd[0]) {
+        if (path_apply(out, &olen, cwd) != 0) return -1;
+    }
+    if (path_apply(out, &olen, path) != 0) return -1;
 
     if (olen == 0) { out[0] = '/'; out[1] = '\0'; }  /* normalised root */
     if (olen + 1 >= FS_MAX_PATH) return -1;

@@ -28,18 +28,57 @@ void int_to_ascii(int n, char str[]) {
     }
 }
 
+/* memset/memcpy are on the hot path everywhere in the kernel (zeroing every
+ * demand-paged/COW frame, every ATA sector, every filesystem read/write), so
+ * a plain byte-at-a-time loop is a real cost. Both fill/copy 4 bytes at a
+ * time once the pointer(s) involved are word-aligned, falling back to a byte
+ * loop for the unaligned head/tail (and, for memcpy, for the whole span if
+ * src and dest turn out to have different alignment) -- same behavior as
+ * before, just fewer loop iterations on the common (aligned) case. */
 void *memset(void *dest, int val, size_t len) {
     uint8_t *ptr = (uint8_t *)dest;
-    while (len-- > 0)
-        *ptr++ = (uint8_t)val;
+    uint8_t v8 = (uint8_t)val;
+
+    while (len > 0 && ((uintptr_t)ptr & 3U) != 0) {
+        *ptr++ = v8;
+        len--;
+    }
+
+    if (len >= 4) {
+        uint32_t v32 = (uint32_t)v8 * 0x01010101U;
+        uint32_t *p32 = (uint32_t *)ptr;
+        size_t words = len / 4;
+
+        len -= words * 4;
+        while (words-- > 0) *p32++ = v32;
+        ptr = (uint8_t *)p32;
+    }
+
+    while (len-- > 0) *ptr++ = v8;
     return dest;
 }
 
 void *memcpy(void *dest, const void *src, size_t len) {
     uint8_t *d = (uint8_t *)dest;
     const uint8_t *s = (const uint8_t *)src;
-    while (len-- > 0)
+
+    while (len > 0 && ((uintptr_t)d & 3U) != 0) {
         *d++ = *s++;
+        len--;
+    }
+
+    if (len >= 4 && ((uintptr_t)s & 3U) == 0) {
+        uint32_t *d32 = (uint32_t *)d;
+        const uint32_t *s32 = (const uint32_t *)s;
+        size_t words = len / 4;
+
+        len -= words * 4;
+        while (words-- > 0) *d32++ = *s32++;
+        d = (uint8_t *)d32;
+        s = (const uint8_t *)s32;
+    }
+
+    while (len-- > 0) *d++ = *s++;
     return dest;
 }
 
