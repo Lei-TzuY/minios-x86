@@ -40,6 +40,13 @@ static inline Header *umalloc_morecore(unsigned nu) {
     Header *up;
 
     if (nu < UMALLOC_NALLOC) nu = UMALLOC_NALLOC;
+
+    /* sbrk takes a signed increment. Reject sizes whose byte count would not
+     * fit, rather than letting the cast wrap negative -- that would be read as
+     * a request to SHRINK the heap, and sbrk would happily return a "valid"
+     * pointer into memory the program does not own. */
+    if (nu > (unsigned)0x7FFFFFFF / sizeof(Header)) return 0;
+
     cp = (char *)sys_sbrk((int)(nu * sizeof(Header)));
     if (cp == (char *)-1) return 0;   /* out of memory */
 

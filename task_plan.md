@@ -128,6 +128,17 @@ Status: complete
   暫存檔可被刪除以證明無參照洩漏）。
 - 節點數 54、README 程式數 46；clean build 0 warning/0 error、真實離開碼 0。
 
+## Phase 11: Session 8 — SYS_SIGRETURN 未驗證（P0）+ 整數處理硬化
+Status: complete
+- **F14（P0，安全性）**：SYS_SIGRETURN 未驗證就解參照使用者 ESP；任何程式可直接
+  int $0x80 觸發（不需在訊號處理常式中），讓核心在 ring 0 讀未映射位址 →
+  **整台機器停機**。與 F2 同類——F2 只修了寫入側，讀取側是當時的疏漏。
+  修法：解參照前驗證整個 sigcontext 框在使用者堆疊範圍內，否則只殺該行程。
+  新增 user/sigretguard.c 實際執行攻擊驗證（系統存活 = 通過）。
+- **F15（P3）**：sys_sbrk 對 INT32_MIN 取負是 UB，改用無號運算。
+- **F16（P3）**：umalloc 向 sbrk 要求記憶體時的 int 溢位可能變成「縮小堆積」。
+- 節點數 55、README 程式數 47；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目
