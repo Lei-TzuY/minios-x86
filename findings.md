@@ -361,6 +361,33 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   上不會自然發生，故未另寫測試（誠實記錄的驗證缺口）；malloctest/tail/sort
   等既有的配置器測試修改後全數通過。
 
+### F17 [P2][正確性] kill 一個多執行緒行程只殺得掉「當下正在執行的那一個 task」，
+其餘 thread 存活且請求已被清除 → 行程永遠停在 RUNNING
+- 檔案: process.c `process_check_kill`
+- 該函式在計時器中斷中執行，殺掉「當前 task 且屬於目標行程」的那一個，然後
+  **立刻** `kill_request_pid = -1`。單執行緒行程沒問題（那一個 task 就是全部），
+  但多執行緒行程只死一個 task：其餘 thread 繼續跑，而 kill 請求已消失，
+  於是**永遠不會再被殺**。行程停在 PROCESS_RUNNING，任何 wait 它的人也永遠阻塞。
+- 修復（一行移除）: 不在此清除請求，讓函式開頭既有的 stale 檢查
+  （`proc->state != PROCESS_RUNNING`）在最後一個 task 結束、
+  `process_finish_exit` 把狀態轉為 ZOMBIE（或行程被釋放）之後自然清掉。
+  其餘 thread 會在各自成為 current 時陸續被殺。pid 是單調遞增的，
+  所以請求殘留一個 tick 不會誤殺別的行程。
+- **誠實記錄的殘留限制**：若某個 thread 長期停在 `while (cond) task_block_current(ch);`
+  這類等待迴圈中，它不會成為 current，因此**仍然殺不到**。要處理這種情況需要
+  「可中斷睡眠」（每個阻塞點都檢查待處理的 kill/signal 並回傳 EINTR），那會動到
+  sem_wait / pipe_read / keyboard_read / process_wait / waitpid / pause /
+  thread_join / timer_sleep 全部呼叫點，屬於較大的架構改動，依保守原則本輪不做。
+  已在程式碼註解中明確寫出這個限制。
+- 狀態: **已修＋已驗證**。新增 user/killthread.c：建立一個**持續可排程**（忙碌
+  迴圈，確保計時器中斷必定在它是 current 時發生）的 worker thread，接著
+  `sys_kill(getpid(), SIGKILL)` 殺自己所屬的行程。以背景方式（`&`）執行，因此
+  失敗時不會有人阻塞等待、不會變成測試 hang。
+  驗證方式很強：若 worker 存活，行程會維持 RUNNING，測試結尾既有的
+  `Processes: running=0 zombies=0` 斷言就會失敗。實測結果為
+  `[killthread armed]` 出現、`[killthread SURVIVED]` 不存在、且結尾
+  `running=0 / blocked=0 / sleeping=0`，證明兩個 task 都確實被終止。
+
 ## 功能擴充（已實作）
 
 ### FEAT1 執行檔改走 VFS 查找：可從任何已掛載的檔案系統執行程式
@@ -436,13 +463,16 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   PERF2**（改為幾何成長、攤還 O(1) append）。
 - ~~**task_wake_one 是 LIFO 不是 FIFO**~~：**已於 Session 3 改為 FIFO，見上方
   FAIR1**；此改動同時暴露並促成了 F10（依身分喚醒特定 task）的修復。
-- **process_send_signal 對多執行緒 process 的定位不完整**：只會嘗試喚醒
-  `process->task`（主 task），如果實際被阻塞、需要遞送訊號的是
-  SYS_THREAD_CREATE 產生的其他 thread，該 thread 不會被正確喚醒。miniOS
-  的 signal 模型本來就是設計給單一使用者主控流程的（thread 主要拿來做
-  threadtest.c 那種共享記憶體示範），這個落差在文件/註解中沒有特別提及，
-  值得記錄成已知限制，但要正確支援需要重新設計「訊號要送給 process 的哪個
-  task」，改動面較大，本輪不做。
+- **多執行緒行程的訊號/終止仍無法觸及「長期阻塞中的 thread」**（範圍已於
+  Session 9 縮小）：`kill` 本身已由 F17 修好——請求會保留到行程真正結束，
+  各 thread 在成為 current 時陸續被殺。**剩下的真正限制**是：停在
+  `while (cond) task_block_current(ch);` 這類等待迴圈中的 thread 永遠不會成為
+  current，因此既收不到訊號遞送、也殺不掉（`process_send_signal` 也只喚醒
+  `process->task`）。根治需要「可中斷睡眠」：每個阻塞點都要檢查待處理的
+  kill/signal 並回傳 EINTR，牽涉 sem_wait / pipe_read / pipe_write /
+  keyboard_read / process_wait / process_waitpid / process_pause /
+  process_thread_join / timer_sleep 全部呼叫點，是明顯的架構改動且回歸風險高，
+  依保守原則不做。已在 process_check_kill 的註解中寫明。
 - ~~**elf_loader 只從 RAMFS 載入可執行檔**~~：**已於 Session 6 實作，見下方
   FEAT1**（改走 VFS，可從任何已掛載的檔案系統執行程式）。
 

@@ -248,3 +248,25 @@
   另確認動到 umalloc.h 後 malloctest/tail/sort（`[malloc test passed]`、`1 12 62`、
   `alpha`/`charlie`）與 sbrk 相關路徑（`[demand paging ok]`）全數不受影響。
   節點數斷言 55、README 程式數 47。
+
+## Session 9 — 2026-07-21
+
+- **修 F17（P2）**：kill 一個多執行緒行程只殺得掉「當下正在執行的那個 task」。
+  `process_check_kill` 殺掉當前 task 後**立刻**清除 `kill_request_pid`，於是其餘
+  thread 繼續存活、請求已消失，行程永遠停在 PROCESS_RUNNING，任何 wait 它的人
+  也永遠阻塞。
+  修法是一行移除：不在此清除請求，交給函式開頭既有的 stale 檢查在最後一個 task
+  結束、狀態轉為 ZOMBIE 後自然清掉；其餘 thread 各自成為 current 時陸續被殺。
+  pid 單調遞增，請求殘留一個 tick 不會誤殺別的行程。
+  **殘留限制（已在程式碼註解與 findings 誠實記錄）**：長期停在
+  `while (cond) task_block_current(ch);` 的 thread 不會成為 current，仍殺不到；
+  要處理需要「可中斷睡眠」，會動到所有阻塞呼叫點，屬較大架構改動，本輪不做。
+  新增 user/killthread.c：worker 用忙碌迴圈維持可排程（確保計時器中斷必定在它
+  是 current 時發生），main 再 `sys_kill(getpid(), SIGKILL)`。以背景 `&` 執行，
+  失敗時不會有人阻塞等待、不會變成測試 hang。驗證很強：worker 若存活，行程會
+  維持 RUNNING，結尾既有的 `Processes: running=0` 斷言就會失敗。實測
+  `[killthread armed]` 出現、`SURVIVED` 不存在、結尾
+  `running=0 / blocked=0 / sleeping=0`，證明兩個 task 都被終止。
+
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
+  節點數斷言 56、README 程式數 48。
