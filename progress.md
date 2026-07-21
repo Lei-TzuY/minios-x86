@@ -270,3 +270,45 @@
 
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
   節點數斷言 56、README 程式數 48。
+
+## Session 10 — 2026-07-21（方向轉為「建立量測與驗證能力」）
+
+前一輪我對「這個 OS 是否已經完善」給了否定的評估，並指出**我自己工作的弱點**：
+效能改動從未量測、ISO 開機路徑從未驗證、沒有任何單元測試、且第 8 輪才找到一個
+第 2 輪就該發現的 P0。本輪依此排序處理最根本的兩項缺口。
+
+- **CAP1：補上 GRUB/ISO 開機路徑測試**。先前三個測試目標全部走 QEMU `-kernel`，
+  完全繞過 GRUB——README 主打的 ISO 開機路徑**一次都沒被驗證過**。新增
+  `test-iso`：建 ISO、經 GRUB 開機，並同時掛 ATA 磁碟。斷言包含
+  `Initialized PMM from Multiboot memory map.`（證明 GRUB 真的傳入合法的
+  multiboot 資訊結構，這正是兩條路徑的實質差異）與三個檔案系統掛載。
+  ISO 工具鏈屬選用相依，缺少時印 SKIP 並通過，不讓 `make test` 硬性要求。
+  實測：ISO <1s 建好、8 秒內開到 shell、DiskFS/FAT16/procfs 全掛載成功。
+
+- **CAP2：建立原生單元測試框架**（tests/）。純邏輯模組以 `-m32` 編給 host 直接
+  呼叫，4 個套件約 **50,500 個檢查、<1 秒**跑完。涵蓋刻意對準「端對端測不到、
+  且我改過」的地方：memcpy/memset 的每一種對齊組合與長度（含越界守衛）、
+  vfs_resolve_path 的長度邊界（F8）、pmm 的 frame 0 與錯誤 free、heap 的
+  分割/重用/合併。`make test` 現在先跑 unit 再跑 QEMU。
+
+- **關鍵做法：用突變測試驗證新測試真的有牙齒**。新測試第一次全綠很可疑，所以
+  故意注入 5 個 bug 驗證，**4 個被抓到**。第 5 個沒被抓到反而更有價值——追查後
+  發現一個真 bug：
+
+- **修 F18（P3）——由突變測試間接發現**：`pmm_init_region` 的迴圈把 frame 0 標為
+  free 並 `used_blocks--`，之後 `mmap_set(0)` 重新保留卻**沒把計數加回去**，
+  導致回報的可用區塊比實際多一個。實測回報 256、實際只配置得出 255。
+  **兩輪人工審查都漏掉了它。** 實際核心不會踩到（起點被夾在 free_start 之上，
+  frame 0 從不落在釋放區間內），屬潛在缺陷，但是公開 API 的正確性問題。
+  修法：只在原本為 free 時才重新保留並補回計數。新增
+  `test_free_count_is_honest` 以「配置到失敗的實際數量」對照回報值，
+  修復前失敗（255/256）、修復後通過。
+
+- **附帶發現（未修，僅記錄）**：本專案從 Git-for-Windows 提交時做了 CRLF 轉換，
+  而 WSL 內的 git `core.autocrlf` 未設定，因此同一份工作目錄從 WSL 看整棵樹都是
+  「已修改」。不影響建置（gcc 吃 CRLF 沒問題），但會讓跨環境的 git 操作誤判。
+  要修需加 .gitattributes 並統一行尾，那會產生涵蓋全樹的巨大 diff，故不在本輪
+  順手處理。
+
+- **驗證**：clean build 0 warning / 0 error；`make test`（現含 unit + test-iso）
+  **真實離開碼 0**，且已確認 unit 階段與 ISO 階段都實際執行（非 SKIP）。

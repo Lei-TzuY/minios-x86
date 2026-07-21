@@ -19,3 +19,9 @@ runlog.sh
 *.swp
 *~
 .DS_Store
+
+# Native unit-test binaries (built by `make unit`)
+tests/test_utils
+tests/test_fs_path
+tests/test_pmm
+tests/test_heap
