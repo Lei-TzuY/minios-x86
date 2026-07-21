@@ -30,7 +30,7 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
 # to themselves, and from replacing the calls under test with its builtins.
 UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
 UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
-            tests/test_fat16
+            tests/test_fat16 tests/test_diskfs
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -50,6 +50,12 @@ tests/test_fat16: tests/test_fat16.c tests/test.h fat16.c fat16.h fs.c fs.h \
                   utils.c utils.h fat16_image_embed.c
 	$(CC) $(UNIT_CFLAGS) tests/test_fat16.c fat16.c fs.c utils.c \
 	    fat16_image_embed.c -o $@
+
+# ATA is stubbed with a RAM array by the test itself, so ata.c is not linked:
+# that is what lets the test hand diskfs a deliberately corrupt disk.
+tests/test_diskfs: tests/test_diskfs.c tests/test.h diskfs.c diskfs.h fs.c fs.h \
+                   utils.c utils.h ata.h
+	$(CC) $(UNIT_CFLAGS) tests/test_diskfs.c diskfs.c fs.c utils.c -o $@
 
 unit: $(UNIT_BINS)
 	@fail=0; \
