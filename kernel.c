@@ -120,6 +120,8 @@ extern const uint8_t  redirref_elf_data[];
 extern const uint32_t redirref_elf_size;
 extern const uint8_t  fatref_elf_data[];
 extern const uint32_t fatref_elf_size;
+extern const uint8_t  forkredir_elf_data[];
+extern const uint32_t forkredir_elf_size;
 extern const uint8_t  ush_elf_data[];
 extern const uint32_t ush_elf_size;
 extern const uint8_t  fat16_image_data[];
@@ -1088,9 +1090,10 @@ void kernel_main(uint32_t multiboot_magic, const multiboot_info_t *multiboot) {
     ramfs_create_static_file("pathlim", pathlim_elf_data, pathlim_elf_size);
     ramfs_create_static_file("redirref", redirref_elf_data, redirref_elf_size);
     ramfs_create_static_file("fatref", fatref_elf_data, fatref_elf_size);
+    ramfs_create_static_file("forkredir", forkredir_elf_data, forkredir_elf_size);
     ramfs_create_static_file("ush", ush_elf_data, ush_elf_size);
     ramfs_create_static_file("readme.txt", readme_text, sizeof(readme_text) - 1);
-    terminal_writestring("Loaded RAMFS files: ... ramgrow, pathlim, redirref, fatref, ush, readme.txt\n");
+    terminal_writestring("Loaded RAMFS files: ... pathlim, redirref, fatref, forkredir, ush, readme.txt\n");
 
     __asm__ volatile("sti");
     kernel_shell();

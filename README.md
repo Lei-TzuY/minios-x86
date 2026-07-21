@@ -25,7 +25,7 @@ shells and an automated test suite.
 - **Environment:** per-process environment variables inherited across
   `fork`/`execv`.
 - **Time:** CMOS RTC wall clock (`date`), monotonic uptime, CPU accounting.
-- **User land:** 51 system calls, 45 user programs/demos, a kernel-space shell
+- **User land:** 51 system calls, 46 user programs/demos, a kernel-space shell
   and a **ring-3 user shell (`ush`)** with pipes, redirection, background jobs,
   and shell variables. Programs are loaded through the VFS, so an executable
   can be run from **any mounted filesystem** (e.g. `cp hello fat/hello` then
@@ -102,7 +102,7 @@ Multiboot/GRUB 開機,並以系統呼叫介面在 ring 3 執行使用者程式�
 **job control(SIGSTOP/SIGCONT)**;IPC(pipe、信號、共享記憶體、**計數號誌**);
 三個檔案系統(RAMFS、ATA 的 DiskFS、可讀寫 FAT16)整合在 VFS 之下,外加合成的
 **`/proc`**;per-process 環境變數;RTC 牆鐘時間與 CPU 時間計量;51 個系統呼叫、
-45 支使用者程式、核心 shell 與 **ring-3 使用者 shell(`ush`)**;以及一套
+46 支使用者程式、核心 shell 與 **ring-3 使用者 shell(`ush`)**;以及一套
 確定性的自動化 `make test`。
 
 **這是教學/業餘性質的專案**,適合學習與實驗,非生產用途。
