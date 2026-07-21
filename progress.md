@@ -196,3 +196,26 @@
   同一段跨檔案系統載入程式碼。）
 
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
+  已 commit（88d44ce）。
+
+## Session 7 — 2026-07-21
+
+- **修 F13（P2，Unix 語意）**：`fork` 沒有繼承標準串流。
+  `syscall_copy_user_files` 會複製 fd 3 以上的整張表，但 fd 0/1 的狀態存在
+  `process_t` 的獨立欄位（stdout_node/stdin_node/stdout_pipe/stdin_pipe），
+  fork 完全沒複製 → 子行程一律退回預設裝置。標準寫法
+  `dup2(fd,1); if (fork()==0) write(1,...)` 在 miniOS 上會寫到**終端機**而非
+  重導向的檔案。
+  修法：process_fork 一併繼承這四個欄位並各自取得參照（檔案 `open_fs`、
+  pipe 端點 `pipe_ref_write`/`pipe_ref_read`），由 process_finish_exit 釋放；
+  create_task 失敗的清理路徑也一併釋放。**這是建立在 F11 的參照管理之上**
+  才得以安全實作。
+  新增 user/forkredir.c：main 不重導向（保留報告能力）→ fork child A → A 把
+  stdout 指向檔案後再 fork child B → B 在沒有自行重導向的情況下寫入，位元組
+  必須落在檔案。實測 `[forkredir inherited]`，且斷言 `^childout$` **不得**出現
+  在終端機日誌（證明走的是繼承的重導向），最後刪除暫存檔——若參照洩漏則
+  unlink 會失敗、檔案殘留，會被 RAMFS 節點數斷言抓到。
+
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**；
+  管線與重導向（redirected / piped via dup2 / redirok / `1 3 6`）不受影響。
+  節點數斷言 54，README 程式數 46。

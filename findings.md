@@ -293,6 +293,26 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   測試刻意**不真的刪除**該檔，因此後續既有的 FAT16 測試（cat fat/hello.txt、
   fat/docs/note.txt、寫入 fat/new.txt、ush 下 cd fat）全部照常通過。
 
+### F13 [P2][正確性/Unix 語意] fork 沒有繼承標準串流（fd 0/1），造成描述子繼承
+行為不一致
+- 檔案: process.c `process_fork`
+- `syscall_copy_user_files` 會把 fd 3 以上的整張表複製給子行程，但 fd 0/1 的
+  狀態存在 `process_t` 的獨立欄位（stdout_node / stdin_node / stdout_pipe /
+  stdin_pipe），fork 完全沒有複製 → 子行程一律退回預設裝置。
+  因此下列 Unix 標準寫法在 miniOS 上會得到錯誤結果：
+      `dup2(fd, 1); if (fork() == 0) { write(1, ...); }`
+  子行程會寫到**終端機**而不是重導向的目標檔案。
+- 修復: process_fork 一併繼承四個欄位，並各自取得參照（檔案用 `open_fs`、
+  pipe 端點用 `pipe_ref_write`/`pipe_ref_read`），由 `process_finish_exit`
+  在子行程結束時釋放，帳目平衡。create_task 失敗的清理路徑也一併釋放。
+  這是建立在 F11 的參照管理之上才得以安全實作的。
+- 狀態: **已修＋已驗證**。新增 user/forkredir.c：main 不重導向（保留報告能力）→
+  fork 出 child A → A 把 stdout 指向檔案後再 fork 出 child B → B 在**沒有自行
+  重導向**的情況下寫入，位元組必須落在檔案中。main 讀回檔案確認
+  （`[forkredir inherited]`）。測試同時斷言 `^childout$` **不得**出現在終端機
+  日誌（證明真的走了繼承的重導向而非預設裝置），並在最後刪除暫存檔——若繼承的
+  參照洩漏，unlink 會失敗、檔案殘留，RAMFS 節點數斷言會抓到。
+
 ## 功能擴充（已實作）
 
 ### FEAT1 執行檔改走 VFS 查找：可從任何已掛載的檔案系統執行程式

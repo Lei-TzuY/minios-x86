@@ -118,6 +118,16 @@ Status: complete
 - 驗證：`cp hello fat/hello` → `fat/hello`（從 FAT16 執行）→ `rm fat/hello`；
   "Hello from user space!" 次數 2→3、無 exec 錯誤。
 
+## Phase 10: Session 7 — fork 繼承標準串流
+Status: complete
+- **F13（P2）**：fork 只複製 fd 3+ 的表，沒複製 fd 0/1（stdout_node/stdin_node/
+  stdout_pipe/stdin_pipe），導致 `dup2(fd,1); fork()` 後子行程寫到終端機而非
+  重導向目標。改為一併繼承並各自取參照，由 process_finish_exit 釋放。
+  建立在 F11 的參照管理之上。
+- 新增 user/forkredir.c（祖孫三層驗證繼承，並斷言輸出未洩漏到終端機、
+  暫存檔可被刪除以證明無參照洩漏）。
+- 節點數 54、README 程式數 46；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目
