@@ -29,7 +29,8 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
 # -fno-builtin stops gcc from turning our own memcpy/memset bodies into calls
 # to themselves, and from replacing the calls under test with its builtins.
 UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
-UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap
+UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
+            tests/test_fat16
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -42,6 +43,13 @@ tests/test_pmm: tests/test_pmm.c tests/test.h pmm.c pmm.h
 
 tests/test_heap: tests/test_heap.c tests/test.h heap.c heap.h pmm.h
 	$(CC) $(UNIT_CFLAGS) tests/test_heap.c heap.c -o $@
+
+# Links the same embedded image the kernel mounts, so the tests run against
+# the real generated filesystem rather than a hand-built approximation.
+tests/test_fat16: tests/test_fat16.c tests/test.h fat16.c fat16.h fs.c fs.h \
+                  utils.c utils.h fat16_image_embed.c
+	$(CC) $(UNIT_CFLAGS) tests/test_fat16.c fat16.c fs.c utils.c \
+	    fat16_image_embed.c -o $@
 
 unit: $(UNIT_BINS)
 	@fail=0; \
