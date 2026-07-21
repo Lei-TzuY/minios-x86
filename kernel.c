@@ -124,6 +124,8 @@ extern const uint8_t  forkredir_elf_data[];
 extern const uint32_t forkredir_elf_size;
 extern const uint8_t  sigretguard_elf_data[];
 extern const uint32_t sigretguard_elf_size;
+extern const uint8_t  killthread_elf_data[];
+extern const uint32_t killthread_elf_size;
 extern const uint8_t  ush_elf_data[];
 extern const uint32_t ush_elf_size;
 extern const uint8_t  fat16_image_data[];
@@ -1094,9 +1096,10 @@ void kernel_main(uint32_t multiboot_magic, const multiboot_info_t *multiboot) {
     ramfs_create_static_file("fatref", fatref_elf_data, fatref_elf_size);
     ramfs_create_static_file("forkredir", forkredir_elf_data, forkredir_elf_size);
     ramfs_create_static_file("sigretguard", sigretguard_elf_data, sigretguard_elf_size);
+    ramfs_create_static_file("killthread", killthread_elf_data, killthread_elf_size);
     ramfs_create_static_file("ush", ush_elf_data, ush_elf_size);
     ramfs_create_static_file("readme.txt", readme_text, sizeof(readme_text) - 1);
-    terminal_writestring("Loaded RAMFS files: ... redirref, fatref, forkredir, sigretguard, ush, readme.txt\n");
+    terminal_writestring("Loaded RAMFS files: ... fatref, forkredir, sigretguard, killthread, ush, readme.txt\n");
 
     __asm__ volatile("sti");
     kernel_shell();

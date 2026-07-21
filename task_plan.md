@@ -139,6 +139,16 @@ Status: complete
 - **F16（P3）**：umalloc 向 sbrk 要求記憶體時的 int 溢位可能變成「縮小堆積」。
 - 節點數 55、README 程式數 47；clean build 0 warning/0 error、真實離開碼 0。
 
+## Phase 12: Session 9 — 多執行緒行程的 kill
+Status: complete
+- **F17（P2）**：process_check_kill 殺掉當前 task 後立刻清除 kill 請求，導致
+  多執行緒行程只死一個 task、其餘存活且再也殺不到，行程永遠 RUNNING。
+  一行移除即可：交給既有的 stale 檢查在行程真正結束後清除。
+- 殘留限制（已誠實記錄於程式碼註解與 findings）：長期阻塞在等待迴圈中的 thread
+  不會成為 current，仍殺不到；需要可中斷睡眠，屬較大架構改動，本輪不做。
+- 新增 user/killthread.c（背景執行，失敗時不 hang；靠結尾 running=0 斷言鑑別）。
+- 節點數 56、README 程式數 48；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目

@@ -766,7 +766,17 @@ void process_check_kill(void) {
     t = task_get_current();
     if (!t || !t->process) return;
     if (t->process->pid == kill_request_pid) {
-        kill_request_pid = -1;
+        /* Deliberately leave the request pending: a process may own several
+         * tasks (SYS_THREAD_CREATE), and this only terminates the one that
+         * happens to be current. Clearing here would let the remaining threads
+         * survive the kill, leaving the process RUNNING forever -- and anything
+         * waiting on it blocked forever. Each sibling is killed as it becomes
+         * current instead; the staleness check above drops the request once the
+         * last one has gone and the process is no longer RUNNING.
+         *
+         * A thread parked indefinitely inside a `while (cond) block;` wait
+         * never becomes current, so it still cannot be reached this way --
+         * that needs interruptible sleeps, which this kernel does not have. */
         task_exit(-130);  /* noreturn; EOI was already sent by irq_handler */
     }
 }
