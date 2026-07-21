@@ -163,6 +163,16 @@ Status: complete
   used_blocks，導致可用區塊回報多一個。兩輪人工審查都漏掉。已修＋加測試。
 - 記錄未修項：Git-for-Windows 的 CRLF 轉換使 WSL 內 git 視整棵樹為已修改。
 
+## Phase 14: Session 11 — FAT16 單元測試（覆蓋最薄處 + 關閉 F9 驗證缺口）
+Status: complete
+- **CAP3**：新增 tests/test_fat16.c，連結核心實際內嵌的同一份映像，每個測試
+  重新掛載。37,351 檢查。重點涵蓋叢集鏈延伸/走訪、叢集邊界上下的偏移讀取、
+  部分覆寫、建立刪除與叢集回收、開啟中不得 unlink、8.3 名稱限制。
+- **關閉 F9 驗證缺口**：單元測試可安全灌爆磁碟區（QEMU 裡不行），直接驗證
+  叢集耗盡時 `node->length == written`。findings.md 該註記已更新。
+- **突變測試**：注入 5 個 bug 全部被抓到，含 F9/F12 的回歸。
+- clean build 0 warning/0 error、`make test` 真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目
