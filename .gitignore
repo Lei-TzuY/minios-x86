@@ -26,3 +26,4 @@ tests/test_fs_path
 tests/test_pmm
 tests/test_heap
 tests/test_fat16
+tests/test_diskfs
