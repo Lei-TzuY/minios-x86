@@ -39,6 +39,13 @@ typedef struct {
 static fat16_fs_t fs;
 static fs_node_t fat16_root_node;
 static fs_node_t fat16_node_pool[FAT16_NODE_POOL];
+/* Open-descriptor count per pool slot. RAMFS and DiskFS both track this (via
+ * the node's impl bits and diskfs_open_refs respectively); FAT16 needs it for
+ * the same two reasons: a slot that is still open must not be recycled to
+ * describe a different file, and a file that is still open must not have its
+ * cluster chain freed by unlink (those clusters could be handed to a new file
+ * while the old descriptor still reads through them). */
+static uint32_t fat16_node_refs[FAT16_NODE_POOL];
 static uint32_t fat16_node_next;
 static dirent_t fat16_dirent;
 
@@ -186,6 +193,8 @@ static uint32_t fat16_vfs_read(fs_node_t *node, uint32_t offset,
                                uint32_t size, uint8_t *buffer);
 static uint32_t fat16_vfs_write(fs_node_t *node, uint32_t offset,
                                 uint32_t size, uint8_t *buffer);
+static void fat16_vfs_open(fs_node_t *node);
+static void fat16_vfs_close(fs_node_t *node);
 static dirent_t *fat16_vfs_readdir(fs_node_t *node, uint32_t index);
 static fs_node_t *fat16_vfs_finddir(fs_node_t *node, const char *name);
 static fs_node_t *fat16_vfs_create(fs_node_t *node, const char *name);
@@ -204,19 +213,28 @@ static int fat16_vfs_unlink(fs_node_t *node, const char *name);
  * in the image) keeps repeated lookups of an already-tracked file identity
  * stable; only a lookup of a *new* entry consumes a fresh slot. */
 static fs_node_t *fat16_make_node(uint8_t *e, const char *name) {
-    fs_node_t *node = NULL;
+    fs_node_t *node;
+    uint32_t slot = FAT16_NODE_POOL;
 
+    /* Reuse the slot already describing this directory entry, so repeated
+     * lookups of one file keep the same node identity (and its open count). */
     for (uint32_t i = 0; i < FAT16_NODE_POOL; i++) {
-        if (fat16_node_pool[i].ptr == e) {
-            node = &fat16_node_pool[i];
-            break;
-        }
-    }
-    if (!node) {
-        node = &fat16_node_pool[fat16_node_next];
-        fat16_node_next = (fat16_node_next + 1) % FAT16_NODE_POOL;
+        if (fat16_node_pool[i].ptr == e) { slot = i; break; }
     }
 
+    /* Otherwise claim a slot that nobody holds open. Recycling a slot with
+     * live descriptors would silently repoint them at a different file, so
+     * fail the lookup instead -- callers treat NULL as "not found". */
+    if (slot == FAT16_NODE_POOL) {
+        for (uint32_t n = 0; n < FAT16_NODE_POOL; n++) {
+            uint32_t i = (fat16_node_next + n) % FAT16_NODE_POOL;
+            if (fat16_node_refs[i] == 0) { slot = i; break; }
+        }
+        if (slot == FAT16_NODE_POOL) return NULL;   /* every node is open */
+        fat16_node_next = (slot + 1) % FAT16_NODE_POOL;
+    }
+
+    node = &fat16_node_pool[slot];
     memset(node, 0, sizeof(*node));
     strcpy(node->name, name);
     node->impl = rd16((uint32_t)(e - fs.img) + 26);   /* first cluster */
@@ -234,8 +252,36 @@ static fs_node_t *fat16_make_node(uint8_t *e, const char *name) {
         node->length = rd32((uint32_t)(e - fs.img) + 28);
         node->read = fat16_vfs_read;
         node->write = fat16_vfs_write;
+        node->open = fat16_vfs_open;
+        node->close = fat16_vfs_close;
     }
     return node;
+}
+
+/* Index of `node` in the pool, or -1 (the /fat root node is not pooled). */
+static int fat16_node_slot(const fs_node_t *node) {
+    for (uint32_t i = 0; i < FAT16_NODE_POOL; i++) {
+        if (&fat16_node_pool[i] == node) return (int)i;
+    }
+    return -1;
+}
+
+static void fat16_vfs_open(fs_node_t *node) {
+    int slot = fat16_node_slot(node);
+    if (slot >= 0) fat16_node_refs[slot]++;
+}
+
+static void fat16_vfs_close(fs_node_t *node) {
+    int slot = fat16_node_slot(node);
+    if (slot >= 0 && fat16_node_refs[slot] > 0) fat16_node_refs[slot]--;
+}
+
+/* True if any open descriptor still refers to the directory entry at `e`. */
+static int fat16_entry_is_open(const uint8_t *e) {
+    for (uint32_t i = 0; i < FAT16_NODE_POOL; i++) {
+        if (fat16_node_pool[i].ptr == e && fat16_node_refs[i] > 0) return 1;
+    }
+    return 0;
 }
 
 static dirent_t *fat16_vfs_readdir(fs_node_t *node, uint32_t index) {
@@ -402,6 +448,12 @@ static int fat16_vfs_unlink(fs_node_t *node, const char *name) {
     }
     if (!e || (e[11] & FAT16_DIR_ATTR_DIR)) return -1;   /* files only */
 
+    /* Refuse while the file is still open, matching RAMFS and DiskFS. Freeing
+     * the chain now would return those clusters to the free pool, so a later
+     * write could hand them to a different file while the existing descriptor
+     * still reads through them -- returning another file's contents. */
+    if (fat16_entry_is_open(e)) return -1;
+
     /* Free the cluster chain, then mark the entry deleted. */
     uint32_t cluster = rd16((uint32_t)(e - fs.img) + 26);
     while (cluster >= 2 && cluster < FAT16_EOC) {
@@ -450,6 +502,8 @@ void fat16_install(const uint8_t *image, uint32_t size) {
     uint8_t *copy;
 
     memset(&fs, 0, sizeof(fs));
+    memset(fat16_node_pool, 0, sizeof(fat16_node_pool));
+    memset(fat16_node_refs, 0, sizeof(fat16_node_refs));
     fat16_node_next = 0;
     if (!image || size < 512) return;
 
