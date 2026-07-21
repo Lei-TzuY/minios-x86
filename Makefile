@@ -16,7 +16,38 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
        malloctest_embed.o wc_embed.o grep_embed.o \
        head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o forkredir_embed.o sigretguard_embed.o killthread_embed.o ush_embed.o
 
-.PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot test-shell
+.PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot test-iso test-shell unit
+
+# --- Native unit tests -------------------------------------------------------
+# Kernel modules that are pure logic are compiled for the host and called
+# directly. They finish in well under a second, so a logic regression surfaces
+# immediately instead of after the multi-minute QEMU run, and they can probe
+# edge cases the shell cannot reach at all (every buffer alignment, the exact
+# path-length boundary, a heap coalescing decision).
+#
+# -m32 matches the kernel's pointer size, which matters for the allocators.
+# -fno-builtin stops gcc from turning our own memcpy/memset bodies into calls
+# to themselves, and from replacing the calls under test with its builtins.
+UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
+UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap
+
+tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
+	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
+
+tests/test_fs_path: tests/test_fs_path.c tests/test.h fs.c fs.h utils.c utils.h
+	$(CC) $(UNIT_CFLAGS) tests/test_fs_path.c fs.c utils.c -o $@
+
+tests/test_pmm: tests/test_pmm.c tests/test.h pmm.c pmm.h
+	$(CC) $(UNIT_CFLAGS) tests/test_pmm.c pmm.c -o $@
+
+tests/test_heap: tests/test_heap.c tests/test.h heap.c heap.h pmm.h
+	$(CC) $(UNIT_CFLAGS) tests/test_heap.c heap.c -o $@
+
+unit: $(UNIT_BINS)
+	@fail=0; \
+	for t in $(UNIT_BINS); do ./$$t || fail=1; done; \
+	if [ $$fail -ne 0 ]; then echo "unit tests FAILED"; exit 1; fi; \
+	echo "unit tests passed"
 
 all: kernel.bin
 
@@ -497,6 +528,7 @@ $(ATA_IMAGE): gen_ata_image.py
 clean:
 	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c forkredir_embed.c sigretguard_embed.c killthread_embed.c ush_embed.c fat16.img fat16_image_embed.c
 	rm -rf isodir miniOS.iso
+	rm -f $(UNIT_BINS)
 	$(MAKE) -C user clean
 
 run: kernel.bin $(ATA_IMAGE)
@@ -525,7 +557,37 @@ run-headless: kernel.bin $(ATA_IMAGE)
 	timeout 5s $(QEMU) $(ATA_DRIVE) -display none -serial none -debugcon stdio \
 	    -no-reboot -no-shutdown -kernel kernel.bin || test $$? -eq 124
 
-test: test-ata-absent test-boot test-shell
+test: unit test-ata-absent test-boot test-iso test-shell
+
+# Boot the real GRUB/ISO path, the one used on VMs and hardware. The other
+# targets all use QEMU's -kernel multiboot loader, which bypasses the
+# bootloader entirely -- so without this, nothing verified that the ISO the
+# README tells people to build actually boots. Asserting the Multiboot memory
+# map in particular proves GRUB handed us a valid info structure, which is the
+# substantive difference between the two paths. The ATA disk is attached as
+# well so the disk-backed filesystems are exercised under this boot too.
+# Skipped (not failed) when the ISO tooling is absent, since it is an optional
+# host dependency that `make test` should not hard-require.
+test-iso: kernel.bin grub.cfg $(ATA_IMAGE)
+	@if ! command -v grub-mkrescue >/dev/null 2>&1; then \
+	    echo "SKIP test-iso: grub-mkrescue not installed"; \
+	    echo "  (sudo apt install -y grub-pc-bin grub-common xorriso mtools)"; \
+	    exit 0; \
+	fi; \
+	$(MAKE) iso >/dev/null || exit 1; \
+	log=$$(mktemp); \
+	status=0; \
+	timeout 8s $(QEMU) -cdrom miniOS.iso $(ATA_DRIVE) -display none \
+	    -serial none -debugcon stdio -no-reboot -no-shutdown \
+	    > $$log 2>&1 || status=$$?; \
+	cat $$log; \
+	grep -q "Initialized PMM from Multiboot memory map." $$log && \
+	grep -q "Mounted DiskFS at /disk." $$log && \
+	grep -q "Mounted FAT16 at /fat." $$log && \
+	grep -q "Mounted procfs at /proc." $$log && \
+	grep -q "miniOS shell" $$log; result=$$?; \
+	rm -f $$log; \
+	test $$result -eq 0 && test $$status -eq 124
 
 test-ata-absent: kernel.bin
 	@log=$$(mktemp); \

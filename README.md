@@ -30,8 +30,10 @@ shells and an automated test suite.
   and shell variables. Programs are loaded through the VFS, so an executable
   can be run from **any mounted filesystem** (e.g. `cp hello fat/hello` then
   `fat/hello`), not just the built-in RAMFS.
-- **Quality:** a deterministic, end-to-end `make test` suite driven through the
-  QEMU monitor.
+- **Quality:** two layers of testing. Native unit tests compile the pure-logic
+  modules for the host and run in under a second; an end-to-end suite then
+  drives the shell through the QEMU monitor, including a boot of the real
+  GRUB/ISO path. `make test` runs all of it.
 
 ## Requirements
 
@@ -48,8 +50,16 @@ sudo apt install -y grub-pc-bin grub-common xorriso mtools
 ```sh
 make              # build kernel.bin
 make run          # run in QEMU with a test disk attached
-make test         # run the full automated test suite
+make unit         # native unit tests only (sub-second)
+make test         # everything: unit tests, then the QEMU/ISO suite
 ```
+
+`make unit` compiles the pure-logic kernel modules (`utils`, `fs` path
+resolution, `pmm`, `heap`) for the host and exercises them directly, so a logic
+regression surfaces immediately instead of after the multi-minute emulation
+run. `make test` runs those first, then boots the kernel in QEMU — including
+once through the real GRUB/ISO path, which is skipped with a notice if the ISO
+tooling is not installed.
 
 Build a GRUB-bootable ISO (for VirtualBox/VMware/real hardware):
 
@@ -83,8 +93,9 @@ ush                 # drop into the ring-3 user shell
 - Kernel C/ASM sources live at the top level (`kernel.c`, `paging.c`,
   `process.c`, `syscall.c`, filesystem and driver modules, `boot.s`, …).
 - `user/` — ring-3 programs and the user shell, plus their syscall wrappers.
+- `tests/` — native (host-compiled) unit tests for the pure-logic modules.
 - `gen_*.py` — helpers that embed user ELFs and build the disk/FAT images.
-- `Makefile` — build, `run`, `iso`, and the `test*` targets.
+- `Makefile` — build, `run`, `iso`, `unit`, and the `test*` targets.
 
 ## License
 
@@ -103,7 +114,8 @@ Multiboot/GRUB 開機,並以系統呼叫介面在 ring 3 執行使用者程式�
 三個檔案系統(RAMFS、ATA 的 DiskFS、可讀寫 FAT16)整合在 VFS 之下,外加合成的
 **`/proc`**;per-process 環境變數;RTC 牆鐘時間與 CPU 時間計量;51 個系統呼叫、
 48 支使用者程式、核心 shell 與 **ring-3 使用者 shell(`ush`)**;以及一套
-確定性的自動化 `make test`。
+兩層測試:原生單元測試(`make unit`,不到一秒)加上透過 QEMU monitor 驅動的
+端對端測試(含真實 GRUB/ISO 開機路徑),`make test` 會全部跑過。
 
 **這是教學/業餘性質的專案**,適合學習與實驗,非生產用途。
 

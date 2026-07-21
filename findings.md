@@ -388,6 +388,62 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   `[killthread armed]` 出現、`[killthread SURVIVED]` 不存在、且結尾
   `running=0 / blocked=0 / sleeping=0`，證明兩個 task 都確實被終止。
 
+## 驗證能力建設（Session 10）
+
+### CAP1 補上 GRUB/ISO 開機路徑的測試（原本完全沒被驗證過）
+- 檔案: Makefile `test-iso`
+- 先前 `make test` 只有 test-ata-absent / test-boot / test-shell，**全部走 QEMU 的
+  `-kernel` multiboot 載入器**，完全繞過 GRUB。也就是說 README 主打、要人拿去燒
+  ISO 在 VM/實機開機的那條路徑，**一次都沒被驗證過**。
+- 新增 `test-iso`：建出 ISO、以 `-cdrom` 經 GRUB 開機，並同時掛上 ATA 磁碟讓
+  磁碟型檔案系統也在這條路徑下被涵蓋。斷言包含
+  **`Initialized PMM from Multiboot memory map.`**——這一條特別重要，它證明 GRUB
+  真的傳入了合法的 multiboot 資訊結構（含記憶體映射），正是 GRUB 路徑與
+  `-kernel` 路徑的實質差異——以及三個檔案系統掛載與 shell 啟動。
+- ISO 工具鏈（grub-mkrescue/xorriso/mtools）屬選用相依，缺少時**印出 SKIP 並通過**
+  而非失敗，以免 `make test` 對所有人硬性要求這些套件。
+- 實測：ISO 建置 <1s、8 秒內開到 shell，DiskFS/FAT16/procfs 全數掛載成功。
+
+### CAP2 建立原生單元測試框架（tests/），並用突變測試驗證它真的有效
+- 檔案: tests/test.h、tests/test_{utils,fs_path,pmm,heap}.c、Makefile `unit`
+- 動機：先前**完全沒有單元測試**，214 條 grep 斷言全靠 QEMU 送鍵盤跑端對端，
+  單次約 4 分鐘且時序脆弱；任一斷言失敗都難以定位。
+- 作法：把純邏輯模組以 `-m32`（比照核心的指標寬度）編給 host 直接呼叫。
+  `-fno-builtin` 避免 gcc 把我們自己的 memcpy/memset 實作轉成對自身的呼叫、
+  也避免受測呼叫被換成內建版本。heap 以 stub 取代 pmm（真 pmm 回傳的是不可
+  解參照的假指標）。全部 4 個套件約 50,500 個檢查，**執行時間 <1 秒**。
+- 涵蓋重點刻意對準「端對端測不到、且我改過」的地方：memcpy/memset 的
+  **每一種對齊組合與長度**（含越界守衛位元組）、vfs_resolve_path 的
+  **長度邊界**（F8 修的那個）、pmm 的 frame 0 保留與錯誤 free、heap 的
+  分割/重用/合併。
+- **關鍵：用突變測試證明這套測試有牙齒**。新測試第一次就全綠是可疑的，所以我
+  故意注入 5 個 bug 驗證：memcpy 尾端少一 byte、memset 字組填充丟低位元組、
+  fs 路徑溢位靜默忽略（即 F8 的舊 bug）、pmm 發出 frame 0、heap 的 kfree 不標記
+  free。結果 **4 個被抓到**，證明測試確實在把關；第 5 個沒被抓到，反而讓我
+  找到一個真 bug（見下方 F18）。
+- 備註：`make test` 現在先跑 `unit`（<1 秒）再跑 QEMU 各階段，邏輯錯誤會在
+  4 分鐘的模擬開始前就先爆出來。
+
+### F18 [P3][正確性] pmm_init_region 重新保留 frame 0 時沒有修正計數
+——**由 CAP2 的突變測試間接發現**
+- 檔案: pmm.c `pmm_init_region`
+- 迴圈會把區間內的 frame 逐一標為 free 並 `used_blocks--`；若區間起點是 0，
+  frame 0 也會被釋放並計數減一。迴圈結束後的 `mmap_set(0)` 把它重新標為已用，
+  **但沒有把 used_blocks 加回去**。結果 `pmm_get_free_blocks()` 比實際可配置量
+  多一個。實測：回報 256，實際只配置得出 255，且耗盡後計數仍停在 1。
+- 發現經過：我原本的「frame 0 不得被配置」測試用突變（把搜尋起點由 1 改為 0）
+  驗證時**沒有失敗**，追查後發現是因為 `mmap_set(0)` 提供了第二層防護，所以那個
+  突變打不到。但順著這條線讀下去，就看到計數沒補回來的問題。**兩輪人工審查都
+  漏掉了它。**
+- 可觸發性：實際核心不會踩到——`free_usable_subrange` 會把起點夾到 `free_start`
+  （核心結尾之上，約 1MB+），所以 frame 0 從不落在被釋放的區間內。屬**潛在**
+  缺陷而非現行 bug，但這是公開 API 的正確性問題，未來新增記憶體區間就可能中招。
+- 修復: 改成 `if (!mmap_test(0)) { mmap_set(0); used_blocks++; }`，只在原本為
+  free 時才重新保留並補回計數。
+- 狀態: **已修＋已驗證**。新增 `test_free_count_is_honest`：以「一直配置到失敗」
+  的實際數量對照 `pmm_get_free_blocks()` 的回報值。修復前該測試失敗
+  （got 255 / want 256），修復後通過。
+
 ## 功能擴充（已實作）
 
 ### FEAT1 執行檔改走 VFS 查找：可從任何已掛載的檔案系統執行程式

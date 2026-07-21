@@ -61,7 +61,15 @@ void pmm_init_region(uint32_t base, uint32_t size) {
             used_blocks--;
         }
     }
-    mmap_set(0); /* Ensure block 0 is never allocated to avoid NULL pointers */
+    /* Block 0 is never handed out, so a successful allocation can never be
+     * mistaken for NULL. Re-reserving it must update the accounting as well:
+     * when a region starts at 0 the loop above has just released frame 0 and
+     * decremented used_blocks, so setting the bit alone would leave the
+     * manager advertising one more free block than it can actually supply. */
+    if (!mmap_test(0)) {
+        mmap_set(0);
+        used_blocks++;
+    }
 }
 
 void pmm_deinit_region(uint32_t base, uint32_t size) {

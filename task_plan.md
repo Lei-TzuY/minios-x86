@@ -149,6 +149,20 @@ Status: complete
 - 新增 user/killthread.c（背景執行，失敗時不 hang；靠結尾 running=0 斷言鑑別）。
 - 節點數 56、README 程式數 48；clean build 0 warning/0 error、真實離開碼 0。
 
+## Phase 13: Session 10 — 建立量測與驗證能力（方向轉換）
+Status: complete
+- 起因：我對「是否已完善」給了否定評估，並指出自己工作的弱點（效能未量測、
+  ISO 路徑未驗證、無單元測試、第 8 輪才找到第 2 輪該發現的 P0）。
+- **CAP1**：新增 `test-iso`，補上從未被驗證的 GRUB/ISO 開機路徑；斷言
+  Multiboot 記憶體映射（GRUB 路徑的實質差異）與三個檔案系統掛載。
+  工具鏈缺少時 SKIP 而非失敗。
+- **CAP2**：建立 tests/ 原生單元測試框架，4 套件約 50,500 檢查、<1 秒；
+  `make test` 先跑 unit 再跑 QEMU。
+- **用突變測試驗證測試本身有效**：注入 5 個 bug，4 個被抓到。
+- **F18（P3）**：突變測試間接找出 pmm_init_region 重新保留 frame 0 時未補回
+  used_blocks，導致可用區塊回報多一個。兩輪人工審查都漏掉。已修＋加測試。
+- 記錄未修項：Git-for-Windows 的 CRLF 轉換使 WSL 內 git 視整棵樹為已修改。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目
