@@ -178,4 +178,21 @@
   fatwrite / ush 下 cd fat 都正常）。
 
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
-  節點數斷言更新為 53。
+  節點數斷言更新為 53。已 commit（962ccde）。
+
+## Session 6 — 2026-07-21
+
+- **FEAT1（功能擴充）**：執行檔查找改走 VFS，**可從任何已掛載的檔案系統執行
+  程式**。原本 `elf_load_image` 用 `ramfs_find_file`，只查得到內嵌在 RAMFS 的
+  程式。實際上載入器其餘部分早就是檔案系統無關的（一律走 `read_fs()`／
+  `node->length`），限制只在查找那一步；改為 `resolve_fs()` 並檢查
+  `flags == FS_FILE`。
+  **關鍵取捨**：刻意**不**改成 cwd 相對解析——不含前導 '/' 的名稱仍從根解析。
+  若改成 cwd 相對，ush 測試裡的 `cd fat` 之後執行 `cat`（位於 /cat）就會失敗。
+  驗證：測試腳本新增 `cp hello fat/hello`（8.9KB ELF 複製進 FAT16）→
+  `fat/hello`（從 FAT16 載入執行）→ `rm fat/hello`。實測日誌顯示完整三行輸出、
+  "Hello from user space!" 次數由 2 增為 3、無任何 `exec:` 錯誤。
+  （DiskFS 每檔上限 2048 bytes 放不下 8.9KB ELF，故以 FAT16 驗證；兩者共用
+  同一段跨檔案系統載入程式碼。）
+
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。

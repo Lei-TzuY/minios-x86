@@ -169,8 +169,20 @@ static uint32_t setup_user_argv(address_space_t *space,
 address_space_t *elf_load_image(const char *name, int argc, const char **argv,
                                 uint32_t *entry, uint32_t *user_esp,
                                 uint32_t *heap_base_out) {
-    fs_node_t *file = ramfs_find_file(name);
+    /* Resolve through the VFS, not just RAMFS, so a program can be executed
+     * from any mounted filesystem (e.g. "fat/prog" or "/disk/prog") and not
+     * only from the embedded RAMFS image. Everything below already reads the
+     * file through the generic read_fs()/node->length interface, so no backend
+     * knows or cares which filesystem the image came from.
+     *
+     * Names without a leading '/' still resolve from the root, exactly as the
+     * previous RAMFS-only lookup did. This is deliberately NOT relative to the
+     * caller's working directory: bare command names must keep working after a
+     * `cd` (ush does `cd fat` and then runs `cat`, which lives at /cat). */
+    fs_node_t *file = resolve_fs(name);
     address_space_t *space;
+
+    if (file && file->flags != FS_FILE) file = NULL;   /* directories are not images */
     Elf32_Ehdr ehdr;
     uint32_t esp;
     uint32_t heap_base = USER_LOAD_BASE;

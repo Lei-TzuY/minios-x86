@@ -27,7 +27,9 @@ shells and an automated test suite.
 - **Time:** CMOS RTC wall clock (`date`), monotonic uptime, CPU accounting.
 - **User land:** 51 system calls, 45 user programs/demos, a kernel-space shell
   and a **ring-3 user shell (`ush`)** with pipes, redirection, background jobs,
-  and shell variables.
+  and shell variables. Programs are loaded through the VFS, so an executable
+  can be run from **any mounted filesystem** (e.g. `cp hello fat/hello` then
+  `fat/hello`), not just the built-in RAMFS.
 - **Quality:** a deterministic, end-to-end `make test` suite driven through the
   QEMU monitor.
 
