@@ -1,5 +1,6 @@
 #include "process.h"
 #include "elf_loader.h"
+#include "fs.h"
 #include "pipe.h"
 #include "syscall.h"
 #include "task.h"
@@ -95,11 +96,12 @@ static void fork_child_entry(void) {
     enter_user_mode_iret(&process->fork_frame);
 }
 
-static void process_task_exit(task_t *task, int32_t status) {
-    process_t *process = task->process;
-
-    if (!process) return;
-
+/* Full process-level teardown: reparent children, close pipeline endpoints and
+ * open files, free the address space, and transition to PROCESS_ZOMBIE. Only
+ * safe to run once every task sharing `process`'s address space (the main
+ * task plus any SYS_THREAD_CREATE threads) has stopped running -- see the
+ * thread_count deferral in process_task_exit()/thread_on_exit() below. */
+static void process_finish_exit(process_t *process, int32_t status) {
     for (int i = 0; i < MAX_PROCESSES; i++) {
         process_t *child = &processes[i];
 
@@ -126,6 +128,18 @@ static void process_task_exit(task_t *task, int32_t status) {
         process->stdin_pipe = NULL;
     }
 
+    /* Drop the references taken when these nodes were installed as this
+     * process's standard streams (process_redirect / sys_dup2). Without the
+     * matching release the file could never be unlinked afterwards. */
+    if (process->stdout_node) {
+        close_fs(process->stdout_node);
+        process->stdout_node = NULL;
+    }
+    if (process->stdin_node) {
+        close_fs(process->stdin_node);
+        process->stdin_node = NULL;
+    }
+
     syscall_close_user_files(process);
     paging_destroy_user_address_space(process->address_space);
     process->address_space = NULL;
@@ -136,6 +150,26 @@ static void process_task_exit(task_t *task, int32_t status) {
     if (process->parent_pid > 0) process_send_signal(process->parent_pid, SIGCHLD);
     task_wake_all(process);
     if (process->auto_reap) process_release(process);
+}
+
+static void process_task_exit(task_t *task, int32_t status) {
+    process_t *process = task->process;
+
+    if (!process) return;
+
+    if (process->thread_count > 0) {
+        /* Extra threads (SYS_THREAD_CREATE) are still running and share this
+         * address space. Tearing it down now would leave their task_t
+         * pointing at freed page tables the next time the scheduler picks
+         * them. Defer the real cleanup to thread_on_exit(), which runs it
+         * once the last thread has exited. */
+        process->main_exited = 1;
+        process->exit_status = status;
+        process->task = NULL;
+        return;
+    }
+
+    process_finish_exit(process, status);
 }
 
 int32_t process_launch(uint32_t entry_point, uint32_t user_stack,
@@ -225,6 +259,18 @@ int process_exec_reset(address_space_t *new_space, uint32_t heap_base,
     address_space_t *old;
 
     if (!process || !task || !new_space) return -1;
+
+    /* Refuse exec while sibling threads share this address space. exec frees
+     * the old address space below; a still-running SYS_THREAD_CREATE thread
+     * holds a task_t->address_space pointer into it and would fault on freed
+     * page tables the next time it is scheduled (the same use-after-free class
+     * as the deferred-teardown bug fixed in process_task_exit). Real Unix exec
+     * atomically terminates every other thread of the process; miniOS has no
+     * mechanism to force-stop an arbitrary running task safely, so the
+     * conservative, correctness-preserving choice is to fail the exec and
+     * leave the caller running. The caller (sys_execv) reports -1 and discards
+     * the freshly built image, so nothing is torn down. */
+    if (process->thread_count > 0) return -1;
 
     /* Switch the running task to the freshly loaded image, then free the old. */
     old = process->address_space;
@@ -377,9 +423,19 @@ void process_redirect(int32_t pid, struct fs_node *out_node,
     process_t *process = process_find(pid);
 
     if (process) {
+        /* Hold a VFS reference for as long as a stream points at the node.
+         * Without it the file could be unlinked and its node freed while this
+         * process still writes through the pointer -- a use-after-free that
+         * would call a function pointer read out of freed heap memory.
+         * process_finish_exit() drops these references. */
+        if (process->stdout_node) close_fs(process->stdout_node);
         process->stdout_node = out_node;
+        if (out_node) open_fs(out_node);
         process->stdout_offset = out_offset;
+
+        if (process->stdin_node) close_fs(process->stdin_node);
         process->stdin_node = in_node;
+        if (in_node) open_fs(in_node);
         process->stdin_offset = 0;
     }
 
@@ -432,10 +488,16 @@ int process_send_signal(int32_t pid, int signum) {
 
     if (ok) {
         process->sig_pending |= (1u << signum);
-        /* Nudge a blocked task so it returns toward user mode for delivery. */
-        if (process->task && process->task->state == TASK_BLOCKED &&
-            process->task->wait_channel) {
-            task_wake_one(process->task->wait_channel);
+        /* Nudge THIS process's task so it returns toward user mode for
+         * delivery. It must be woken by identity, not via
+         * task_wake_one(wait_channel): unrelated tasks share wait channels
+         * (e.g. the shell blocks on a child's process_t in process_wait while
+         * that child blocks on the same process_t in process_waitpid), so
+         * waking "some waiter" on the channel can wake the wrong task and
+         * leave this one blocked forever. Every blocking site re-checks its
+         * condition in a loop, so a spurious wake is harmless. */
+        if (process->task && process->task->state == TASK_BLOCKED) {
+            task_wake_task(process->task);
         }
     }
 
@@ -467,8 +529,12 @@ static void thread_trampoline(void) {
 }
 
 /* Runs when a thread task exits: drop the live-thread count and wake any joiner.
- * Unlike process_task_exit it must NOT free the shared address space or reap the
- * process -- those belong to the main task, which exits last. */
+ * Normally (the main task still running, or already exited with no threads
+ * left) this must NOT free the shared address space or reap the process --
+ * that belongs to process_task_exit(). The one exception: if the main task
+ * already exited while this thread was still running (process->main_exited,
+ * deferred by process_task_exit above), this is the last task sharing the
+ * address space to stop, so it must finish the teardown that was deferred. */
 static void thread_on_exit(task_t *task, int32_t status) {
     process_t *process = task->process;
 
@@ -476,6 +542,9 @@ static void thread_on_exit(task_t *task, int32_t status) {
     if (!process) return;
     if (process->thread_count > 0) process->thread_count--;
     task_wake_all(&process->thread_count);
+    if (process->thread_count == 0 && process->main_exited) {
+        process_finish_exit(process, process->exit_status);
+    }
 }
 
 int32_t process_thread_create(uint32_t entry, uint32_t stack_top) {
@@ -630,11 +699,11 @@ void process_request_kill(int32_t pid) {
     process_t *proc;
     kill_request_pid = pid;
     /* If the process is blocked (e.g. waiting on I/O), wake it so the kill
-     * can be applied on the next timer tick when it becomes the current task. */
+     * can be applied on the next timer tick when it becomes the current task.
+     * Wake it by identity for the same reason as process_send_signal above. */
     proc = process_find(pid);
-    if (proc && proc->task && proc->task->state == TASK_BLOCKED &&
-        proc->task->wait_channel) {
-        task_wake_one(proc->task->wait_channel);
+    if (proc && proc->task && proc->task->state == TASK_BLOCKED) {
+        task_wake_task(proc->task);
     }
 }
 

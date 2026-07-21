@@ -213,8 +213,14 @@ static inline int sys_time(struct utime *buf) {
 }
 
 /* Spawn a thread running `entry` on `stack_top`, sharing this process's whole
- * address space (SYS_THREAD_CREATE = 49). Returns a thread id, or -1. The thread
- * must finish by calling sys_exit(); join all threads before the process exits. */
+ * address space (SYS_THREAD_CREATE = 49). Returns a thread id, or -1. The
+ * thread must finish by calling sys_exit(). The process (and its address
+ * space) only becomes reapable once every thread -- main included -- has
+ * exited: if main exits first, the kernel defers the actual teardown until
+ * the last thread finishes, so a parent's wait()/waitpid() on this process
+ * blocks for the full lifetime. Prefer sys_thread_join() before exiting
+ * anyway when you want a deterministic point at which all threads are known
+ * to be done (see threadexit.c for a case that relies on the deferred path). */
 static inline int sys_thread_create(void (*entry)(void), void *stack_top) {
     int ret;
     __asm__ volatile("int $0x80"

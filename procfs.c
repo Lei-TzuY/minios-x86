@@ -67,6 +67,16 @@ static uint32_t proc_generate(uint32_t which) {
     case PROC_PROCESSES:
         n = process_snapshot(snap, MAX_PROCESSES);
         for (uint32_t i = 0; i < n; i++) {
+            /* Worst case: two 10-digit int32 fields, 1 state char, a full
+             * PROCESS_NAME_MAX-1 name, 3 separating spaces and a newline.
+             * gen_buf is a fixed 512-byte buffer; pid/ppid grow without bound
+             * over the system's lifetime (next_pid never resets), so bail out
+             * (truncating the listing) rather than overrun it once a line
+             * might not fit, instead of trusting the sizes to stay small. */
+            if (pos + 10 + 1 + 10 + 1 + 1 + 1 + (PROCESS_NAME_MAX - 1) + 1 >
+                sizeof(gen_buf)) {
+                break;
+            }
             pos += u_to_str((uint32_t)snap[i].pid, gen_buf + pos);
             gen_buf[pos++] = ' ';
             pos += u_to_str((uint32_t)snap[i].parent_pid, gen_buf + pos);

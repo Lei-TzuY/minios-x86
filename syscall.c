@@ -409,11 +409,19 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
             process->stdout_pipe = NULL;
         }
         if (src.kind == OF_PIPE_W) {
+            if (process->stdout_node) close_fs(process->stdout_node);
             process->stdout_pipe = src.pipe;
             process->stdout_node = NULL;
             pipe_ref_write(src.pipe);
         } else if (src.kind == OF_FILE) {
-            process->stdout_node = src.node;     /* aliased like a redirect */
+            /* Take a reference: the caller typically closes oldfd right after
+             * (the usual dup2-then-close idiom), which would otherwise leave
+             * stdout pointing at an unreferenced node that unlink() is free to
+             * kfree() -- a use-after-free on the next write. Released in
+             * process_finish_exit(). */
+            if (process->stdout_node) close_fs(process->stdout_node);
+            process->stdout_node = src.node;
+            if (src.node) open_fs(src.node);
             process->stdout_offset = src.offset;
         } else {
             return -1;
@@ -426,11 +434,14 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
             process->stdin_pipe = NULL;
         }
         if (src.kind == OF_PIPE_R) {
+            if (process->stdin_node) close_fs(process->stdin_node);
             process->stdin_pipe = src.pipe;
             process->stdin_node = NULL;
             pipe_ref_read(src.pipe);
         } else if (src.kind == OF_FILE) {
+            if (process->stdin_node) close_fs(process->stdin_node);
             process->stdin_node = src.node;
+            if (src.node) open_fs(src.node);
             process->stdin_offset = src.offset;
         } else {
             return -1;
@@ -808,7 +819,21 @@ void signal_deliver(registers_t *regs) {
         if (handler == 1) continue;  /* explicitly ignored */
 
         /* Build a signal frame on the user stack:
-         *   [saved context][signum][trampoline addr] <- new esp */
+         *   [saved context][signum][trampoline addr] <- new esp
+         * regs->useresp is a plain user-mode register: a program can set it
+         * to anything before a signal becomes pending. Validate the whole
+         * frame stays inside the mapped/demand-pageable stack region before
+         * touching it -- otherwise the write below would fault at an address
+         * the page-fault handler doesn't recognise as demand-pageable, and
+         * since that fault happens from kernel code (CS still 0x08 at the
+         * point of the write) it would be treated as a kernel fault and halt
+         * the whole system instead of just this process. */
+        if (regs->useresp < USER_STACK_BOTTOM ||
+            regs->useresp > USER_STACK_TOP ||
+            regs->useresp - USER_STACK_BOTTOM < sizeof(sigcontext_t) + 8) {
+            task_exit(-128 - sig);
+        }
+
         usp = regs->useresp;
         usp -= sizeof(sigcontext_t);
         sc = (sigcontext_t *)usp;
