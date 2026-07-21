@@ -603,6 +603,9 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	    send_keys r e d i r r e f ret; sleep 1.5; \
 	    send_keys r m spc r r dot t m p ret; sleep 0.6; \
 	    send_keys f a t r e f ret; sleep 1.5; \
+	    send_keys c p spc h e l l o spc f a t slash h e l l o ret; sleep 2.5; \
+	    send_keys f a t slash h e l l o ret; sleep 1.5; \
+	    send_keys r m spc f a t slash h e l l o ret; sleep 0.6; \
 	    send_keys l s spc slash p r o c ret; sleep 0.8; \
 	    send_keys c a t spc slash p r o c slash p r o c e s s e s ret; sleep 0.8; \
 	    send_keys c a t spc slash p r o c slash s e l f slash s t a t u s ret; sleep 0.8; \
@@ -762,7 +765,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "Hello from FAT16!" $$log && \
 	grep -q "nested fat note" $$log && \
 	grep -q "^fatwrite$$" $$log && \
-	test $$(grep -c "Hello from user space!" $$log) -eq 2 && \
+	test $$(grep -c "Hello from user space!" $$log) -eq 3 && \
 	test $$(grep -c "miniOS RAMFS file access works." $$log) -eq 4 && \
 	grep -q "\[ramfs readdir test passed\]" $$log && \
 	grep -q "\[ramfs path test passed\]" $$log && \

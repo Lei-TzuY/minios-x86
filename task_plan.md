@@ -110,6 +110,14 @@ Status: complete
 - 新增 user/fatref.c（刻意不真的刪檔，避免影響既有 FAT16 測試）。
 - 節點數斷言更新為 53；clean build 0 warning/0 error、`make test` 真實離開碼 0。
 
+## Phase 9: Session 6 — 跨檔案系統執行（功能擴充）
+Status: complete
+- **FEAT1**：`elf_load_image` 由 `ramfs_find_file` 改為 `resolve_fs`，可從任何
+  已掛載的檔案系統執行程式。載入器其餘部分本來就是檔案系統無關的。
+- 關鍵取捨：**不**改成 cwd 相對解析（否則 ush 的 `cd fat` 後跑 `cat` 會壞）。
+- 驗證：`cp hello fat/hello` → `fat/hello`（從 FAT16 執行）→ `rm fat/hello`；
+  "Hello from user space!" 次數 2→3、無 exec 錯誤。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目

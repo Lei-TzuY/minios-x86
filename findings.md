@@ -293,6 +293,25 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   測試刻意**不真的刪除**該檔，因此後續既有的 FAT16 測試（cat fat/hello.txt、
   fat/docs/note.txt、寫入 fat/new.txt、ush 下 cd fat）全部照常通過。
 
+## 功能擴充（已實作）
+
+### FEAT1 執行檔改走 VFS 查找：可從任何已掛載的檔案系統執行程式
+- 檔案: elf_loader.c `elf_load_image`
+- 原本用 `ramfs_find_file(name)`，只查得到內嵌在 RAMFS 的程式；位於 /disk 或
+  /fat 的執行檔無法 exec/spawn。實際上 ELF 載入器**其餘部分早就是檔案系統
+  無關的**（讀檔一律走 `read_fs()` 與 `node->length`），限制只在「查找」這一步。
+- 改為 `resolve_fs(name)` 並檢查 `flags == FS_FILE`（目錄不是可執行映像）。
+- **刻意不改成相對於工作目錄解析**：不含前導 '/' 的名稱仍從根目錄解析，與原本
+  RAMFS-only 的行為一致。若改成 cwd 相對，`cd fat` 之後執行 `cat`（位於 /cat）
+  就會失敗——ush 的測試正是這樣用的，會直接壞掉。這是保守相容的關鍵取捨。
+- 狀態: **已實作＋已驗證**。測試腳本新增：`cp hello fat/hello`（把 8.9KB 的
+  ELF 複製進 FAT16 映像）→ `fat/hello`（**從 FAT16 載入並執行**）→
+  `rm fat/hello`。實測日誌顯示該程式完整輸出三行、"Hello from user space!"
+  出現次數由 2 增為 3、且無任何 `exec:` 錯誤，證明真的是從 FAT16 讀出 ELF 並
+  執行，而非退回 RAMFS。
+  註：DiskFS 每檔上限 4 磁區（2048 bytes）放不下 8.9KB 的 ELF，故以 FAT16
+  （資料區約 31KB）驗證；跨檔案系統的載入路徑兩者共用同一段程式碼。
+
 ## 排程公平性（已實作）
 
 ### FAIR1 blocked task 改為 FIFO 喚醒（尾插）取代 LIFO（頭插）
@@ -356,12 +375,8 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   threadtest.c 那種共享記憶體示範），這個落差在文件/註解中沒有特別提及，
   值得記錄成已知限制，但要正確支援需要重新設計「訊號要送給 process 的哪個
   task」，改動面較大，本輪不做。
-- **elf_loader 只從 RAMFS 載入可執行檔**：`elf_load_image` 呼叫的是
-  `ramfs_find_file`，不是走完整 VFS（resolve_fs），所以無法直接
-  `exec`/`spawn` 位於 /disk 或 /fat 底下的執行檔。目前所有可執行檔都是
-  build 期內嵌進 RAMFS 的（見 kernel.c 的 ramfs_create_static_file 呼叫），
-  README 與 shell 說明都沒有宣稱能從其他檔案系統執行程式，判斷是刻意的
-  設計範圍而非疏漏，故只記錄不改動。
+- ~~**elf_loader 只從 RAMFS 載入可執行檔**~~：**已於 Session 6 實作，見下方
+  FEAT1**（改走 VFS，可從任何已掛載的檔案系統執行程式）。
 
 <!-- 格式：
 ### [ID] 標題
