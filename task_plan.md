@@ -207,6 +207,15 @@ Status: complete
 - 記錄技術債：save/restore_irq 在 7 檔重複，抽 irq.h 為後續去重機會。
 - 單元測試現 8 套件、~88,900 檢查；clean build 0 warning/0 error、真實離開碼 0。
 
+## Phase 18: Session 15 — irq.h 去重（先建驗證能力、再安全重構）
+Status: complete
+- **REFACTOR1**：save_irq_disable/restore_irq 原本重複在 7 個檔案，抽成共用
+  irq.h（相同函式名 static inline，呼叫點零改動，統一 HOSTED_TEST 守護）。
+- **codegen 等價性實測證明**：7 個模組的 .o 重構前後用 cmp 比對，位元組完全相同。
+- 順序意義：累積 8 模組單元測試 + 端對端測試後，這個一直不敢動的重構風險才夠低。
+- 解鎖：timer/task/process/ata/kb 現在也可原生單元測試（記錄為後續機會）。
+- clean build 0 warning/0 error、`make test` 真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目

@@ -1,6 +1,7 @@
 #include "process.h"
 #include "elf_loader.h"
 #include "fs.h"
+#include "irq.h"
 #include "pipe.h"
 #include "syscall.h"
 #include "task.h"
@@ -13,18 +14,6 @@ static process_t processes[MAX_PROCESSES];
 static int32_t next_pid = 1;
 static uint32_t peak_process_count;
 static volatile int32_t kill_request_pid = -1;
-
-static uint32_t save_irq_disable(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static void restore_irq(uint32_t flags) {
-    if (flags & (1 << 9)) {
-        __asm__ volatile("sti" ::: "memory");
-    }
-}
 
 static uint32_t process_get_used_count(void) {
     uint32_t count = 0;

@@ -1,4 +1,5 @@
 #include "sem.h"
+#include "irq.h"
 #include "task.h"
 
 typedef struct {
@@ -7,27 +8,6 @@ typedef struct {
 } ksem_t;
 
 static ksem_t semaphores[MAX_SEMAPHORES];
-
-/* See pipe.c for why HOSTED_TEST compiles the privileged cli/sti out to no-ops
- * for the native unit tests; the kernel build never defines it and its codegen
- * is unchanged. */
-static uint32_t save_irq_disable(void) {
-    uint32_t flags = 0;
-#ifndef HOSTED_TEST
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-#endif
-    return flags;
-}
-
-static void restore_irq(uint32_t flags) {
-#ifndef HOSTED_TEST
-    if (flags & (1 << 9)) {
-        __asm__ volatile("sti" ::: "memory");
-    }
-#else
-    (void)flags;
-#endif
-}
 
 static int sem_valid(int id) {
     return id >= 0 && id < MAX_SEMAPHORES;

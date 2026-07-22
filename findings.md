@@ -576,12 +576,29 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   wait 不遞減、post 不遞增、init 接受負值），**全部 4 個被抓到**。
 - 規模：pipe 68 檢查、sem 32 檢查。
 
-#### 附帶記錄（技術債，未於本輪處理）
-`save_irq_disable`/`restore_irq` 這一對完全相同的函式在 **7 個檔案**重複
-（timer/task/pipe/sem/process/ata/kb）。本輪只在要測試的 pipe/sem 兩處加了
-`HOSTED_TEST` 守護，維持最小改動；把這對函式抽成共用的 `irq.h`（並讓其餘 5 檔
-也改用）是合理的後續去重機會，但會動到多個未受測檔案、回歸風險較高，故不在本輪
-順手做。
+#### 附帶記錄（技術債）→ **已於 Session 15 處理（REFACTOR1）**
+`save_irq_disable`/`restore_irq` 這一對完全相同的函式原本在 **7 個檔案**重複。
+
+### REFACTOR1 把重複 7 次的 irq save/restore 抽成共用的 irq.h（已證明 codegen 不變）
+- 檔案: 新增 irq.h；timer/task/pipe/sem/process/ata/kb 各刪除本地定義、改
+  `#include "irq.h"`
+- irq.h 以**與原本完全相同的函式名**（save_irq_disable/restore_irq）定義為
+  `static inline`，因此 102 個呼叫點**零改動**；並統一帶上 `HOSTED_TEST` 守護
+  （核心正式建置永不定義），使這 7 個模組全部變得可原生單元測試。
+- **codegen 等價性：已實測證明，非僅宣稱**。以 `git show HEAD:<file>` 取出重構前
+  版本、分別編出 7 個 .o，與重構後的 .o 用 `cmp` 逐一比對——**全部 7 個 object
+  檔位元組完全相同**（scratchpad/codegen_check.sh）。`static` vs `static inline`
+  在 -O2 下同樣被 inline，`flags=0` 初始化被 write-only 輸出運算元消除，故機器碼
+  一致。
+- 動機與時機：這對函式的重複是一直存在的技術債，但先前不敢動——直到累積了 8 個
+  模組的單元測試 + 完整端對端測試，重構的回歸風險才降到可接受。這正是「先建立
+  驗證能力、再安全重構」的順序。
+- **解鎖的能力（記錄為後續機會）**：timer/task/process/ata/kb 現在也繼承了
+  HOSTED_TEST 守護，未來可原生單元測試。其中 timer 的 `tick_reached`
+  （`(int32_t)(current - deadline) >= 0` 的 wrap-around 比較）與睡眠佇列管理
+  是值得測的純邏輯，但完整測 timer 需為 process_*/schedule/task_* 準備一批 stub，
+  屬另一個聚焦工作，本輪不順手做。
+- 狀態: **已完成＋已驗證（build + make test 全綠、7 個 .o codegen 位元組相同）**。
 
 ## 效能改善（已實作）
 
