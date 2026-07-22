@@ -8,16 +8,28 @@
  *   &p->read_pos  - "space available": writers wait here; readers/closers signal.
  */
 
+/* The single-core mutual-exclusion primitive: disable interrupts, do the
+ * critical section, restore. Under HOSTED_TEST (the native unit tests, which
+ * run in ring 3 where cli/sti fault and where there are no interrupts to guard
+ * against) these compile to no-ops. The kernel build never defines it, and the
+ * `= 0` init is dead there since the asm output overwrites it, so kernel
+ * codegen is unchanged. */
 static uint32_t save_irq_disable(void) {
-    uint32_t flags;
+    uint32_t flags = 0;
+#ifndef HOSTED_TEST
     __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
+#endif
     return flags;
 }
 
 static void restore_irq(uint32_t flags) {
+#ifndef HOSTED_TEST
     if (flags & (1 << 9)) {
         __asm__ volatile("sti" ::: "memory");
     }
+#else
+    (void)flags;
+#endif
 }
 
 pipe_t *pipe_create(void) {

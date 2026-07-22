@@ -30,7 +30,7 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
 # to themselves, and from replacing the calls under test with its builtins.
 UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
 UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
-            tests/test_fat16 tests/test_diskfs
+            tests/test_fat16 tests/test_diskfs tests/test_pipe tests/test_sem
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -56,6 +56,15 @@ tests/test_fat16: tests/test_fat16.c tests/test.h fat16.c fat16.h fs.c fs.h \
 tests/test_diskfs: tests/test_diskfs.c tests/test.h diskfs.c diskfs.h fs.c fs.h \
                    utils.c utils.h ata.h
 	$(CC) $(UNIT_CFLAGS) tests/test_diskfs.c diskfs.c fs.c utils.c -o $@
+
+# pipe.c and sem.c guard their cli/sti behind HOSTED_TEST so the privileged
+# instructions compile out for these ring-3 tests (see pipe.c). The scheduler
+# and allocator they call are stubbed inside the test.
+tests/test_pipe: tests/test_pipe.c tests/test.h pipe.c pipe.h task.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_pipe.c pipe.c -o $@
+
+tests/test_sem: tests/test_sem.c tests/test.h sem.c sem.h task.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_sem.c sem.c -o $@
 
 unit: $(UNIT_BINS)
 	@fail=0; \

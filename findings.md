@@ -548,6 +548,41 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   專屬測試：要讓多個行程以確定順序阻塞需依賴 sleep 交錯，時序脆弱易 flaky，
   成本大於效益——此為誠實記錄的驗證缺口。
 
+### CAP5 IPC 單元測試（pipe / sem）：把阻塞邏輯與環狀緩衝邊界測起來
+- 檔案: tests/test_pipe.c、tests/test_sem.c、pipe.c、sem.c、Makefile
+- pipe 是阻塞式環狀緩衝，兩個性質從 shell 都很難測：環狀索引的 wrap 只有在
+  read_pos/write_pos 跨越 PIPE_BUF_SIZE 時才會現形（shell 每次只搬幾個 bytes），
+  而阻塞轉換在 shell 裡完全無法單步。
+- **前置障礙**：pipe.c/sem.c 的 `save_irq_disable` 內含 `cli`/`sti`，在 host
+  ring 3 執行會 SIGSEGV（已實測）。用一個核心正式建置**永不定義**的
+  `HOSTED_TEST` 巨集把這兩個特權指令在測試建置下編成 no-op；核心建置的 codegen
+  完全不變（`flags=0` 初始化會被 write-only 輸出運算元消除）。
+- **測試阻塞邏輯的手法**：用一個腳本化的 hook 取代 `task_block_current`——當程式
+  碼阻塞時，hook 精確地模擬對端 task 會做的事（寫入資料、關閉、或排空緩衝），
+  於是阻塞迴圈的退出條件（資料到達／EOF／空間釋放／broken pipe）能在**單執行緒**
+  上確定性地被走到。沒安裝 hook 時，一次非預期的阻塞會被當成失敗並強制中止迴圈
+  （而非 hang）。
+- pipe 涵蓋：寫入讀回、部分讀取、零長度/NULL、**環狀緩衝 wrap（連續推 8 輪
+  3000-byte，強制 read_pos/write_pos 多次跨越 4096 邊界並比對每個位元組）**、
+  EOF（含殘留資料先排空）、broken pipe、參照計數與「兩端都關才 kfree」、
+  以及三種腳本化的阻塞轉換（讀阻塞→寫入者供資料 / 讀阻塞→寫入者關閉見 EOF /
+  寫阻塞於滿→讀取者排空）。sem 涵蓋：id 驗證、未初始化拒絕、計數增減、
+  以及腳本化的「wait 阻塞於 0 → post 釋放」與 re-init 重設值。
+- **突變測試**：pipe 注入 6 個 bug（環狀模數錯誤 ×2、讀取不再阻塞而丟失 EOF 等待、
+  寫入忽略 broken pipe、pipe 永不釋放、以及一個**我自己標為 benign** 的
+  「close_read 不再喚醒 writer」），**5 個被抓到、1 個 benign 者 PASS**——後者
+  在 stub 化排程器下不可觀察，且不影響正確性（writer 甦醒後會自行重檢
+  readers==0），是誠實的預期結果，不是測試漏洞。sem 注入 4 個 bug（wait 不阻塞、
+  wait 不遞減、post 不遞增、init 接受負值），**全部 4 個被抓到**。
+- 規模：pipe 68 檢查、sem 32 檢查。
+
+#### 附帶記錄（技術債，未於本輪處理）
+`save_irq_disable`/`restore_irq` 這一對完全相同的函式在 **7 個檔案**重複
+（timer/task/pipe/sem/process/ata/kb）。本輪只在要測試的 pipe/sem 兩處加了
+`HOSTED_TEST` 守護，維持最小改動；把這對函式抽成共用的 `irq.h`（並讓其餘 5 檔
+也改用）是合理的後續去重機會，但會動到多個未受測檔案、回歸風險較高，故不在本輪
+順手做。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）
