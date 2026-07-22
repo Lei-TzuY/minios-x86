@@ -1,5 +1,6 @@
 #include "ata.h"
 #include "io.h"
+#include "irq.h"
 
 #define ATA_DATA        0x1F0
 #define ATA_SECTOR_COUNT 0x1F2
@@ -27,18 +28,6 @@ static int ata_available = 0;
 static uint32_t ata_sector_count = 0;
 static uint32_t ata_read_count = 0;
 static uint32_t ata_write_count = 0;
-
-static uint32_t save_irq_disable(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static void restore_irq(uint32_t flags) {
-    if (flags & (1 << 9)) {
-        __asm__ volatile("sti" ::: "memory");
-    }
-}
 
 static void ata_delay(void) {
     inb(ATA_CONTROL);

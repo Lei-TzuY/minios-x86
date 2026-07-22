@@ -1,6 +1,7 @@
 #include "kb.h"
 #include "isr.h"
 #include "io.h"
+#include "irq.h"
 #include "process.h"
 #include "task.h"
 #include "vga.h"
@@ -96,18 +97,6 @@ static volatile int32_t kb_foreground_pid = -1;
 
 void keyboard_set_foreground(int32_t pid) { kb_foreground_pid = pid; }
 void keyboard_clear_foreground(void)       { kb_foreground_pid = -1; }
-
-static uint32_t save_irq_disable(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static void restore_irq(uint32_t flags) {
-    if (flags & (1 << 9)) {
-        __asm__ volatile("sti" ::: "memory");
-    }
-}
 
 static void keyboard_buffer_write(char c) {
     size_t next_index = (keyboard_write_index + 1) % KEYBOARD_BUFFER_SIZE;

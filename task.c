@@ -1,5 +1,6 @@
 #include "task.h"
 #include "gdt.h"
+#include "irq.h"
 #include "pmm.h"
 #include "vga.h"
 
@@ -11,18 +12,6 @@ static task_t *retired_task = 0;
 static task_t *blocked_tasks = 0;
 
 extern void switch_task(uint32_t *old_esp, uint32_t new_esp);
-
-static uint32_t save_irq_disable(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static void restore_irq(uint32_t flags) {
-    if (flags & (1 << 9)) {
-        __asm__ volatile("sti" ::: "memory");
-    }
-}
 
 static void reap_retired_task(void) {
     task_t *task = retired_task;

@@ -422,3 +422,22 @@
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
   單元測試現為 8 套件（utils/fs-path/pmm/heap/fat16/diskfs/pipe/sem），
   約 88,900 檢查、<1 秒。
+
+## Session 15 — 2026-07-22
+
+- **REFACTOR1：把重複 7 次的 irq save/restore 抽成共用 irq.h**。這對完全相同的
+  `save_irq_disable`/`restore_irq` 原本 copy-paste 在 timer/task/pipe/sem/
+  process/ata/kb 七個檔案。新增 irq.h 以**相同函式名** static inline 定義，
+  各檔刪除本地定義、`#include "irq.h"`——**102 個呼叫點零改動**，並統一帶上
+  HOSTED_TEST 守護（核心永不定義）。
+- **codegen 等價性：實測證明而非宣稱**。用 `git show HEAD:<file>` 取重構前版本
+  分別編出 7 個 .o，與重構後逐一 `cmp`——**全部位元組完全相同**
+  （scratchpad/codegen_check.sh）。static vs static inline 在 -O2 同樣 inline，
+  flags=0 被 write-only 輸出消除。
+- **時機的意義**：這技術債一直存在但先前不敢動；累積 8 個模組單元測試 + 完整
+  端對端測試後，重構回歸風險才降到可接受——「先建立驗證能力、再安全重構」。
+- **解鎖能力（記錄為後續機會）**：timer/task/process/ata/kb 現在也繼承 HOSTED_TEST
+  守護、可原生單元測試。timer 的 tick_reached wrap-around 比較值得測，但需為
+  process_*/schedule/task_* 準備 stub，屬另一個聚焦工作，本輪不順手做。
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**；
+  7 個模組 .o codegen 位元組相同。

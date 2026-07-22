@@ -1,6 +1,7 @@
 #include "timer.h"
 #include "isr.h"
 #include "io.h"
+#include "irq.h"
 #include "process.h"
 #include "vga.h"
 #include "utils.h"
@@ -15,18 +16,6 @@ typedef struct {
 
 uint32_t timer_ticks = 0;
 static sleep_entry_t sleeping_tasks[MAX_SLEEPING_TASKS];
-
-static uint32_t save_irq_disable(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static void restore_irq(uint32_t flags) {
-    if (flags & (1 << 9)) {
-        __asm__ volatile("sti" ::: "memory");
-    }
-}
 
 static int tick_reached(uint32_t current, uint32_t deadline) {
     return (int32_t)(current - deadline) >= 0;
