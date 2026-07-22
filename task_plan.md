@@ -195,6 +195,18 @@ Status: complete
 - 結果存成 tests/BENCHMARKS.md；findings.md PERF1/PERF2 更新為「已量測」+誠實限制。
 - 至此自我檢討的四項弱點處理三項（ISO/單元測試/效能量測）。
 
+## Phase 17: Session 14 — IPC 單元測試（pipe / sem）
+Status: complete
+- **CAP5**：新增 tests/test_pipe.c（68 檢查）、tests/test_sem.c（32 檢查）。
+- 前置：pipe.c/sem.c 的 cli/sti 在 host 會 SIGSEGV，用核心永不定義的 HOSTED_TEST
+  巨集守護編成 no-op（核心 codegen 不變）。
+- 手法：腳本化 hook 取代 task_block_current，在單執行緒上確定性走過阻塞退出條件。
+- 重點涵蓋環狀緩衝 wrap（多次跨 4096 邊界）、EOF/broken-pipe、參照計數、
+  三種阻塞轉換；sem 的計數與阻塞於 0→post 釋放。
+- 突變測試：pipe 5/6 抓到（1 benign PASS，誠實預期）、sem 4/4 抓到。
+- 記錄技術債：save/restore_irq 在 7 檔重複，抽 irq.h 為後續去重機會。
+- 單元測試現 8 套件、~88,900 檢查；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目

@@ -399,3 +399,26 @@
 至此，我先前自我檢討列出的四項弱點已處理三項：ISO 路徑（Session 10）、單元測試
 （Session 10–12）、效能量測（本輪）。第四項「第 8 輪才找到第 2 輪該發現的 P0」
 是過程性觀察，已透過建立單元測試 + 突變測試的紀律性做法降低未來重演的機率。
+
+## Session 14 — 2026-07-22
+
+- **CAP5：IPC 單元測試（pipe / sem）**。pipe 是阻塞式環狀緩衝，環狀 wrap 與阻塞
+  轉換從 shell 都很難測。
+  - **前置障礙**：pipe.c/sem.c 的 save_irq_disable 含 cli/sti，host ring 3 執行
+    會 SIGSEGV（已實測）。用核心正式建置**永不定義**的 HOSTED_TEST 巨集把兩個
+    特權指令在測試建置編成 no-op；核心 codegen 不變（flags=0 被 write-only 輸出
+    消除）。這是本輪唯一動到核心原始碼之處。
+  - **測阻塞邏輯的手法**：腳本化 hook 取代 task_block_current，阻塞時精確模擬對端
+    task（寫入/關閉/排空），讓退出條件在單執行緒上確定性走到；無 hook 的非預期
+    阻塞被當失敗並強制中止（不 hang）。
+  - pipe 涵蓋 wrap（8 輪 3000-byte 強制多次跨 4096 邊界逐位元組比對）、EOF、
+    broken pipe、參照計數與兩端關才 kfree、三種阻塞轉換。68 檢查。
+  - sem 涵蓋 id 驗證、未初始化拒絕、計數增減、阻塞於 0→post 釋放、re-init。32 檢查。
+- **突變測試**：pipe 6 個注入 → 5 抓到、1 個我自標 benign 者 PASS（stub 排程器下
+  不可觀察且不影響正確性，誠實預期）；sem 4 個注入 → 全 4 抓到。
+- **附帶記錄（技術債，不改）**：save_irq_disable/restore_irq 這對相同函式在 7 個
+  檔案重複；抽成共用 irq.h 是合理去重機會，但會動到多個未受測檔案、風險較高，
+  本輪維持最小改動。
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
+  單元測試現為 8 套件（utils/fs-path/pmm/heap/fat16/diskfs/pipe/sem），
+  約 88,900 檢查、<1 秒。
