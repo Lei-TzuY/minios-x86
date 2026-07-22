@@ -16,7 +16,7 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
        malloctest_embed.o wc_embed.o grep_embed.o \
        head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o forkredir_embed.o sigretguard_embed.o killthread_embed.o ush_embed.o
 
-.PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot test-iso test-shell unit
+.PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot test-iso test-shell unit bench
 
 # --- Native unit tests -------------------------------------------------------
 # Kernel modules that are pure logic are compiled for the host and called
@@ -62,6 +62,25 @@ unit: $(UNIT_BINS)
 	for t in $(UNIT_BINS); do ./$$t || fail=1; done; \
 	if [ $$fail -ne 0 ]; then echo "unit tests FAILED"; exit 1; fi; \
 	echo "unit tests passed"
+
+# --- Performance measurement -------------------------------------------------
+# Informational, not a pass/fail gate: timing is noisy and machine-dependent,
+# so `bench` is kept out of `make test`. It exists to back the two performance
+# changes (word-at-a-time memcpy/memset, geometric RAMFS growth) with actual
+# numbers instead of an unmeasured claim. bench_mem links the real utils.c so
+# it times the code the kernel ships; bench_ramfs counts algorithmic work
+# (reallocations and bytes copied), which is exact and host-independent.
+BENCH_BINS = tests/bench_mem tests/bench_ramfs
+
+tests/bench_mem: tests/bench_mem.c utils.c utils.h
+	$(CC) -m32 -O1 -g -Wall -Wextra -fno-builtin tests/bench_mem.c utils.c -o $@
+
+tests/bench_ramfs: tests/bench_ramfs.c ramfs.c ramfs.h fs.h
+	$(CC) -m32 -O1 -g -Wall -Wextra -fno-builtin tests/bench_ramfs.c ramfs.c -o $@
+
+bench: $(BENCH_BINS)
+	@echo "=== memcpy / memset ==="; ./tests/bench_mem; \
+	echo; echo "=== RAMFS growth ==="; ./tests/bench_ramfs
 
 all: kernel.bin
 
@@ -542,7 +561,7 @@ $(ATA_IMAGE): gen_ata_image.py
 clean:
 	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c forkredir_embed.c sigretguard_embed.c killthread_embed.c ush_embed.c fat16.img fat16_image_embed.c
 	rm -rf isodir miniOS.iso
-	rm -f $(UNIT_BINS)
+	rm -f $(UNIT_BINS) $(BENCH_BINS)
 	$(MAKE) -C user clean
 
 run: kernel.bin $(ATA_IMAGE)

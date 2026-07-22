@@ -27,3 +27,5 @@ tests/test_pmm
 tests/test_heap
 tests/test_fat16
 tests/test_diskfs
+tests/bench_mem
+tests/bench_ramfs

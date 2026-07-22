@@ -185,6 +185,16 @@ Status: complete
   洩漏前一個檔案資料」這個性質。
 - 一項我的假設錯、程式碼對的案例（mount 拒絕時刻意保留既有掛載）已修正測試。
 
+## Phase 16: Session 13 — 效能量測（補上未量測的宣稱）
+Status: complete
+- 新增 `make bench`（資訊性，不納入 make test）。
+- memcpy/memset：計時對照（連結真 utils.c）。對齊的頁/磁區 3–5x；誠實補述
+  memcpy 在來源/目的相對未對齊時無改善（~1.0x）。
+- RAMFS 幾何成長：計數式量測（精確、與 host 無關）。重新配置 N→log2(N)、
+  成長複製 O(N²)→O(最終大小)（N=1024 少 516 倍）。
+- 結果存成 tests/BENCHMARKS.md；findings.md PERF1/PERF2 更新為「已量測」+誠實限制。
+- 至此自我檢討的四項弱點處理三項（ISO/單元測試/效能量測）。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目
