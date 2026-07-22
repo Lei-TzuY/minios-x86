@@ -31,7 +31,7 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
 UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
 UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
             tests/test_fat16 tests/test_diskfs tests/test_pipe tests/test_sem \
-            tests/test_timer
+            tests/test_timer tests/test_task
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -72,6 +72,12 @@ tests/test_sem: tests/test_sem.c tests/test.h sem.c sem.h task.h
 # test. The static timer_callback is captured via register_interrupt_handler.
 tests/test_timer: tests/test_timer.c tests/test.h timer.c timer.h isr.h io.h irq.h task.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_timer.c timer.c -o $@
+
+# The context switch (switch_task, assembly) and paging/pmm are stubbed in the
+# test, leaving the ready-ring and blocked-list logic exercisable. task.c's raw
+# cli lives in task_exit, which the test never calls.
+tests/test_task: tests/test_task.c tests/test.h task.c task.h pmm.h irq.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_task.c task.c -o $@
 
 unit: $(UNIT_BINS)
 	@fail=0; \

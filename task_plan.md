@@ -228,6 +228,15 @@ Status: complete
 - 測試健壯性：reset() 排空迴圈加 64 次上限，避免「不釋放 slot」突變導致 hang。
 - 單元測試現 9 套件；clean build 0 warning/0 error、真實離開碼 0。
 
+## Phase 20: Session 17 — task 排程器單元測試
+Status: complete
+- **CAP7**：新增 tests/test_task.c（51 檢查）。stub 組語 switch_task 後，測 ready
+  環與 blocked 串列的純指標邏輯，含 F10 的 task_wake_task 首次直接覆蓋。
+- 涵蓋 FIFO 喚醒順序、依身分喚醒（中段/頭/尾）、channel 選擇性、state 轉換。
+- 突變測試 5 個全抓到；並補上第一版漏掉的 state 欄位斷言。
+- 工具：多行突變改用 Python 字面替換 + LF 正規化（sed/perl 經 bash 太脆弱）。
+- 單元測試現 10 套件；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目
