@@ -600,6 +600,36 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   屬另一個聚焦工作，本輪不順手做。
 - 狀態: **已完成＋已驗證（build + make test 全綠、7 個 .o codegen 位元組相同）**。
 
+### CAP6 timer 單元測試：wrap-around tick 比較 + 睡眠佇列（用上 REFACTOR1 解鎖的能力）
+- 檔案: tests/test_timer.c、io.h、Makefile
+- 這是 REFACTOR1 把 HOSTED_TEST 守護延伸到 timer 之後、第一個實際做出來的
+  timer 原生測試。最有價值的目標是 `tick_reached`：
+  `(int32_t)(current - deadline) >= 0`——用**有號差**比較，才能在 32-bit tick
+  計數器繞回 2^32 時仍正確。naive 的無號 `current >= deadline` 會在計數器繞過
+  deadline 的瞬間就誤觸發，這個 bug 要 100Hz 下約 497 天 uptime 才會現形，
+  從 shell 永遠測不到，卻是真實存在的。
+- **測試手法**：`timer_callback`（推進 tick、喚醒到期者）是 static，測試用核心
+  同樣的方式捕捉它——stub 的 `register_interrupt_handler` 記下 `timer_install()`
+  註冊的 handler，測試再呼叫它模擬計時中斷。`timer_ticks` 是全域，直接設成
+  `0xFFFFFFFE` 就能測繞回。schedule/process_* 都 stub 成 no-op。
+- **前置：io.h 的 port I/O 也加 HOSTED_TEST 守護**。`timer_install()` 會 `outb`
+  設定 PIT，特權指令在 host 會 fault。比照 irq.h 的做法把 outb/inb/outw/inw 在
+  測試建置編成 no-op；**已實測證明對核心 codegen 中性**——7 個 include io.h 的
+  object 檔（ata/idt/isr/kb/rtc/timer/vga）重構前後 `cmp` 位元組完全相同
+  （scratchpad/codegen_io.sh）。這也順帶解鎖了 ata/kb 等模組未來的可測性。
+- 涵蓋：install 捕捉 handler、sleep 引數驗證（0 為 no-op 且不佔 slot、
+  超過 0x7FFFFFFF 拒絕、無 current task 拒絕）、**在確切 deadline 才喚醒**、
+  **繞過 2^32 的 deadline 正確**（設 timer_ticks=0xFFFFFFFE、sleep 3、驗證在
+  0xFFFFFFFF/0x00000000 不觸發、到 0x00000001 才觸發）、多個獨立 deadline 依序
+  喚醒、睡眠表 16 格滿載拒絕。50 檢查。
+- **突變測試**：注入 6 個 bug，**全部 6 個被抓到**——關鍵是「tick_reached 改成
+  naive 無號比較」被 wrap-around test 抓到（正是這套測試存在的理由）；另含
+  strict `>`（晚一 tick）、deadline off-by-one、放寬時長上限、callback 不釋放
+  slot、zero-tick 不再 no-op。
+- **測試健壯性修正**：測試的 `reset()` helper 靠 sleeping_count 歸零來排空舊
+  sleeper，「callback 不釋放 slot」那個突變會讓它無窮迴圈（實測時一度 hang，
+  靠 pkill 才解開）。已為排空迴圈加上 64 次上限，使該突變乾淨失敗而非 hang。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）

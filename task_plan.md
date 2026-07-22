@@ -216,6 +216,18 @@ Status: complete
 - 解鎖：timer/task/process/ata/kb 現在也可原生單元測試（記錄為後續機會）。
 - clean build 0 warning/0 error、`make test` 真實離開碼 0。
 
+## Phase 19: Session 16 — timer 單元測試（用上 irq.h 解鎖的可測性）
+Status: complete
+- **CAP6**：新增 tests/test_timer.c（50 檢查）。核心目標是 tick_reached 的
+  wrap-around 比較——naive 無號比較會在 2^32 繞回時誤觸發（~497 天才現形）。
+- 手法：stub register_interrupt_handler 捕捉 static 的 timer_callback；
+  timer_ticks 全域直接設 0xFFFFFFFE 測繞回。
+- 前置：io.h 的 port I/O 加 HOSTED_TEST 守護（timer_install 的 outb 會 fault），
+  **已實測證明對核心 codegen 中性**（7 個 include io.h 的 .o cmp 位元組相同）。
+- 突變測試：6 個注入全部被抓到，含「tick_reached 改 naive 無號」。
+- 測試健壯性：reset() 排空迴圈加 64 次上限，避免「不釋放 slot」突變導致 hang。
+- 單元測試現 9 套件；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目

@@ -441,3 +441,27 @@
   process_*/schedule/task_* 準備 stub，屬另一個聚焦工作，本輪不順手做。
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**；
   7 個模組 .o codegen 位元組相同。
+
+## Session 16 — 2026-07-22
+
+- **CAP6：timer 單元測試**（用上 REFACTOR1 解鎖的能力）。核心目標是 tick_reached
+  的 wrap-around 比較 `(int32_t)(current - deadline) >= 0`——naive 無號比較會在
+  32-bit tick 計數器繞回時誤觸發，這 bug 要約 497 天 uptime 才現形、shell 永遠
+  測不到。
+- **手法**：timer_callback 是 static，用核心同樣方式捕捉——stub 的
+  register_interrupt_handler 記下 timer_install 註冊的 handler，測試再呼叫它模擬
+  中斷；timer_ticks 全域直接設 0xFFFFFFFE 測繞回；schedule/process_* stub 掉。
+- **前置：io.h 的 port I/O 也加 HOSTED_TEST 守護**（timer_install 的 outb 是特權
+  指令、host 會 fault）。**已實測證明對核心 codegen 中性**——7 個 include io.h 的
+  object（ata/idt/isr/kb/rtc/timer/vga）重構前後 cmp 位元組完全相同。順帶解鎖
+  ata/kb 未來可測性。
+- 涵蓋：install 捕捉、sleep 引數驗證、確切 deadline 喚醒、**繞過 2^32 的 deadline
+  正確**、多獨立 deadline 依序喚醒、睡眠表滿載拒絕。50 檢查。
+- **突變測試**：6 個注入全部被抓到，關鍵是「tick_reached 改 naive 無號」被
+  wrap-around test 抓到。
+- **測試健壯性修正**：reset() 排空迴圈靠 sleeping_count 歸零，「callback 不釋放
+  slot」突變會讓它無窮迴圈（實測一度 hang、靠 pkill 解開）；已加 64 次上限使該
+  突變乾淨失敗而非 hang。
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**；
+  io.h 守護 codegen 中性（7 個 .o 位元組相同）。單元測試現為 9 套件
+  （utils/fs-path/pmm/heap/fat16/diskfs/pipe/sem/timer）。

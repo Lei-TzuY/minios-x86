@@ -31,3 +31,4 @@ tests/bench_mem
 tests/bench_ramfs
 tests/test_pipe
 tests/test_sem
+tests/test_timer
