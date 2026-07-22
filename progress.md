@@ -465,3 +465,25 @@
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**；
   io.h 守護 codegen 中性（7 個 .o 位元組相同）。單元測試現為 9 套件
   （utils/fs-path/pmm/heap/fat16/diskfs/pipe/sem/timer）。
+
+## Session 17 — 2026-07-22
+
+- **CAP7：task 排程器單元測試**（51 檢查）。ready 環狀串列與 blocked 串列是純
+  指標邏輯；把組語 context switch（switch_task）stub 成 no-op 後即可測。這也讓
+  **F10 新增的 task_wake_task（依身分喚醒）第一次獲得直接覆蓋**（先前只被
+  job-control 端對端測試間接測到）。
+- 手法：stub switch_task/set_kernel_stack/paging_*/pmm(RAM 池)/terminal_writestring；
+  設 current_task + 呼叫 task_block_current 把選定 task 放進 blocked list。
+- 涵蓋：建環、block 移出 ready 環、**FIFO 喚醒順序**（能區分 LIFO）、task_wake_task
+  從串列中段/頭/尾依身分移除、not-blocked 與 NULL 為 no-op、wait channel 選擇性、
+  block/wake 的 **state 轉換（BLOCKED↔READY）** 與 wait_channel 清除。
+- **突變測試（改用 Python 字面替換）**：注入 5 個全部被抓到（LIFO 頭插、wake_one
+  忽略 channel、wake_task 不依身分、wake_task 不 unlink、add_ready_task 不設 READY）。
+- **突變測試又補上一個測試缺口**：第一版沒斷言 state 欄位，「不設 TASK_READY」的
+  突變一度 PASS；補上 state 斷言後被抓到。喚醒後若仍 BLOCKED，之後對它 block 會
+  因守衛提前返回——是真的缺口。
+- **工具註記**：多行 pattern 經 bash 傳給 sed/perl 太脆弱（一度全 NOT-APPLIED），
+  改用 Python 字面替換 + LF 正規化最可靠；動原始碼的突變流程每次都確認 task.c
+  還原乾淨。
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
+  單元測試現為 10 套件（utils/fs-path/pmm/heap/fat16/diskfs/pipe/sem/timer/task）。

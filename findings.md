@@ -630,6 +630,30 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   sleeper，「callback 不釋放 slot」那個突變會讓它無窮迴圈（實測時一度 hang，
   靠 pkill 才解開）。已為排空迴圈加上 64 次上限，使該突變乾淨失敗而非 hang。
 
+### CAP7 task 排程器單元測試：ready-ring 與 blocked-list（含 F10 的 task_wake_task）
+- 檔案: tests/test_task.c、Makefile
+- 排程器的 ready 環狀串列與 blocked 串列是純指標邏輯，錯一個 link 更新就會讓
+  run queue 損壞、而症狀往往是很久之後才出現的 hang。**context switch 本身是
+  組語（switch_task），stub 成 no-op** 之後，串列操作就完全可測。
+- 這也讓 **F10 新增的 `task_wake_task`（依身分喚醒）第一次獲得直接覆蓋**——先前
+  它只被 job-control 的端對端測試間接測到。
+- 手法：stub switch_task / set_kernel_stack / paging_* / pmm（RAM 池）/
+  terminal_writestring；透過設定 `current_task` + 呼叫 `task_block_current`
+  把選定的 task 放進 blocked list（switch 是 no-op，函式正常返回）。
+- 涵蓋：tasking_init 建環、block 把 task 移出 ready 環、**FIFO 喚醒順序**
+  （task_block_current 尾插、task_wake_one 取頭 → 最舊者先醒，能區分 LIFO）、
+  **task_wake_task 依身分從串列中段/頭/尾移除**、not-blocked 與 NULL 為 no-op、
+  wait channel 選擇性（wake_one/all 只喚醒相符 channel）、以及 block/wake 的
+  **state 轉換**（BLOCKED↔READY）與 wait_channel 清除。51 檢查。
+- **突變測試（Python 字面替換，因多行 pattern 經 bash 傳 sed/perl 太脆弱）**：
+  注入 5 個 bug，**全部 5 個被抓到**：blocked list 改頭插（LIFO，破壞 FIFO）、
+  wake_one 忽略 channel、wake_task 不依身分、wake_task 不 unlink、add_ready_task
+  不設 TASK_READY。
+- **突變測試又補上一個測試缺口**：第一版測試沒斷言 `state` 欄位，導致
+  「add_ready_task 不設 TASK_READY」的突變 PASS（未被抓到）。這是真的缺口——
+  喚醒後若仍是 BLOCKED，之後對它 block 會因守衛提前返回。已在測試補上
+  block→BLOCKED、wake→READY 且 wait_channel 清除的斷言，該突變隨即被抓到。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）
