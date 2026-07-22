@@ -487,3 +487,19 @@
   還原乾淨。
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
   單元測試現為 10 套件（utils/fs-path/pmm/heap/fat16/diskfs/pipe/sem/timer/task）。
+
+## Session 18 — 2026-07-22
+
+- **CAP8：rtc 解碼單元測試 + 行為保持的可測性重構**（35 檢查）。RTC 的核心工作
+  是把 CMOS bytes 解碼（BCD/binary、12h PM、12→0/12→noon 特例），而 QEMU 永遠
+  以固定 binary/24h 啟動，`date` 端對端測試只走一條路徑。
+- **重構（行為保持）**：cmos_read 讀真實 port（HOSTED_TEST 下 no-op），無法注入
+  值；把純解碼從硬體讀取分離、抽出 rtc_decode()。rtc_read 讀完暫存器後呼叫它。
+  行為不變——由 `date` 端對端測試確認（仍輸出兩次 2020-01-01）。
+- 測試以 #include "../rtc.c" 取得 static 的 rtc_decode/bcd_to_bin。涵蓋 BCD/binary、
+  12h AM（12→0）、12h PM（1→13、12 PM→12 noon 不是 24）、BCD+12h、世紀 +2000。
+  **這些正是真實硬體會用、QEMU 從不觸發的路徑**。
+- **突變測試**：6 個注入全部被抓到（bcd 乘數、PM 漏 %12、12 AM 不映射 0、世紀
+  基底、BCD 小時丟 PM 位、完全不當 BCD）。
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
+  單元測試現為 11 套件（+rtc）。

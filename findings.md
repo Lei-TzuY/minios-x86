@@ -654,6 +654,27 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   喚醒後若仍是 BLOCKED，之後對它 block 會因守衛提前返回。已在測試補上
   block→BLOCKED、wake→READY 且 wait_channel 清除的斷言，該突變隨即被抓到。
 
+### CAP8 rtc 解碼單元測試（附一個行為保持的可測性重構）
+- 檔案: rtc.c（抽出 `rtc_decode`）、tests/test_rtc.c、Makefile
+- RTC 真正的工作是把 CMOS 暫存器 bytes 解碼：BCD vs binary、12 小時制的 PM 標誌
+  與 12→0 / 12→noon 特例。這段邏輯很 fiddly，而 QEMU 永遠以固定的 binary/24h
+  時間啟動，所以 shell 的 `date` 測試只走得到其中一條路徑。
+- **可測性重構（行為保持）**：`cmos_read` 讀真實 port（HOSTED_TEST 下是 no-op、
+  回 0），無法注入值。把純解碼邏輯從硬體讀取分離，抽出
+  `rtc_decode(out, sec, min, hour_raw, day, month, year, regB)`；`rtc_read` 讀完
+  暫存器後呼叫它。行為完全不變——由端對端 `date` 測試驗證（重構後仍輸出兩次
+  `2020-01-01`，rtc_read 行為未變）。
+- 測試以 `#include "../rtc.c"` 取得 static 的 rtc_decode 與 bcd_to_bin（測 static
+  函式的標準做法，rtc.c 相依極少、port I/O 由 HOSTED_TEST 編掉）。
+- 涵蓋：bcd_to_bin（0x00/0x09/0x10/0x42/0x59/0x99）、binary+24h、BCD+24h（同一
+  時刻兩種編碼）、binary+12h 的 AM（12→0、1、11）與 PM（1→13、11→23、
+  **12 PM→12 noon 不是 24**）、BCD+12h（3 PM→15、12 PM→12、12 AM→0，且
+  日期/年也 BCD 解碼）、世紀 +2000。35 檢查。**這些正是真實硬體會用、但 QEMU
+  從不觸發的路徑**。
+- **突變測試**：注入 6 個 bug，**全部 6 個被抓到**：bcd 乘數錯（×16）、PM 轉換
+  漏 %12（12 PM→24）、12 AM 不再映射為 0、世紀基底錯（1900）、BCD 小時解碼丟失
+  PM 位、完全不當作 BCD。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）

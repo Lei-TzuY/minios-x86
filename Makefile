@@ -31,7 +31,7 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
 UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
 UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
             tests/test_fat16 tests/test_diskfs tests/test_pipe tests/test_sem \
-            tests/test_timer tests/test_task
+            tests/test_timer tests/test_task tests/test_rtc
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -78,6 +78,11 @@ tests/test_timer: tests/test_timer.c tests/test.h timer.c timer.h isr.h io.h irq
 # cli lives in task_exit, which the test never calls.
 tests/test_task: tests/test_task.c tests/test.h task.c task.h pmm.h irq.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_task.c task.c -o $@
+
+# Includes rtc.c directly to reach the static rtc_decode; the CMOS port I/O is
+# compiled out by HOSTED_TEST. No separate rtc.c object is linked.
+tests/test_rtc: tests/test_rtc.c tests/test.h rtc.c rtc.h io.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_rtc.c -o $@
 
 unit: $(UNIT_BINS)
 	@fail=0; \
