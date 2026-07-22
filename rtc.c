@@ -26,6 +26,47 @@ static uint8_t bcd_to_bin(uint8_t v) {
     return (uint8_t)((v & 0x0F) + (v >> 4) * 10);
 }
 
+/*
+ * Turn the raw RTC register bytes into a normalised rtc_time_t. Kept separate
+ * from the hardware read so the fiddly encoding rules can be unit-tested
+ * without a CMOS chip. `regB` is RTC status register B:
+ *   bit 2 (0x04) set -> registers are already binary; clear -> BCD-encoded.
+ *   bit 1 (0x02) set -> 24-hour clock; clear -> 12-hour, with bit 7 of the
+ *                       hour register meaning PM.
+ * `hour_raw` is the hour register with its PM bit still attached.
+ */
+static void rtc_decode(rtc_time_t *out, uint8_t second, uint8_t minute,
+                       uint8_t hour_raw, uint8_t day, uint8_t month,
+                       uint8_t year, uint8_t regB) {
+    rtc_time_t t;
+
+    t.second = second;
+    t.minute = minute;
+    t.day    = day;
+    t.month  = month;
+    t.year   = year;
+
+    if (!(regB & 0x04)) {   /* values are BCD-encoded */
+        t.second = bcd_to_bin(t.second);
+        t.minute = bcd_to_bin(t.minute);
+        t.day    = bcd_to_bin(t.day);
+        t.month  = bcd_to_bin(t.month);
+        t.year   = bcd_to_bin((uint8_t)t.year);
+        /* Keep bit 7 (PM flag) while converting the low bits. */
+        hour_raw = (uint8_t)(bcd_to_bin(hour_raw & 0x7F) | (hour_raw & 0x80));
+    }
+
+    t.hour = hour_raw & 0x7F;
+    if (!(regB & 0x02) && (hour_raw & 0x80)) {   /* 12-hour mode, PM */
+        t.hour = (uint8_t)((t.hour % 12) + 12);
+    } else if (!(regB & 0x02) && t.hour == 12) { /* 12 AM -> 0 */
+        t.hour = 0;
+    }
+
+    t.year = (uint16_t)(2000 + t.year);   /* 21st-century base */
+    *out = t;
+}
+
 /* Snapshot all the time registers once the UIP flag is clear. */
 static void read_registers(rtc_time_t *t, uint8_t *hour_raw) {
     while (update_in_progress()) { }
@@ -56,23 +97,6 @@ void rtc_read(rtc_time_t *out) {
 
     regB = cmos_read(RTC_STATUS_B);
 
-    if (!(regB & 0x04)) {   /* values are BCD-encoded */
-        cur.second = bcd_to_bin(cur.second);
-        cur.minute = bcd_to_bin(cur.minute);
-        cur.day    = bcd_to_bin(cur.day);
-        cur.month  = bcd_to_bin(cur.month);
-        cur.year   = bcd_to_bin((uint8_t)cur.year);
-        /* Keep bit 7 (PM flag) while converting the low bits. */
-        hour_raw = (uint8_t)(bcd_to_bin(hour_raw & 0x7F) | (hour_raw & 0x80));
-    }
-
-    cur.hour = hour_raw & 0x7F;
-    if (!(regB & 0x02) && (hour_raw & 0x80)) {   /* 12-hour mode, PM */
-        cur.hour = (uint8_t)((cur.hour % 12) + 12);
-    } else if (!(regB & 0x02) && cur.hour == 12) {  /* 12 AM -> 0 */
-        cur.hour = 0;
-    }
-
-    cur.year = (uint16_t)(2000 + cur.year);   /* 21st-century base */
-    *out = cur;
+    rtc_decode(out, cur.second, cur.minute, hour_raw, cur.day, cur.month,
+               (uint8_t)cur.year, regB);
 }

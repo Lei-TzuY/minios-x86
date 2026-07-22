@@ -237,6 +237,14 @@ Status: complete
 - 工具：多行突變改用 Python 字面替換 + LF 正規化（sed/perl 經 bash 太脆弱）。
 - 單元測試現 10 套件；clean build 0 warning/0 error、真實離開碼 0。
 
+## Phase 21: Session 18 — rtc 解碼單元測試（+可測性重構）
+Status: complete
+- **CAP8**：抽出純函式 rtc_decode（行為保持，由 date 端對端測試確認），新增
+  tests/test_rtc.c（35 檢查）測 BCD/binary、12h PM、12→0/12→noon、世紀。
+- 涵蓋真實硬體會用、QEMU 從不觸發的路徑（QEMU 固定 binary/24h）。
+- 突變測試 6 個全抓到。
+- 單元測試現 11 套件；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目
