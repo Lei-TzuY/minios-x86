@@ -675,6 +675,31 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   漏 %12（12 PM→24）、12 AM 不再映射為 0、世紀基底錯（1900）、BCD 小時解碼丟失
   PM 位、完全不當作 BCD。
 
+### CAP9 process 環境變數單元測試（用 --gc-sections 攻克高耦合模組）
+- 檔案: tests/test_process_env.c、Makefile
+- 目標: `process_setenv`（overwrite-or-append，帶長度上限）、`process_getenv`
+  （查找 + bounded 截斷複製）、以及純的 `env_copy`（`max - 1` 的 bounded copy
+  是經典 off-by-one）。shell 的 `export`/`printenv`/`$VAR` 端對端測試只存一個
+  短變數，所以長度驗證、ENV_MAX 上限、overwrite 路徑、截斷複製全沒被走到。
+- **技術關鍵：用 `--gc-sections` 把高耦合模組的 stub 面縮到最小**。process.c
+  相依 30+ 外部符號（paging/elf/fs/pipe/syscall/task/terminal），過去被視為
+  「太耦合、不值得單元測試」。但 env 函式的傳遞閉包只到
+  `process_get_current` → `task_get_current`。以 `#include "../process.c"` +
+  `-ffunction-sections -fdata-sections -Wl,--gc-sections` 編譯，連結器丟掉所有
+  沒被 main 觸及的函式（fork/exec/signal…）與其相依，**stub 面縮到只剩
+  task_get_current + strlen/strcmp/memcpy 三四個**。這開啟了測試其他高耦合模組
+  純邏輯部分的路徑。
+- **踩到的坑**：syscall.h 的 `SEEK_SET` enum 與 test.h→stdio.h 的 `SEEK_SET`
+  巨集衝突。解法是把 `#include "test.h"` 移到 `#include "../process.c"` 之後，
+  讓 enum 先於巨集處理（已在測試檔註解說明）。
+- 涵蓋：set/get、缺鍵回 -1、第二個相異鍵 append 且不影響第一個、overwrite 不
+  增長 table 且較短值不留殘尾、NULL/空鍵/過長鍵值拒絕、最長可接受長度
+  （ENV_*_MAX - 1）、ENV_MAX 滿載拒絕但仍可 overwrite 既有鍵、getenv 對小緩衝
+  截斷（size 4→3 字元、size 1→空字串仍 NUL 結尾）並回傳截斷後長度。47 檢查。
+- **突變測試**：注入 6 個 bug，**全部 6 個被抓到**：env_copy off-by-one（寫滿
+  max、沒留 NUL 空間）、無 ENV_MAX 上限、無長度驗證、接受空鍵、setenv 永不
+  overwrite（總是 append）、getenv 回 0 而非值長度。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）

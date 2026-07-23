@@ -31,7 +31,8 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
 UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
 UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
             tests/test_fat16 tests/test_diskfs tests/test_pipe tests/test_sem \
-            tests/test_timer tests/test_task tests/test_rtc
+            tests/test_timer tests/test_task tests/test_rtc \
+            tests/test_process_env
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -83,6 +84,14 @@ tests/test_task: tests/test_task.c tests/test.h task.c task.h pmm.h irq.h
 # compiled out by HOSTED_TEST. No separate rtc.c object is linked.
 tests/test_rtc: tests/test_rtc.c tests/test.h rtc.c rtc.h io.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_rtc.c -o $@
+
+# process.c is large and coupled, but the env functions only reach
+# process_get_current -> task_get_current. Including the .c and linking with
+# --gc-sections drops every unreferenced function (fork, exec, signals, ...) so
+# only task_get_current and the string helpers (stubbed in the test) are needed.
+tests/test_process_env: tests/test_process_env.c tests/test.h process.c process.h task.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
+	    -Wl,--gc-sections tests/test_process_env.c -o $@
 
 unit: $(UNIT_BINS)
 	@fail=0; \
