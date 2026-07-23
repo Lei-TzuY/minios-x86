@@ -245,6 +245,15 @@ Status: complete
 - 突變測試 6 個全抓到。
 - 單元測試現 11 套件；clean build 0 warning/0 error、真實離開碼 0。
 
+## Phase 22: Session 19 — process 環境變數單元測試（--gc-sections 攻克高耦合）
+Status: complete
+- **CAP9**：新增 tests/test_process_env.c（47 檢查）測 setenv/getenv/env_copy。
+- 技術關鍵：process.c 相依 30+ 符號，用 #include + -ffunction-sections +
+  --gc-sections 讓連結器丟掉沒被觸及的函式，stub 面縮到 3 個。開啟高耦合模組
+  純邏輯測試的路徑。
+- 涵蓋 bounded copy 的 max-1、ENV_MAX 上限、overwrite、截斷；突變測試 6 個全抓到。
+- 單元測試現 12 套件；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目

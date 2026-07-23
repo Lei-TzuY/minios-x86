@@ -503,3 +503,24 @@
   基底、BCD 小時丟 PM 位、完全不當 BCD）。
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
   單元測試現為 11 套件（+rtc）。
+
+## Session 19 — 2026-07-23
+
+- **CAP9：process 環境變數單元測試**（47 檢查）。目標 process_setenv/getenv 與純
+  的 env_copy（`max-1` 的 bounded copy 是經典 off-by-one）；shell 的 export/
+  printenv 端對端只存一個短變數，長度驗證/ENV_MAX 上限/overwrite/截斷全沒走到。
+- **技術關鍵：用 --gc-sections 攻克高耦合模組**。process.c 相依 30+ 外部符號，
+  過去被視為太耦合不值得測。但 env 函式的傳遞閉包只到 process_get_current →
+  task_get_current，以 #include "../process.c" + -ffunction-sections +
+  -Wl,--gc-sections 編譯，連結器丟掉所有沒被 main 觸及的函式（fork/exec/signal）
+  與其相依，**stub 面縮到只剩 task_get_current + strlen/strcmp/memcpy**。這開啟
+  了測試其他高耦合模組純邏輯部分的路徑。
+- 坑：syscall.h 的 SEEK_SET enum 與 stdio.h 的 SEEK_SET 巨集衝突；把 test.h 移到
+  process.c 之後 include 即可（enum 先於巨集）。
+- 涵蓋：set/get、append、overwrite 不增長且不留殘尾、NULL/空鍵/過長拒絕、最長
+  可接受長度、ENV_MAX 滿載拒絕但仍可 overwrite、getenv 截斷（size 4→3、size 1→
+  空）並回傳截斷長度。
+- **突變測試**：6 個注入全部被抓到（env_copy off-by-one、無 ENV_MAX、無長度驗證、
+  空鍵、setenv 不 overwrite、getenv 回 0）。
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
+  單元測試現為 12 套件（+process-env）。
