@@ -524,3 +524,18 @@
   空鍵、setenv 不 overwrite、getenv 回 0）。
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
   單元測試現為 12 套件（+process-env）。
+
+## Session 20 — 2026-07-23
+
+- **CAP10：syscall 使用者指標驗證單元測試**（36 檢查）。安全前線——每個 raw
+  使用者指標都會過 user_buffer_valid；F2/F14 兩個核心 DoS 都是這類檢查缺失。
+  安全關鍵的「指標近頂端 + 巨大長度不得因溢位放行」從 shell 幾乎無法觸發。
+- 手法（同 CAP9 --gc-sections）：驗證函式只走到 paging_user_range_mapped（stub）。
+  user_buffer_valid 不解參照，用假指標完整測；user_string_valid 會解參照，用
+  mmap MAP_FIXED_NOREPLACE 在 [0x300000,0x3F0000) 取真實記憶體（放不下則跳過）。
+- **突變測試的關鍵教訓**：第一版 6/7 抓到，**漏掉最重要的整數溢位繞過**。追查
+  發現我的 paging stub 對 4GB 範圍**獨立**回「未映射」，遮蔽了 bound 檢查的 bug。
+  加「強制已映射」模式**隔離**該邏輯後，7 個全抓到。stub 太嚴格會遮蔽受測 bug，
+  突變測試把這盲點揪出來。
+- **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
+  單元測試現為 13 套件（+syscall-valid）。

@@ -254,6 +254,14 @@ Status: complete
 - 涵蓋 bounded copy 的 max-1、ENV_MAX 上限、overwrite、截斷；突變測試 6 個全抓到。
 - 單元測試現 12 套件；clean build 0 warning/0 error、真實離開碼 0。
 
+## Phase 23: Session 20 — syscall 使用者指標驗證單元測試（安全前線）
+Status: complete
+- **CAP10**：新增 tests/test_syscall_valid.c（36 檢查）測 user_buffer_valid /
+  user_string_valid / alloc_fd。--gc-sections 讓 stub 面只剩 paging_user_range_mapped。
+- 核心是整數溢位繞過（近頂端 + 巨大長度）——shell 幾乎無法觸發。
+- 突變教訓：stub 太嚴格獨立遮蔽了溢位 bug；加「強制已映射」模式隔離後 7 個全抓到。
+- 單元測試現 13 套件；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目

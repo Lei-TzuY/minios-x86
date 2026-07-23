@@ -700,6 +700,28 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   max、沒留 NUL 空間）、無 ENV_MAX 上限、無長度驗證、接受空鍵、setenv 永不
   overwrite（總是 append）、getenv 回 0 而非值長度。
 
+### CAP10 syscall 使用者指標驗證單元測試（安全前線，F2/F14 同類）
+- 檔案: tests/test_syscall_valid.c、Makefile
+- 目標: `user_buffer_valid`（每個 raw 使用者指標都會過這關）與 `user_string_valid`，
+  外加純的 `alloc_fd`。F2/F14 兩個核心 DoS 都是這類邊界檢查缺失；而安全關鍵的
+  「指標接近使用者範圍頂端 + 巨大長度、不得因整數溢位放行」從 shell 幾乎無法觸發。
+- 手法（同 CAP9 的 --gc-sections）：syscall.c 相依十幾個模組，但驗證函式只走到
+  `paging_user_range_mapped`（stub），連結器丟掉所有 sys_* 與其相依。
+  user_buffer_valid **不解參照** buffer，用假指標即可完整測；user_string_valid
+  **會解參照**，用 `mmap MAP_FIXED_NOREPLACE` 在 [0x300000, 0x3F0000) 取得真實
+  記憶體（放不下就跳過那組，核心的溢位測試不受影響）。
+- 涵蓋: buffer 的 count==0 恆過（連 NULL）、範圍上下界、**count 不得越過頂端**、
+  **巨大 count 不得因溢位繞過**（start 在頂端下方、count=4GB-1 或使 start+count
+  回繞到頂端下方）、映射檢查（未映射／跨邊界）；string 的範圍、正常 NUL 結尾、
+  MAX_USER_STRING 內無 NUL 拒絕、逐位元組映射檢查、近頂端的掃描 clamp；
+  alloc_fd 的循序配發/滿載/中段重用/NULL。36 檢查。
+- **突變測試（7 個）＋一個關於測試設計的關鍵教訓**：第一版有 6/7 被抓到，
+  **漏掉的正是最重要的「整數溢位繞過」**（`count <= TOP-start` 改成
+  `start+count <= TOP`）。追查發現：我的 paging stub 對那個 4GB 範圍**獨立**回傳
+  「未映射」，把 bound 檢查的 bug 遮蔽了。修正：加一個「強制已映射」模式，在測
+  溢位 bound 時**隔離**該邏輯，讓只有 bound 算術決定結果。修正後 **7 個全抓到**。
+  這再次印證：stub 太嚴格會遮蔽受測邏輯的 bug，突變測試能把這種盲點揪出來。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）
