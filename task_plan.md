@@ -274,10 +274,10 @@ Status: complete
   喚醒整個行程的 task + task_block_killable() 醒來就離開。10 個阻塞點換掉 9 個。
 - timer_sleep 是唯一例外（持有 sleep slot，必須先歸還再離開，且要判斷 slot
   還是不是自己的）。
-- 驗證：單元 tests/test_task.c +21 檢查（72 total）與 tests/test_timer.c +11
-  檢查（61 total，涵蓋 timer_sleep 三條 kill 路徑，用 longjmp 模擬 task_exit）、
+- 驗證：單元 tests/test_task.c +21 檢查（72 total）與 tests/test_timer.c +13
+  檢查（63 total，涵蓋 timer_sleep 三條 kill 路徑，用 longjmp 模擬 task_exit）、
   端對端 user/killwait.c（兩個 task 都在睡時由外部行程發 kill）、
-  突變測試 4 個注入全抓到。
+  突變測試 9 個注入全抓到（task.c 6 + timer.c 3，見 Session 23）。
 - 節點數 57、README 程式數 49、test-shell 逾時 270s。
 
 ## Phase 25: Session 22 — paging COW 參照計數 + user_pte 單元測試

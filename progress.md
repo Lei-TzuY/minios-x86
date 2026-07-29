@@ -570,12 +570,14 @@
   - 單元 tests/test_task.c +21 檢查（51→72）：只喚醒目標行程的 blocked task、
     旗標也落在 ready 的 task 上、其他行程不受影響、回傳計數、NULL no-op、
     `task_kill_pending` 只反映當前 task。
-  - 單元 tests/test_timer.c +11 檢查（50→61）：timer_sleep 三條 kill 路徑。
+  - 單元 tests/test_timer.c +13 檢查（50→63）：timer_sleep 三條 kill 路徑。
     `task_exit` 用 `longjmp` 模擬「不會回來」的語意，於是可確定性驗證：已被標記
     時**不取 slot** 就離開（並斷言真的沒 park，否則後置檢查會遮蔽前置檢查的
     缺失）、睡著時被標記則離開前歸還 slot、以及期限已到且 slot 被別人接手時
     **不得**清掉對方的 slot。外加一條「沒有 kill 時 sleep 照常返回」的反向測試。
-- **突變測試（4 個注入，全部被抓到）**：
+- **突變測試（9 個注入，全部被抓到）**。task.c 六個、timer.c 三個；下列 M1–M4
+  是最初的四個，M5–M9 見 Session 23（timer 的三個一開始有兩個逃掉，反過來補強了
+  上面那些測試）：
   - M1 `task_kill_pending` 恆回 0（＝修復前的行為）→ 單元 + killwait 端對端都抓到。
     端對端的失敗訊號很具體：結尾 `Processes: running=1 zombies=1`、
     `Tasks: blocked=2`、`User pages: spaces=1`（就是那兩個沒死成的 task），
@@ -605,3 +607,36 @@
   注意：組合式 `make test` 首跑出現 exit 2，但四個 QEMU 整合測試個別重跑皆 exit 0；
   本輪改動全為 host 端測試檔，未觸及任何 kernel 原始碼，kernel.bin 位元組相同，
   判定為連續 QEMU 測試的時序 flakiness，重跑確認綠燈後提交。
+
+## Session 23 — 2026-07-29
+
+- **開場先清掉一個危險的殘留：工作目錄裡留著一個突變**。`task_kill_pending()`
+  當時是 `return 0;`，帶著 `/* MUTANT M1: pre-fix behaviour */` 註解——上一輪跑
+  M1 的端對端驗證時被中斷，原始碼沒還原。**這正是 F19 修好的那個 bug 本身**：
+  留著的話 kill 對停在等待中的 task 完全無效，而且單元測試會紅。先還原成
+  `return task && task->kill_pending;` 才動其他東西。
+  **教訓**：改原始碼的突變流程，還原必須是流程的一部分並**當場驗證**，不能等到
+  結尾——被中斷時「未還原」是預設結果。本輪的 mutate.py 因此每個突變跑完就寫回
+  並 `assert` 檔案與原檔逐位元組相同，最後再跑一次乾淨的 `make unit` 收尾。
+- **把 F19 的突變測試從 4 個補到 9 個**（task.c 6 + timer.c 3）。原本那 4 個
+  全在 task.c；**timer_sleep 的三條 kill 路徑一條都沒被突變測試驗證過**，而
+  timer_sleep 正是唯一手寫、不走 `task_block_killable()` 的例外，最需要驗證。
+- **新增的 timer 突變一開始有兩個逃掉，各暴露一個真的測試缺口**：
+  - **M7（不歸還 slot）逃掉**：當時 test_timer.c 根本沒有 kill 路徑的測試——
+    `task_kill_pending()` 是寫死回 0 的 stub。補上以 `longjmp` 模擬 `task_exit`
+    「不會回來」語意的測試後抓到。
+  - **M9（拿掉睡前的 kill 檢查）逃掉**：**後置檢查遮蔽了前置檢查**——兩者都以
+    「已離開且 slot 已歸還」收場，唯一差別是有沒有先 park。補一個 `g_blocks`
+    計數器、斷言已被標記時 park 次數為 0，才把兩者分開。
+  - 另補 M8（無條件清 slot）確認「slot 已被別人接手時不得清掉對方的」那條分支：
+    需要在 park 當中讓期限到期、再讓另一個 task 接手同一個 slot 才測得到。
+  - **測試 harness 自身的 bug 也被這條測試抓出來**：第一版讓 kill 旗標對「接手者」
+    的內層 sleep 也生效，結果接手者自己死掉並歸還 slot，斷言因此失敗。改成只在
+    接手完成後才標記外層 task 才正確。
+- **9/9 全抓到**；tests/test_timer.c 50→63 檢查（不是先前記錄的 61）。
+  順帶修正 Session 21 記錄裡這兩個數字。
+- **驗證**：`make unit` 14 套件全綠（約 89,180 檢查）；`make test` **真實離開碼 0**
+  （用 .sh 包起來跑，避開 wsl.exe 吞離開碼的坑）。killwait 端對端在日誌中確認
+  `[killwait parked]`、`[killwait killer done]`，兩條 SURVIVED 都沒出現，結尾
+  `Processes: running=0 zombies=0`、`Tasks: blocked=0`——停在等待中的 worker
+  thread 與 parent 都真的被殺掉了。
