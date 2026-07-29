@@ -312,7 +312,7 @@ int32_t process_wait(int32_t pid) {
 
     flags = save_irq_disable();
     while (process->state == PROCESS_RUNNING) {
-        task_block_current(process);
+        task_block_killable(process);
     }
 
     status = process->exit_status;
@@ -354,7 +354,7 @@ int32_t process_waitpid(int32_t pid, int32_t *status_out, int nohang) {
         if (nohang) { restore_irq(flags); return 0; }
 
         /* Block until a child exits; SIGCHLD's wake (or any reap) re-checks. */
-        task_block_current(process_get_current());
+        task_block_killable(process_get_current());
     }
 }
 
@@ -522,7 +522,7 @@ void process_pause(void) {
     if (process) {
         /* Sleep until a signal arrives; process_send_signal wakes us. */
         while (process->sig_pending == 0) {
-            task_block_current(process);
+            task_block_killable(process);
         }
     }
 
@@ -586,7 +586,7 @@ void process_thread_join(void) {
 
     if (process) {
         while (process->thread_count > 0) {
-            task_block_current(&process->thread_count);
+            task_block_killable(&process->thread_count);
         }
     }
 
@@ -708,13 +708,14 @@ int process_has_sighandler(int32_t pid, int signum) {
 void process_request_kill(int32_t pid) {
     process_t *proc;
     kill_request_pid = pid;
-    /* If the process is blocked (e.g. waiting on I/O), wake it so the kill
-     * can be applied on the next timer tick when it becomes the current task.
-     * Wake it by identity for the same reason as process_send_signal above. */
+    /* Mark and wake every task of the process, not just proc->task. Two
+     * reasons: a process may own several tasks (SYS_THREAD_CREATE), and a
+     * blocked task cannot be killed by the per-tick check below -- it only
+     * ever runs the few instructions between waking and re-blocking, with
+     * interrupts disabled, so no tick lands on it. task_kill_blocked() flags
+     * them so each leaves from inside its wait instead of looping back. */
     proc = process_find(pid);
-    if (proc && proc->task && proc->task->state == TASK_BLOCKED) {
-        task_wake_task(proc->task);
-    }
+    if (proc) task_kill_blocked(proc);
 }
 
 void process_account_tick(void) {
@@ -763,9 +764,10 @@ void process_check_kill(void) {
          * current instead; the staleness check above drops the request once the
          * last one has gone and the process is no longer RUNNING.
          *
-         * A thread parked indefinitely inside a `while (cond) block;` wait
-         * never becomes current, so it still cannot be reached this way --
-         * that needs interruptible sleeps, which this kernel does not have. */
-        task_exit(-130);  /* noreturn; EOI was already sent by irq_handler */
+         * This path only reaches tasks that are actually running. A task parked
+         * inside a `while (cond) block;` wait never becomes current and is
+         * instead flagged and woken by task_kill_blocked(), called from
+         * process_request_kill(); it then exits from task_block_killable(). */
+        task_exit(TASK_KILL_STATUS);  /* EOI was already sent by irq_handler */
     }
 }

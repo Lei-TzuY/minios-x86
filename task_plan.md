@@ -262,6 +262,24 @@ Status: complete
 - 突變教訓：stub 太嚴格獨立遮蔽了溢位 bug；加「強制已映射」模式隔離後 7 個全抓到。
 - 單元測試現 13 套件；clean build 0 warning/0 error、真實離開碼 0。
 
+## Phase 24: Session 21 — 可終止的阻塞等待（關掉 F17 誠實記錄的殘留限制）
+Status: complete
+- **F19（P2）**：停在 `while (cond) task_block_current(ch);` 的 task 完全殺不到
+  ——kill 只由計時器中斷裡的 process_check_kill 施行，而它只看當前 task，
+  而阻塞中的 task 永遠不會成為當前 task。後果：行程永遠 RUNNING，等它的人
+  永遠阻塞。順帶暴露：只喚醒 proc->task（漏掉其他 thread）、SIGSTOP 停住的
+  行程也殺不掉。
+- 修法刻意**不做 EINTR 上拋**（那是 Session 9 評估為「大改動」的路線，會動到
+  系統呼叫 ABI）：改成 task_t 加 kill_pending 旗標 + task_kill_blocked() 標記並
+  喚醒整個行程的 task + task_block_killable() 醒來就離開。10 個阻塞點換掉 9 個。
+- timer_sleep 是唯一例外（持有 sleep slot，必須先歸還再離開，且要判斷 slot
+  還是不是自己的）。
+- 驗證：單元 tests/test_task.c +21 檢查（72 total）與 tests/test_timer.c +11
+  檢查（61 total，涵蓋 timer_sleep 三條 kill 路徑，用 longjmp 模擬 task_exit）、
+  端對端 user/killwait.c（兩個 task 都在睡時由外部行程發 kill）、
+  突變測試 4 個注入全抓到。
+- 節點數 57、README 程式數 49、test-shell 逾時 270s。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目

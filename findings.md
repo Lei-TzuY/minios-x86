@@ -377,12 +377,9 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   `process_finish_exit` 把狀態轉為 ZOMBIE（或行程被釋放）之後自然清掉。
   其餘 thread 會在各自成為 current 時陸續被殺。pid 是單調遞增的，
   所以請求殘留一個 tick 不會誤殺別的行程。
-- **誠實記錄的殘留限制**：若某個 thread 長期停在 `while (cond) task_block_current(ch);`
-  這類等待迴圈中，它不會成為 current，因此**仍然殺不到**。要處理這種情況需要
-  「可中斷睡眠」（每個阻塞點都檢查待處理的 kill/signal 並回傳 EINTR），那會動到
-  sem_wait / pipe_read / keyboard_read / process_wait / waitpid / pause /
-  thread_join / timer_sleep 全部呼叫點，屬於較大的架構改動，依保守原則本輪不做。
-  已在程式碼註解中明確寫出這個限制。
+- ~~**誠實記錄的殘留限制**：若某個 thread 長期停在 `while (cond) task_block_current(ch);`
+  這類等待迴圈中，它不會成為 current，因此**仍然殺不到**~~：**已於 Session 21
+  修復，見下方 F19**。
 - 狀態: **已修＋已驗證**。新增 user/killthread.c：建立一個**持續可排程**（忙碌
   迴圈，確保計時器中斷必定在它是 current 時發生）的 worker thread，接著
   `sys_kill(getpid(), SIGKILL)` 殺自己所屬的行程。以背景方式（`&`）執行，因此
@@ -391,6 +388,66 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   `Processes: running=0 zombies=0` 斷言就會失敗。實測結果為
   `[killthread armed]` 出現、`[killthread SURVIVED]` 不存在、且結尾
   `running=0 / blocked=0 / sleeping=0`，證明兩個 task 都確實被終止。
+
+### F19 [P2][正確性/架構] 停在阻塞等待中的 task 完全殺不到 —— 行程永遠停在
+RUNNING，等它的人永遠阻塞（F17 誠實記錄的殘留限制，本輪根治）
+- 檔案: task.c `task_kill_blocked`/`task_kill_pending`、task.h `task_block_killable`、
+  process.c `process_request_kill`、timer.c `timer_sleep`、
+  以及全部 10 個阻塞點（kb/pipe x2/sem/syscall/process x4/timer）
+- **問題**：kill 請求只由計時器中斷裡的 `process_check_kill()` 施行，而它只看
+  **當前** task。停在 `while (cond) task_block_current(ch);` 的 task 永遠不會是
+  當前 task —— 它只在「被喚醒到再次阻塞」之間執行少數幾行，而且全程關中斷，
+  沒有任何一個 tick 會落在它身上。舊的 `process_request_kill` 雖然會
+  `task_wake_task(proc->task)`，但被喚醒的 task 條件沒滿足就直接回去繼續睡，
+  等於什麼也沒發生。後果：該行程停在 PROCESS_RUNNING，`wait` 它的人永遠阻塞。
+  額外兩個盲點：(a) 只喚醒 `proc->task`，多執行緒行程的其他 thread 根本沒被碰到；
+  (b) 被 SIGSTOP 停住的行程（`signal_deliver` 裡的 `while (process->stopped)`）
+  同樣殺不掉。
+- **修法（不做 EINTR 上拋，因此不動系統呼叫 ABI）**：
+  1. `task_t` 加 `kill_pending` 旗標；`task_kill_blocked(process)` 標記該行程的
+     **所有** task（ready 環 + blocked 串列）並把 blocked 的那些喚醒。
+     連 ready 的也標，是為了關掉「還沒被 tick 打到就先進去睡」的窗口。
+  2. `task_block_killable()`（task.h 的 static inline）＝ **阻塞前後都**檢查旗標，
+     成立就 `task_exit(TASK_KILL_STATUS)`，而不是回到迴圈繼續睡。
+     10 個阻塞點裡有 9 個直接換成它。
+     **前置檢查不是多餘的**：task 也可能在「正在執行」時被標記（第 1 點會標記
+     ready 的 task），若它接著進入等待，就會停在一個沒有人會來喚醒的地方——kill
+     已經發送過了，而 per-tick 檢查只看當前 task。被標記＝從此不再等待。
+  3. `process_request_kill` 改呼叫 `task_kill_blocked`，取代原本只喚醒
+     `proc->task` 的寫法。
+  4. `timer_sleep` 是唯一不能直接用 `task_block_killable` 的：它**持有一個
+     sleep slot**，必須先歸還再離開，否則那個 slot 會帶著一個指向已釋放記憶體的
+     指標卡到原本的到期時間。歸還時要判斷 slot 還是不是自己的 —— 若已到期，
+     `timer_callback` 早就清掉了，而且可能已經有別的 sleeper 接手，清錯會害它
+     永遠睡下去。
+- **層次切分**：「要殺哪個行程」的政策留在 process.c，task.c 只負責
+  「標記了就在醒來時離開」的機制，因此不需要 task.c 反向相依 process.c。
+- 狀態: **已修＋已驗證（單元＋端對端＋突變）**。
+  - 單元（scheduler）：tests/test_task.c 加 21 個檢查（72 total）——只喚醒目標行程的
+    blocked task、旗標同時落在 ready 的 task 上、其他行程完全不受影響、回傳計數、
+    NULL 為 no-op、`task_kill_pending` 只反映當前 task。
+  - 單元（timer_sleep 的三條 kill 路徑）：tests/test_timer.c 加 11 個檢查
+    （50→61）。`task_exit` 在測試中用 `longjmp` 模擬「不會回來」，因此三條路徑
+    都能確定性走到：(1) 已被標記時**根本不取 slot** 就離開（同時斷言
+    `g_blocks == 0`，否則後置檢查會遮蔽前置檢查的缺失）；(2) 睡著時才被標記 →
+    離開前必須歸還 slot；(3) 自己的期限已到、slot 已被**別的 sleeper** 接手時，
+    不得清掉對方的 slot（否則對方永遠睡下去）。另加一條反向測試：沒有 kill 時
+    sleep 必須正常返回，確保這些檢查不會自己亂觸發。
+  - 端對端：新增 user/killwait.c。worker thread 卡在沒人 post 的 semaphore，
+    main 卡在 `sys_thread_join()`，**兩個 task 都在睡**的時候由 fork 出來的子
+    行程發出 kill。以背景執行，回歸時不會 hang 整個測試。
+  - 突變測試：4 個注入全部被抓到（見 progress.md Session 21）。其中 M1
+    （`task_kill_pending` 恆回 0＝修復前的行為）同時被單元測試與 killwait
+    端對端測試抓到：QEMU 跑完的結尾變成
+    `Processes: running=1 zombies=1`、`Tasks: blocked=2`、`spaces=1`
+    （正是那兩個睡著沒死成的 task 與它們沒被釋放的位址空間），修好後全為 0。
+    這證明新測試確實有鑑別力，不是「反正沒印 SURVIVED 就算過」。
+- **本輪未處理、誠實記錄**：`timer_sleep` 若被**訊號**（非 kill）提早喚醒，會直接
+  回傳 0（沒睡滿），且 slot 會一直佔到原本的到期時間才由 `timer_callback` 清掉。
+  這是既有行為（`process_send_signal` 一直都會喚醒 `proc->task`），本輪刻意不改：
+  提早返回本身符合 POSIX `sleep()` 語意，slot 滯留是有界且會自癒的（不會被
+  解參照，只是佔位），而要修就得改動 test_timer 對「睡著」的建模方式，與本輪
+  主題無關。
 
 ## 驗證能力建設（Session 10）
 
@@ -778,16 +835,18 @@ thread，直接摧毀共享 address space → 其餘 thread 之後被排程時�
   PERF2**（改為幾何成長、攤還 O(1) append）。
 - ~~**task_wake_one 是 LIFO 不是 FIFO**~~：**已於 Session 3 改為 FIFO，見上方
   FAIR1**；此改動同時暴露並促成了 F10（依身分喚醒特定 task）的修復。
-- **多執行緒行程的訊號/終止仍無法觸及「長期阻塞中的 thread」**（範圍已於
-  Session 9 縮小）：`kill` 本身已由 F17 修好——請求會保留到行程真正結束，
-  各 thread 在成為 current 時陸續被殺。**剩下的真正限制**是：停在
-  `while (cond) task_block_current(ch);` 這類等待迴圈中的 thread 永遠不會成為
-  current，因此既收不到訊號遞送、也殺不掉（`process_send_signal` 也只喚醒
-  `process->task`）。根治需要「可中斷睡眠」：每個阻塞點都要檢查待處理的
-  kill/signal 並回傳 EINTR，牽涉 sem_wait / pipe_read / pipe_write /
-  keyboard_read / process_wait / process_waitpid / process_pause /
-  process_thread_join / timer_sleep 全部呼叫點，是明顯的架構改動且回歸風險高，
-  依保守原則不做。已在 process_check_kill 的註解中寫明。
+- ~~**多執行緒行程的訊號/終止仍無法觸及「長期阻塞中的 thread」**~~：**終止的部分
+  已於 Session 21 修復，見上方 F19**（kill_pending 旗標 + task_kill_blocked +
+  task_block_killable，被殺的 task 醒來就離開而不是回到等待迴圈）。
+  **剩下的部分是「訊號遞送」**：`process_send_signal` 仍只喚醒 `process->task`，
+  而且訊號只在返回使用者模式時遞送（`signal_deliver` 檢查 `regs->cs != 0x1B`），
+  所以停在等待中的 thread 收不到可捕捉的訊號——它不會返回使用者模式。這才是真正
+  需要「可中斷睡眠 + EINTR 上拋」的部分：每個阻塞點都要能中途放棄並讓系統呼叫
+  回傳 EINTR，牽涉 sem_wait / pipe_read / pipe_write / keyboard_read /
+  process_wait / process_waitpid / process_pause / process_thread_join /
+  timer_sleep 全部呼叫點**以及使用者空間對「系統呼叫可能被中斷」的預期**，
+  是會動到 ABI 的架構改動，依保守原則不做。F19 之所以能用小得多的改動完成，
+  正是因為「終止」不需要回到使用者空間，直接 task_exit 即可。
 - ~~**elf_loader 只從 RAMFS 載入可執行檔**~~：**已於 Session 6 實作，見下方
   FEAT1**（改走 VFS，可從任何已掛載的檔案系統執行程式）。
 

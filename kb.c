@@ -174,7 +174,7 @@ size_t keyboard_read(char *buffer, size_t count) {
 
     flags = save_irq_disable();
     while (keyboard_read_index == keyboard_write_index) {
-        task_block_current(keyboard_buffer);
+        task_block_killable(keyboard_buffer);
     }
 
     while (bytes_read < count && keyboard_read_index != keyboard_write_index) {

@@ -37,7 +37,14 @@ typedef struct task {
     task_state_t state;
     uint32_t user_entry; /* thread entry point (0 for non-thread tasks) */
     uint32_t user_stack; /* thread user stack top (0 for non-thread tasks) */
+    /* Set by task_kill_blocked(): this task must terminate as soon as it is
+     * running again, rather than resume whatever it was waiting for. */
+    volatile uint8_t kill_pending;
 } task_t;
+
+/* Exit status given to a task terminated by a kill request (128 + SIGINT),
+ * matching the shell convention used by process_check_kill(). */
+#define TASK_KILL_STATUS (-130)
 
 void tasking_init(void);
 task_t* create_task(void (*entry)(void), task_exit_callback_t on_exit,
@@ -55,8 +62,32 @@ void task_wake_all(const void *wait_channel);
  * that same child blocks on its own process_t in process_waitpid), so picking
  * "some waiter" can wake the wrong one and leave the intended task asleep. */
 void task_wake_task(task_t *task);
+/* Mark every task belonging to `process` for termination and wake the blocked
+ * ones, so each leaves from inside its wait loop. Returns how many were woken.
+ * This is the only way to reach a task parked in `while (cond) block;`: it
+ * never becomes the current task, so the per-tick check that terminates a
+ * killed process (process_check_kill) can never see it. */
+uint32_t task_kill_blocked(struct process *process);
+/* Non-zero when the current task has been marked for termination. */
+int task_kill_pending(void);
 uint32_t task_get_blocked_count(void);
 void schedule(void);
 void task_exit(int32_t status) __attribute__((noreturn));
+
+/* Block on `wait_channel` and, once woken, honour a kill that landed while the
+ * task was parked instead of looping back into the wait. Every blocking wait
+ * in the kernel should use this rather than task_block_current() directly; the
+ * one exception is a caller that must release a resource before dying (see
+ * timer_sleep), which does the same check itself after cleaning up. */
+static inline void task_block_killable(const void *wait_channel) {
+    /* Check before blocking as well as after. A task can be flagged while it is
+     * running -- task_kill_blocked() marks the killed process's runnable tasks
+     * too -- and if it then entered a wait it would park with nothing left to
+     * wake it: the kill has already been delivered, and the per-tick check only
+     * looks at the current task. Flagged means "never wait again". */
+    if (task_kill_pending()) task_exit(TASK_KILL_STATUS);
+    task_block_current(wait_channel);
+    if (task_kill_pending()) task_exit(TASK_KILL_STATUS);
+}
 
 #endif

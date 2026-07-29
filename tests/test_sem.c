@@ -1,6 +1,8 @@
 #include "test.h"
 #include "../sem.h"
 
+#include <stdlib.h>
+
 /*
  * Counting semaphores. The value accounting and the id validation run without
  * blocking and are checked directly. The blocking wait (value <= 0) is driven
@@ -21,6 +23,14 @@ void task_block_current(const void *chan) {
 }
 void task_wake_one(const void *chan) { (void)chan; }
 void task_wake_all(const void *chan) { (void)chan; }
+
+/* task_block_killable() consults these on both sides of every block. Nothing
+ * in this harness issues a kill request, so sem_wait must never exit. */
+int task_kill_pending(void) { return 0; }
+void task_exit(int32_t status) {
+    printf("  FAIL unexpected task_exit(%d)\n", status);
+    exit(1);
+}
 
 static void test_id_validation(void) {
     TEST("id validation");

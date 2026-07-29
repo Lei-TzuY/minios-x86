@@ -82,7 +82,8 @@ void tasking_init(void) {
     main_task->on_exit = 0;
     main_task->wait_channel = 0;
     main_task->state = TASK_READY;
-    
+    main_task->kill_pending = 0;
+
     current_task = main_task;
     ready_queue = main_task;
 
@@ -111,6 +112,7 @@ task_t* create_task(void (*entry)(void), task_exit_callback_t on_exit,
     new_task->blocked_next = 0;
     new_task->wait_channel = 0;
     new_task->state = TASK_READY;
+    new_task->kill_pending = 0;
     new_task->user_entry = user_entry;
     new_task->user_stack = user_stack;
 
@@ -243,6 +245,58 @@ void task_wake_task(task_t *task) {
         link = &(*link)->blocked_next;
     }
     restore_irq(flags);
+}
+
+/* Mark every task of `process` for termination and wake the blocked ones.
+ *
+ * The ready ones are handled by process_check_kill() on the next timer tick,
+ * but marking them too closes the window where such a task parks in a wait
+ * before any tick lands on it. The blocked ones are the whole point: a task
+ * sitting in `while (cond) block;` never becomes current, so without this it
+ * stays asleep for good and its process never finishes dying.
+ *
+ * A woken task resumes inside task_block_current(), and the kill_pending check
+ * in task_block_killable() takes it out from there. */
+uint32_t task_kill_blocked(struct process *process) {
+    uint32_t flags = save_irq_disable();
+    uint32_t woken = 0;
+    task_t **link = &blocked_tasks;
+    task_t *ready = (task_t *)ready_queue;
+
+    if (!process) {
+        restore_irq(flags);
+        return 0;
+    }
+
+    if (ready) {
+        task_t *task = ready;
+
+        do {
+            if (task->process == process) task->kill_pending = 1;
+            task = task->next;
+        } while (task && task != ready);
+    }
+
+    while (*link) {
+        task_t *task = *link;
+
+        if (task->process == process) {
+            task->kill_pending = 1;
+            *link = task->blocked_next;   /* now points at the next entry */
+            add_ready_task(task);
+            woken++;
+            continue;
+        }
+        link = &task->blocked_next;
+    }
+    restore_irq(flags);
+    return woken;
+}
+
+int task_kill_pending(void) {
+    task_t *task = (task_t *)current_task;
+
+    return task && task->kill_pending;
 }
 
 uint32_t task_get_blocked_count(void) {

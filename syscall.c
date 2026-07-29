@@ -821,7 +821,7 @@ void signal_deliver(registers_t *regs) {
         if (sig == SIGSTOP) {
             process->stopped = 1;
             while (process->stopped) {
-                task_block_current(&process->stopped);
+                task_block_killable(&process->stopped);
                 if (process->sig_pending & (1u << SIGCONT)) {
                     process->sig_pending &= ~(1u << SIGCONT);
                     process->stopped = 0;
