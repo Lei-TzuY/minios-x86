@@ -280,6 +280,16 @@ Status: complete
   突變測試 4 個注入全抓到。
 - 節點數 57、README 程式數 49、test-shell 逾時 270s。
 
+## Phase 25: Session 22 — paging COW 參照計數 + user_pte 單元測試
+Status: complete
+- **CAP11**：新增 tests/test_paging_cow.c（31 檢查）測 user_pte（vaddr→頁表項的
+  區域選擇與移位 index）與 COW 參照計數 cow_ref_inc/cow_ref_release。--gc-sections
+  讓兩者閉包不需任何外部函式，零 stub。
+- 突變測試 7 個：6 個功能上抓到；cow_ref_inc 的越界寫入無功能訊號，改用
+  **UBSan 陣列邊界陷阱**（trap 模式、-m32 可用）抓到，補足突變測試對「不可觀察
+  記憶體越界」的盲點，7 個全抓到。
+- 單元測試現 14 套件；clean build 0 warning/0 error、真實離開碼 0。
+
 ## 本輪結論
 所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
 記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目

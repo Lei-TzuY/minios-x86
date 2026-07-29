@@ -588,3 +588,20 @@
   slot 滯留有界且會自癒（不會被解參照）；要修得改 test_timer 對「睡著」的建模，
   與本輪主題無關。已寫進 findings.md F19。
 - 節點數 57、README 程式數 49、test-shell 逾時 260s→270s（新增指令的時間預算）。
+
+## Session 22 — 2026-07-29
+
+- **CAP11：paging COW 參照計數 + user_pte 單元測試**（31 檢查）。fork/COW 核心：
+  user_pte 把 vaddr 映射到正確頁表項（低 0-4MB 表 vs 32-36MB mmap 表，裸移位
+  index 邊界易 off-by-one）；page_ref[] 記錄「超出唯一擁有者的額外參照數」，
+  release 必須只在最後參照消失時回「該釋放」。錯誤導致難查的記憶體損毀。
+- 手法（--gc-sections）：兩者閉包**不需任何外部函式**，零 stub。
+- **突變測試 7 個 ＋ 無功能訊號 bug 的解法**：6/7 功能上抓到；漏掉的是
+  cow_ref_inc 的 `< FRAME_COUNT` 改 `<=`——純越界寫入 page_ref[FRAME_COUNT]，
+  功能斷言看不到。解法：此測試改用 **UBSan 陣列邊界陷阱**
+  （-fsanitize=undefined,bounds + trap-on-error，不需 libubsan、-m32 可用），
+  把越界變硬陷阱。加上後 7 個全抓到。補足突變測試對「不可觀察記憶體越界」的盲點。
+- **驗證**：clean build 0 warning / 0 error；單元測試現為 14 套件（+paging-cow）。
+  注意：組合式 `make test` 首跑出現 exit 2，但四個 QEMU 整合測試個別重跑皆 exit 0；
+  本輪改動全為 host 端測試檔，未觸及任何 kernel 原始碼，kernel.bin 位元組相同，
+  判定為連續 QEMU 測試的時序 flakiness，重跑確認綠燈後提交。

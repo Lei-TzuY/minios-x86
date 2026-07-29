@@ -779,6 +779,30 @@ RUNNING，等它的人永遠阻塞（F17 誠實記錄的殘留限制，本輪根
   溢位 bound 時**隔離**該邏輯，讓只有 bound 算術決定結果。修正後 **7 個全抓到**。
   這再次印證：stub 太嚴格會遮蔽受測邏輯的 bug，突變測試能把這種盲點揪出來。
 
+### CAP11 paging COW 參照計數 + user_pte 單元測試（fork 正確性核心）
+- 檔案: tests/test_paging_cow.c、Makefile
+- 目標: `user_pte`（把使用者 vaddr 映射到正確頁表項——低 0-4MB 表 vs 32-36MB
+  mmap 表，index 是裸移位，邊界 off-by-one 會靜默讀寫錯頁）與 COW 參照計數
+  `cow_ref_inc`/`cow_ref_release`（`page_ref[]` 記錄「超出唯一擁有者的額外參照
+  數」，0=一個擁有者；release 必須只在最後一個參照消失時回「該釋放」，邊界錯了
+  就釋放仍被別的位址空間共享的頁，或永久洩漏）。這些是 fork/COW 的核心，錯誤會
+  導致難以追查的記憶體損毀。
+- 手法（同 --gc-sections）：兩者傳遞閉包**不需任何外部函式**，連結器丟掉頁錯誤
+  處理常式、組語、pmm/heap，零 stub。用真實 page_table_t 讓 user_pte 指入、直接
+  讀寫檔案範圍的 page_ref[] 陣列。
+- 涵蓋: user_pte 低窗（0/同頁/相鄰頁/1023 邊界）、ext 窗（rebase 到視窗起點、
+  1023 邊界）、兩窗之間的 gap 與各邊界回 NULL、NULL space/缺表回 NULL；
+  refcount 的 inc 計數與越界忽略、release 的最後參照才釋放/共享時保留/歸零後不
+  下溢、以及一個完整的 fork→exit 序列。31 檢查。
+- **突變測試（7 個）＋一個關於「無功能訊號的 bug」的解法**：6/7 功能上被抓到；
+  漏掉的是 `cow_ref_inc` 的 `frame < FRAME_COUNT` 改成 `<=`——那是純粹的**越界
+  寫入** `page_ref[FRAME_COUNT]`，功能斷言看不到。解法：這個測試改用
+  **UBSan 陣列邊界陷阱**（`-fsanitize=undefined,bounds` +
+  `-fsanitize-undefined-trap-on-error`，trap 模式不需 libubsan、-m32 可用），
+  把越界存取變成硬陷阱（ud2/Illegal instruction）。加上後 **7 個全抓到**。
+  這補足了突變測試的一類盲點：功能上不可觀察的記憶體越界，可用 sanitizer 陷阱
+  轉成可觀察的失敗。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）

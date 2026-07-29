@@ -32,7 +32,8 @@ UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
 UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
             tests/test_fat16 tests/test_diskfs tests/test_pipe tests/test_sem \
             tests/test_timer tests/test_task tests/test_rtc \
-            tests/test_process_env tests/test_syscall_valid
+            tests/test_process_env tests/test_syscall_valid \
+            tests/test_paging_cow
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -98,6 +99,16 @@ tests/test_process_env: tests/test_process_env.c tests/test.h process.c process.
 tests/test_syscall_valid: tests/test_syscall_valid.c tests/test.h syscall.c syscall.h paging.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
 	    -Wl,--gc-sections tests/test_syscall_valid.c -o $@
+
+# Same --gc-sections trick: only user_pte and the COW refcount helpers are
+# reached, so the fault handler, the asm and pmm/heap are all dropped and no
+# stub is needed. The bounds sanitizer (trap mode, no libubsan needed) turns an
+# out-of-bounds page_ref[] write -- a frame-index off-by-one has no functional
+# signature otherwise -- into a hard trap, so such a regression is caught.
+tests/test_paging_cow: tests/test_paging_cow.c tests/test.h paging.c paging.h elf_loader.h pmm.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -fsanitize=undefined,bounds \
+	    -fsanitize-undefined-trap-on-error -ffunction-sections -fdata-sections \
+	    -Wl,--gc-sections tests/test_paging_cow.c -o $@
 
 unit: $(UNIT_BINS)
 	@fail=0; \
