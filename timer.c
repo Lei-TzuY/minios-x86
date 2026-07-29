@@ -76,12 +76,25 @@ int timer_sleep(uint32_t ticks) {
         restore_irq(flags);
         return -1;
     }
+    /* Already flagged for termination: leave now rather than take a sleep slot
+     * that nothing would ever wake (same reasoning as task_block_killable). */
+    if (task_kill_pending()) task_exit(TASK_KILL_STATUS);
 
     for (uint32_t i = 0; i < MAX_SLEEPING_TASKS; i++) {
         if (!sleeping_tasks[i].task) {
             sleeping_tasks[i].task = task;
             sleeping_tasks[i].wake_tick = timer_ticks + ticks;
             task_block_current(&sleeping_tasks[i]);
+            /* This is the one wait that cannot use task_block_killable(): the
+             * sleep slot must be handed back before the task goes away, or it
+             * would stay reserved with a pointer to freed memory until the
+             * original deadline passed. Only clear it while it is still ours --
+             * if the deadline fired, timer_callback already cleared it and
+             * another sleeper may have taken the slot over. */
+            if (task_kill_pending()) {
+                if (sleeping_tasks[i].task == task) sleeping_tasks[i].task = NULL;
+                task_exit(TASK_KILL_STATUS);
+            }
             restore_irq(flags);
             return 0;
         }

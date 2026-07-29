@@ -38,7 +38,7 @@ uint32_t pipe_read(pipe_t *p, uint8_t *buffer, uint32_t len) {
 
     /* Block until there is data, or every writer has closed (EOF). */
     while (p->count == 0 && p->writers > 0) {
-        task_block_current(&p->count);
+        task_block_killable(&p->count);
     }
 
     while (got < len && p->count > 0) {
@@ -67,7 +67,7 @@ uint32_t pipe_write(pipe_t *p, const uint8_t *buffer, uint32_t len) {
 
         if (p->count == PIPE_BUF_SIZE) {       /* full: let readers drain */
             task_wake_all(&p->count);
-            task_block_current(&p->read_pos);
+            task_block_killable(&p->read_pos);
             continue;
         }
 

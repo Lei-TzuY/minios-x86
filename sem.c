@@ -35,7 +35,7 @@ int sem_wait(int id) {
     flags = save_irq_disable();
     if (!semaphores[id].used) { restore_irq(flags); return -1; }
     while (semaphores[id].value <= 0) {
-        task_block_current(&semaphores[id]);
+        task_block_killable(&semaphores[id]);
     }
     semaphores[id].value--;
     restore_irq(flags);

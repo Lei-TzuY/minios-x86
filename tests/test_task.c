@@ -16,7 +16,9 @@
  *   - task_wake_one / task_wake_all wake by wait channel,
  *   - task_wake_task wakes a SPECIFIC task by identity (added in F10 to fix a
  *     deadlock); until now it was only covered indirectly by the job-control
- *     end-to-end test.
+ *     end-to-end test,
+ *   - task_kill_blocked flags every task of one process and wakes the blocked
+ *     ones, which is what lets a kill reach a task parked in a wait (F19).
  *
  * All of that runs without a real context switch, so it can be checked here
  * directly.
@@ -207,11 +209,83 @@ static void test_wake_channel_selectivity(void) {
     CHECK_EQ(task_get_blocked_count(), 0);
 }
 
+/* task.c only ever compares task->process by address, so any distinct
+ * addresses stand in for real processes here. */
+static int proc_a, proc_b;
+
+static task_t *make_task(void *owner) {
+    task_t *t = create_task(noop_entry, NULL, paging_get_kernel_address_space(),
+                            (struct process *)owner, 0, 0);
+    return t;
+}
+
+static void test_kill_blocked(void) {
+    task_t *a = make_task(&proc_a);       /* target process, will be blocked */
+    task_t *b = make_task(&proc_a);       /* target process, stays ready */
+    task_t *c = make_task(&proc_b);       /* a different process, blocked */
+
+    TEST("kill_blocked wakes the target's blocked tasks and flags them");
+    CHECK(a && b && c);
+    block_task(a, &ch1);
+    block_task(c, &ch1);                  /* same channel, different process */
+    CHECK_EQ(task_get_blocked_count(), 2);
+
+    /* Only the blocked task of the target counts as woken; b was already
+     * runnable and c belongs to someone else. */
+    CHECK_EQ(task_kill_blocked((struct process *)&proc_a), 1);
+    CHECK(ready_contains(a));
+    CHECK_EQ(a->state, TASK_READY);       /* fully requeued, not just unlinked */
+    CHECK(a->wait_channel == NULL);
+    CHECK_EQ(a->kill_pending, 1);
+    CHECK_EQ(task_get_blocked_count(), 1);
+
+    TEST("kill_blocked flags the target's runnable tasks too");
+    /* A ready task of the target could otherwise park in a wait before any
+     * timer tick lands on it, and would then be unreachable. */
+    CHECK_EQ(b->kill_pending, 1);
+
+    TEST("kill_blocked leaves other processes alone");
+    CHECK(!ready_contains(c));            /* still blocked */
+    CHECK_EQ(c->state, TASK_BLOCKED);
+    CHECK_EQ(c->kill_pending, 0);
+
+    TEST("kill_blocked with nothing to do");
+    CHECK_EQ(task_kill_blocked((struct process *)&proc_a), 0);  /* none left blocked */
+    CHECK_EQ(task_kill_blocked(NULL), 0);                       /* NULL is a no-op */
+    CHECK_EQ(c->kill_pending, 0);
+    CHECK_EQ(task_get_blocked_count(), 1);
+
+    /* Clean up: c is still blocked and would skew later counts. */
+    task_wake_task(c);
+    CHECK_EQ(task_get_blocked_count(), 0);
+}
+
+static void test_kill_pending_is_per_task(void) {
+    task_t *a = make_task(&proc_a);       /* flagged below */
+    task_t *b = make_task(&proc_b);       /* never flagged */
+
+    /* task_block_killable() asks task_kill_pending() about the CURRENT task, so
+     * a flag on one task must not make another task exit. */
+    TEST("kill_pending reports the current task only");
+    CHECK(a && b);
+    block_task(a, &ch1);
+    CHECK_EQ(task_kill_blocked((struct process *)&proc_a), 1);
+
+    current_task = a;
+    CHECK_EQ(task_kill_pending(), 1);
+    current_task = b;
+    CHECK_EQ(task_kill_pending(), 0);
+
+    a->kill_pending = 0;                  /* leave the ring clean for later tests */
+}
+
 int main(void) {
     test_setup();
     test_block_removes_from_ready();
     test_fifo_wake_order();
     test_wake_task_by_identity();
     test_wake_channel_selectivity();
+    test_kill_blocked();
+    test_kill_pending_is_per_task();
     TEST_REPORT("task");
 }

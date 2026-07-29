@@ -539,3 +539,52 @@
   突變測試把這盲點揪出來。
 - **驗證**：clean build 0 warning / 0 error；`make test` **真實離開碼 0**。
   單元測試現為 13 套件（+syscall-valid）。
+
+## Session 21 — 2026-07-29
+
+- **F19（P2，正確性/架構）：停在阻塞等待中的 task 完全殺不到**。這是 Session 9
+  修 F17 時**自己誠實記錄下來的殘留限制**，當時判斷「需要可中斷睡眠、屬較大架構
+  改動」而不動。本輪回頭把它根治——但**沒有做 EINTR 上拋**（那才是當初評估的大
+  改動），而是選了範圍小得多的做法：被殺的 task 醒來後直接離開，不回到等待迴圈。
+- **問題的機制**：kill 請求只由計時器中斷中的 `process_check_kill()` 施行，而它
+  只看**當前** task。停在 `while (cond) task_block_current(ch);` 的 task 永遠不會
+  是當前 task——它只在「被喚醒到再次阻塞」之間跑幾行，而且全程關中斷，不會有
+  tick 落在它身上。舊的 `process_request_kill` 雖然會 `task_wake_task(proc->task)`，
+  但醒來的 task 條件沒滿足就回去繼續睡，等於白喚醒。順帶暴露另外兩個盲點：
+  只喚醒 `proc->task`（多執行緒行程的其他 thread 根本沒碰到）、被 SIGSTOP 停住的
+  行程也殺不掉。
+- **修法**：`task_t` 加 `kill_pending`；`task_kill_blocked(process)` 標記該行程
+  **所有** task（ready 環 + blocked 串列）並喚醒 blocked 的；`task_block_killable()`
+  （task.h 的 static inline）＝阻塞後檢查旗標，成立就 `task_exit`。10 個阻塞點
+  換掉 9 個。政策（殺誰）留在 process.c，機制（醒來就走）在 task.c，**不需要
+  task.c 反向相依 process.c**。
+- **timer_sleep 是唯一的例外**，因為它**持有一個 sleep slot**：必須先歸還再離開，
+  否則 slot 會帶著一個指向已釋放記憶體的指標卡到原本的到期時間。歸還時要判斷
+  slot 還是不是自己的——若已到期，`timer_callback` 早就清了，而且可能已有別的
+  sleeper 接手，清錯會害它永遠睡下去。
+- **新測試**：
+  - 端對端 user/killwait.c：worker thread 卡在沒人 post 的 semaphore，main 卡在
+    `sys_thread_join()`，**兩個 task 都在睡**的時候由 fork 出來的子行程發 kill。
+    以背景執行，回歸時不會 hang 整個測試，而是在結尾的 `Processes: running=0` /
+    `Tasks: blocked=0` 上現形。
+  - 單元 tests/test_task.c +21 檢查（51→72）：只喚醒目標行程的 blocked task、
+    旗標也落在 ready 的 task 上、其他行程不受影響、回傳計數、NULL no-op、
+    `task_kill_pending` 只反映當前 task。
+  - 單元 tests/test_timer.c +11 檢查（50→61）：timer_sleep 三條 kill 路徑。
+    `task_exit` 用 `longjmp` 模擬「不會回來」的語意，於是可確定性驗證：已被標記
+    時**不取 slot** 就離開（並斷言真的沒 park，否則後置檢查會遮蔽前置檢查的
+    缺失）、睡著時被標記則離開前歸還 slot、以及期限已到且 slot 被別人接手時
+    **不得**清掉對方的 slot。外加一條「沒有 kill 時 sleep 照常返回」的反向測試。
+- **突變測試（4 個注入，全部被抓到）**：
+  - M1 `task_kill_pending` 恆回 0（＝修復前的行為）→ 單元 + killwait 端對端都抓到。
+    端對端的失敗訊號很具體：結尾 `Processes: running=1 zombies=1`、
+    `Tasks: blocked=2`、`User pages: spaces=1`（就是那兩個沒死成的 task），
+    修好後全為 0。這排除了「沒印 SURVIVED 就算過」的假綠燈疑慮。
+  - M2 blocked 迴圈不設 kill_pending → 單元 2 個檢查失敗。
+  - M3 完全跳過 ready 環 → 單元「ready 的 task 也要被標」失敗。
+  - M4 忽略 `task->process`（無差別殺）→ 單元 7 個檢查失敗（含「其他行程不受影響」）。
+- **誠實記錄、本輪不改**：`timer_sleep` 被**訊號**（非 kill）提早喚醒時會直接回傳 0
+  且 slot 佔到原到期時間才被清。這是既有行為，提早返回符合 POSIX `sleep()` 語意，
+  slot 滯留有界且會自癒（不會被解參照）；要修得改 test_timer 對「睡著」的建模，
+  與本輪主題無關。已寫進 findings.md F19。
+- 節點數 57、README 程式數 49、test-shell 逾時 260s→270s（新增指令的時間預算）。
