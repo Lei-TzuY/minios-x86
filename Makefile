@@ -33,7 +33,7 @@ UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
             tests/test_fat16 tests/test_diskfs tests/test_pipe tests/test_sem \
             tests/test_timer tests/test_task tests/test_rtc \
             tests/test_process_env tests/test_syscall_valid \
-            tests/test_paging_cow
+            tests/test_paging_cow tests/test_elf
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -109,6 +109,13 @@ tests/test_paging_cow: tests/test_paging_cow.c tests/test.h paging.c paging.h el
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -fsanitize=undefined,bounds \
 	    -fsanitize-undefined-trap-on-error -ffunction-sections -fdata-sections \
 	    -Wl,--gc-sections tests/test_paging_cow.c -o $@
+
+# The loader parses an untrusted file, so the test feeds it deliberately
+# malformed images. --gc-sections drops elf_spawn/elf_exec, and with them the
+# process_launch/process_wait dependencies, since only elf_load_image is called.
+tests/test_elf: tests/test_elf.c tests/test.h elf_loader.c elf_loader.h fs.h paging.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
+	    -Wl,--gc-sections tests/test_elf.c -o $@
 
 unit: $(UNIT_BINS)
 	@fail=0; \
