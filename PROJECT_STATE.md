@@ -1,0 +1,232 @@
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 25 / 2026-07-31）
+
+新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
+`findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
+
+---
+
+## 1. 這是什麼
+
+32-bit x86 教學型作業系統，從零以 C 與組合語言寫成，Multiboot/GRUB 開機，
+在 ring 3 執行使用者程式。
+
+| 項目 | 數量 |
+|---|---|
+| 核心 C/ASM（不含 `*_embed.c` 產生檔） | ~9,100 行 |
+| `user/` ring-3 程式與 syscall wrapper | ~3,500 行 |
+| `tests/` 原生單元測試 | ~4,200 行 |
+| 系統呼叫 | 51 |
+| 使用者程式 | 50 |
+| 單元測試套件 | 16 |
+
+### 子系統
+
+| 層 | 檔案 | 說明 |
+|---|---|---|
+| 開機 | `boot.s`, `multiboot.h`, `linker.ld`, `grub.cfg` | Multiboot 進入點 |
+| 記憶體 | `pmm.c`, `paging.c`, `paging_s.s`, `heap.c` | 位元圖 frame 配置、分頁 + COW、核心堆積 |
+| 中斷 | `idt.c`, `isr.c`, `interrupt.s`, `irq.h`, `io.h` | IDT、ISR、IRQ save/restore |
+| 排程 | `task.c`, `switch_s.s`, `timer.c` | ready 環 + blocked 串列、context switch、PIT |
+| 行程 | `process.c`, `syscall.c`, `usermode_s.s`, `elf_loader.c` | fork/exec/signal/thread、int 0x80、ELF 載入 |
+| IPC | `pipe.c`, `sem.c` | 環狀緩衝 pipe、計數號誌 |
+| 檔案系統 | `fs.c`(VFS), `ramfs.c`, `diskfs.c`, `fat16.c`, `procfs.c` | 三個後端 + 合成 `/proc` |
+| 驅動 | `ata.c`, `kb.c`, `rtc.c`, `vga.c` | PIO ATA、鍵盤、CMOS RTC、文字模式 |
+| 其他 | `gdt.c`, `gdt_s.s`, `utils.c`, `kernel.c` | GDT/TSS、字串與記憶體、開機流程 + 核心 shell |
+
+---
+
+## 2. 不可破壞的行為（改動前務必確認）
+
+這些是既有測試守護的性質，違反了就是回歸。
+
+### 併發模型
+
+- **`int $0x80` 的 IDT 閘門是 `0xEE`（interrupt gate）**，CPU 進入時自動清 IF，
+  因此**系統呼叫全程關中斷**。這是本專案「全域 cli」併發模型的基礎——多數地方
+  「沒上鎖」是設計選擇而非 bug。
+- 推論：**核心裡任何無界迴圈都會凍結整台機器**（F22 就是這樣的 P0）。
+- 阻塞點一律寫成 `while (cond) task_block_killable(ch);`——偽喚醒必須無害。
+
+### 參照與生命週期
+
+- **檔案開啟中不得 unlink**：三個檔案系統都必須維持。F11（dup2/redirect）、
+  F12（FAT16 開啟計數）、F20（ELF 載入器）三個修復都依賴它。破壞它 =
+  核心 use-after-free（從已釋放記憶體讀出函式指標並呼叫）。
+- **RAMFS 的 `impl` 一個欄位身兼兩用**：bit 0 是 `RAMFS_DYNAMIC` 旗標，其上是
+  開啟參照計數。open/close 不得動到 bit 0。
+- **參照必須成對**：取得後所有離開路徑都要釋放。`elf_load_image` 為此把主體拆成
+  `elf_load_from_node()`，讓外層只剩單一出口。
+- 位址空間在最後一個 task 結束前不得銷毀（F1/F7 的教訓，`thread_count` 延後機制）。
+
+### 使用者輸入的驗證
+
+- **每個 raw 使用者指標都要過 `user_buffer_valid` / `user_string_valid`**；
+  界限比較要寫成不會溢位的形式（先確立下界，再用減法）。
+- **ELF 的每個欄位都是攻擊者可控**（可寫任意位元組到檔案再執行）。
+  `paging_map_user_page()` **不做任何範圍檢查**，載入器的檢查是唯一防線。
+- program header 讀兩次（驗證、使用），**兩次都要驗**（F21 的 TOCTOU）。
+
+### 排程
+
+- blocked 串列是 **FIFO**（尾插頭取）。改回 LIFO 會讓 starvation 回歸，
+  也會讓依賴身分喚醒的地方失去正確性（F10 的教訓）。
+- 需要喚醒**特定** task 時用 `task_wake_task()`，不可用 `task_wake_one(channel)`
+  ——不相關的 task 常共用 channel。
+- 被標記 `kill_pending` 的 task **從此不再等待**（`task_block_killable` 前後都檢查）。
+
+### 測試基準（`test-shell` 結尾的精確斷言）
+
+```
+User pages: accessible=0 spaces=0
+Processes: running=0 zombies=0 peak=4
+Tasks: blocked=0
+Timers: sleeping=0
+RAMFS nodes=58
+ATA sectors: available=2048 reads=19 writes=76
+DiskFS: mounted=1 generation=9 files=0
+```
+這些是**洩漏偵測器**：任何未釋放的行程/task/計時器/節點都會讓它們失衡。
+
+---
+
+## 3. 已完成工作
+
+### 已修問題（F1–F22）
+
+分佈：**4 個 P0**（F1、F2、F14、F22，其中三個可讓**整台機器停機**）、
+4 個 P1、7 個 P2、5 個 P3、2 個 P4。
+
+| ID | 級別 | 摘要 |
+|---|---|---|
+| F1 | P0 | 多執行緒 exit 的位址空間 UAF（`thread_count` 延後銷毀） |
+| F2 | P0 | `signal_deliver` 未驗證使用者 ESP → 核心整台停機 |
+| F3 | P3 | procfs 固定緩衝區可溢位 |
+| F4 | P2 | FAT16 節點池別名導致資料錯置 |
+| F5/F6 | P4 | `make clean` 遺漏、README 數字不一致 |
+| F7 | P1 | execv 從多執行緒行程呼叫的 UAF |
+| F8 | P2 | `vfs_resolve_path` 過長路徑靜默截斷→解析到祖先目錄 |
+| F9 | P3 | FAT16 叢集耗盡時長度記錯 |
+| F10 | P1 | 用 channel 喚醒「特定 task」→ 系統死鎖（由 FAIR1 暴露） |
+| F11 | P1 | dup2/redirect 未取 VFS 參照 → 核心 UAF |
+| F12 | P2 | FAT16 無開啟計數 → 跨檔案資料洩漏 |
+| F13 | P2 | fork 未繼承 fd 0/1 |
+| F14 | P0 | `SYS_SIGRETURN` 完全未驗證 → 核心整台停機 |
+| F15/F16 | P3 | `sys_sbrk` 的 INT32_MIN UB、umalloc 的 int 溢位 |
+| F17 | P2 | kill 多執行緒行程只殺得掉一個 task |
+| F18 | P3 | `pmm_init_region` 重新保留 frame 0 時計數未補回 |
+| F19 | P2 | 停在阻塞等待中的 task 完全殺不到（kill_pending 機制） |
+| F20 | P1 | ELF 載入器全程不持有 VFS 參照 → 載入中被 unlink = UAF |
+| F21 | P2 | program header 驗證後重讀，中間可被改寫（TOCTOU） |
+| F22 | **P0** | RAMFS 容量倍增溢位守衛差一步 → **無窮迴圈凍結整台機器** |
+
+### 功能與效能
+
+- **FEAT1**：可執行檔改走 VFS 查找，能從任何已掛載檔案系統執行程式。
+  （**注意**：這也是 F20/F21/CAP12 之所以必要的原因——威脅模型因此改變。）
+- **FAIR1**：blocked 串列改 FIFO 喚醒。
+- **PERF1**：memcpy/memset 4-byte 批次（對齊時 3–5x；**來源/目的相對未對齊時
+  無改善**，已誠實記錄）。
+- **PERF2**：ramfs_write 幾何成長（攤還 O(1) append）。
+- **REFACTOR1**：`irq.h` 抽出重複 7 次的 save/restore，**實測 7 個 `.o` 位元組相同**。
+
+### 測試能力（CAP1–CAP13）
+
+- **CAP1** `test-iso`：補上從未驗證過的 GRUB/ISO 開機路徑。
+- **CAP2** `tests/` 原生單元測試框架 + 突變測試方法論。
+- **CAP3–CAP13**：fat16 / diskfs / pipe / sem / timer / task / rtc / process-env /
+  syscall-valid / paging-cow / elf / ramfs 各套件。
+
+目前 16 套件，`make unit` <1 秒：
+
+```
+utils 50032 / fs-path 34 / pmm 58 / heap 378 / fat16 37351 / diskfs 943 /
+pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 / process-env 47 /
+syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4300
+```
+
+---
+
+## 4. 重要設計決策（不要「順手改掉」）
+
+| 決策 | 理由 |
+|---|---|
+| 全域 cli 併發模型 | 單核教學系統的簡化選擇。「沒上鎖」多為設計而非 bug。 |
+| 執行檔解析**不**相對 cwd | 否則 ush `cd fat` 後跑 `cat` 會壞（`cat` 在 `/cat`）。 |
+| kill 不做 EINTR 上拋 | 終止不需回到使用者空間，`task_exit` 即可；EINTR 會動到 ABI。 |
+| `timer_sleep` 不用 `task_block_killable` | 它持有 sleep slot，必須先歸還再離開，且要判斷 slot 還是不是自己的。 |
+| 界限檢查寫成不會溢位的減法 | 先確立下界再減，避免加法繞回（F22 就是加法/倍增繞回）。 |
+| 政策與機制分層 | 「殺哪個行程」留在 `process.c`，「醒來就走」在 `task.c`，避免反向相依。 |
+| ATA 全程 cli | 序列化同一組 I/O 埠；代價是磁碟 I/O 期間漏 tick（見已知限制）。 |
+
+---
+
+## 5. 已知限制（刻意不修，附理由）
+
+1. **`ata.c` 的 PIO 輪詢全程 cli**：`ata_read_sector`/`ata_write_sector` 從
+   `save_irq_disable()` 到 `restore_irq()` 之間包含等待 BSY/DRQ 的忙等（最多
+   `ATA_POLL_LIMIT=100000` 次）全程關中斷。代價是磁碟 I/O 期間漏 timer tick、
+   體感卡頓。要修需改成 IRQ-driven ATA，對這個以 PIO 忙等為核心的驅動改動幅度大。
+
+2. **訊號遞送無法觸及阻塞中的 thread**（終止的部分已由 F19 修好）：
+   `process_send_signal` 只喚醒 `process->task`，且訊號只在返回使用者模式時遞送
+   （`signal_deliver` 檢查 `regs->cs != 0x1B`），所以停在等待中的 thread 收不到
+   可捕捉的訊號。根治需要「可中斷睡眠 + EINTR 上拋」，牽涉所有阻塞點**以及使用者
+   空間對「系統呼叫可能被中斷」的預期**，會動到 ABI。
+
+3. **`timer_sleep` 被訊號（非 kill）提早喚醒**時直接回傳 0，且 slot 佔到原到期
+   時間才被 `timer_callback` 清掉。提早返回符合 POSIX `sleep()` 語意，slot 滯留
+   有界且會自癒（不會被解參照）。修它需改動 `test_timer` 對「睡著」的建模。
+
+4. **`ramfs_write` 重用路徑的 memset 是冗餘防禦**（突變 R6 存活）：程式碼註解
+   自承「already zero by the invariant, but make it explicit」。與成長路徑的
+   memset 互為備援。誠實記錄，不硬寫測試去殺它。
+
+5. **`phdr_in_user_range` 的檔案範圍檢查無法單獨觸發溢位**（突變 E4 存活）：
+   短路求值中 `p_filesz <= p_memsz` 與 `p_memsz <= USER_STACK_BOTTOM - p_vaddr`
+   排在它前面，路徑到不了。等價突變。
+
+6. **Git-for-Windows 的 CRLF 轉換**使 WSL 內 git 視整棵樹為已修改。
+
+---
+
+## 6. 下一輪候選工作
+
+依「價值 / 風險」排序，附上為什麼值得做。
+
+### A. 尚未單元測試的模組（延續 CAP 系列）
+
+- **`procfs.c`**：F3 修過緩衝區截斷，但那條路徑（大量 fork 後 pid 位數變長）
+  從未被實際執行過。純格式化邏輯，好測。
+- **`kb.c`**：掃描碼表、環狀緩衝 wrap、Ctrl+C 的 shift/ctrl 狀態機。純邏輯。
+- **`vga.c`**：捲動、游標、`terminal_write_dec`（Session 1 改過但沒單元測試）。
+- **`fs.c` 的 `vfs_resolve_path`**：目前 `test_fs_path` 只有 34 檢查，是所有套件
+  裡最薄的，而 F8 正是這裡的 bug。**投報率可能最高**。
+- **`heap.c`**：378 檢查，coalescing 邏輯值得再深入。
+
+### B. 已知限制的攻堅
+
+- **IRQ-driven ATA**（限制 1）：風險高、改動大，但現在有 16 套單元測試 +
+  端對端做安全網，比前幾輪可行。可先建 ATA 的單元測試（RAM stub 已在
+  `test_diskfs` 用過）再重構——這正是 Session 15 做 `irq.h` 重構的順序。
+- **可中斷睡眠 + EINTR**（限制 2）：會動 ABI，需要先想清楚使用者空間契約。
+
+### C. 方法論
+
+- **`sys_seek` 的上界**：目前允許 offset 到 `0x7FFFFFFF`，而檔案系統實際能支撐的
+  遠小於此。F22 正是從這個縫隙進來的。考慮把上界收到合理範圍（但要確認不破壞
+  既有 seek 測試），屬於「消除整類問題」而非修單一 bug。
+- **對其他「量過效能但沒測正確性」的地方做一輪盤點**——F22 潛伏 23 輪的根因。
+
+---
+
+## 7. 檔案地圖（文件）
+
+| 檔案 | 內容 |
+|---|---|
+| `CLAUDE.md` | 怎麼建置/測試/修改，操作紀律與陷阱 |
+| `PROJECT_STATE.md` | 本檔：狀態、決策、基準、已知問題、下一輪候選 |
+| `task_plan.md` | 各階段（Phase 0–27）的目標與完成狀態 |
+| `findings.md` | 每個 F/CAP/PERF 項目的完整分析與修法 |
+| `progress.md` | 每輪 session 的流水帳（含犯過的錯與更正） |
+| `README.md` | 對外說明（英/中） |
+| `tests/BENCHMARKS.md` | PERF1/PERF2 的實測數據與誠實限制 |

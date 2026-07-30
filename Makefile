@@ -613,6 +613,12 @@ killwait_embed.c: user/killwait.elf gen_embed.py
 killwait_embed.o: killwait_embed.c
 	$(CC) -c $< -o $@ $(CFLAGS)
 
+bigseek_embed.c: user/bigseek.elf gen_embed.py
+	python3 gen_embed.py user/bigseek.elf bigseek_elf > $@
+
+bigseek_embed.o: bigseek_embed.c
+	$(CC) -c $< -o $@ $(CFLAGS)
+
 ush_embed.c: user/ush.elf gen_embed.py
 	python3 gen_embed.py user/ush.elf ush_elf > $@
 
@@ -811,6 +817,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	    send_keys s i g r e t g u a r d ret; sleep 1.5; \
 	    send_keys k i l l t h r e a d spc shift-7 ret; sleep 2; \
 	    send_keys k i l l w a i t spc shift-7 ret; sleep 3; \
+	    send_keys b i g s e e k ret; sleep 2; \
 	    send_keys l s spc slash p r o c ret; sleep 0.8; \
 	    send_keys c a t spc slash p r o c slash p r o c e s s e s ret; sleep 0.8; \
 	    send_keys c a t spc slash p r o c slash s e l f slash s t a t u s ret; sleep 0.8; \
@@ -854,7 +861,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	    send_keys m e m ret; sleep 0.5; \
 	    send_keys c l e a r ret; sleep 0.5; \
 	    echo quit; \
-	} | timeout 270s $(QEMU) -rtc base=2020-01-01T00:00:00 $(ATA_DRIVE) -display none -monitor stdio -serial none \
+	} | timeout 280s $(QEMU) -rtc base=2020-01-01T00:00:00 $(ATA_DRIVE) -display none -monitor stdio -serial none \
 	    -debugcon file:$$log -no-reboot -no-shutdown -kernel kernel.bin \
 	    >/dev/null 2>&1; \
 	status=$$?; \
@@ -908,6 +915,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "^sigretguard$$" $$log && \
 	grep -q "^killthread$$" $$log && \
 	grep -q "^killwait$$" $$log && \
+	grep -q "^bigseek$$" $$log && \
 	grep -q "^ush$$" $$log && \
 	grep -q "^readme.txt$$" $$log && \
 	grep -q "^disk$$" $$log && \
@@ -983,6 +991,11 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	! grep -q "\[killwait worker SURVIVED\]" $$log && \
 	! grep -q "\[killwait parent SURVIVED\]" $$log && \
 	! grep -q "\[killwait\] " $$log && \
+	grep -q "\[bigseek arming\]" $$log && \
+	grep -q "\[bigseek refused\]" $$log && \
+	grep -q "\[bigseek survived\]" $$log && \
+	! grep -q "\[bigseek unexpectedly wrote\]" $$log && \
+	! grep -q "\[bigseek\] " $$log && \
 	grep -q "^hello.txt$$" $$log && \
 	grep -q "Hello from FAT16!" $$log && \
 	grep -q "nested fat note" $$log && \
@@ -1077,7 +1090,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "Processes: running=0 zombies=0 peak=4" $$log && \
 	grep -q "Tasks: blocked=0" $$log && \
 	grep -q "Timers: sleeping=0" $$log && \
-	grep -q "RAMFS nodes=57" $$log && \
+	grep -q "RAMFS nodes=58" $$log && \
 	test $$(grep -c "\[heap test passed\]" $$log) -eq 2 && \
 	grep -q "\[pmm high-memory test passed\]" $$log && \
 	grep -q "\[ata pio read/write test passed\]" $$log && \
