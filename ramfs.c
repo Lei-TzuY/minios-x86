@@ -161,8 +161,16 @@ static uint32_t ramfs_write(fs_node_t *node, uint32_t offset, uint32_t size, uin
         if (new_length > ramfs_nodes[idx].capacity) {
             uint32_t new_cap = ramfs_nodes[idx].capacity ?
                                ramfs_nodes[idx].capacity : 64;
+            /* Stop doubling once another step would wrap past 2^32 and ask for
+             * the exact size instead. The guard has to fire BEFORE the multiply:
+             * at new_cap == 0x80000000 the doubling wraps to 0, and 0 never
+             * reaches new_length nor trips a `> 0x80000000` test, so the loop
+             * spins forever. Reachable from user space -- seek to 0x7FFFFFFF
+             * (the largest sys_seek allows) and write a couple of bytes -- and
+             * int 0x80 is an interrupt gate, so it would spin with interrupts
+             * off: no timer, no keyboard, no scheduler. The whole machine. */
             while (new_cap < new_length) {
-                if (new_cap > 0x80000000U) { new_cap = new_length; break; }
+                if (new_cap > 0xFFFFFFFFU / 2) { new_cap = new_length; break; }
                 new_cap *= 2;
             }
 
