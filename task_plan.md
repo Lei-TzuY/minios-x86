@@ -6,17 +6,27 @@
 重構、補測試、補文件，每階段修改後都要在 WSL Ubuntu-26.04 中 `make` 編譯並執行 `make test`
 驗證不回歸。不得捏造測試結果；無法確認的需求採取最保守、相容現有設計的方案並記錄假設。
 
-## Environment
-- Windows host, WSL distro `Ubuntu-26.04` 提供建置環境：gcc 15.2.0 (-m32 可用), GNU as 2.46,
-  qemu-system-i386 10.2.1, python3 3.14.4.
-- 建置指令一律透過 `wsl.exe -d Ubuntu-26.04 -- bash -lc "cd '/mnt/c/Users/User/Desktop/All project/systems-programming/作業系統' && ..."`
-- 專案倉庫是 flat layout：核心原始碼在根目錄 (*.c/*.h/*.s)，`user/` 是 ring-3 程式，
-  `gen_*.py` 產生內嵌資源，`Makefile` 為唯一建置系統（無 CMake/Meson）。
-- git repo，目前僅 1 個 initial commit，尚無 .gitignore 排除的 .o/.elf 追蹤情況需確認。
+> **新 session 從這裡開始**：先讀 `PROJECT_STATE.md`（架構、不可破壞的行為、
+> 測試基準、已知問題、下一輪候選）與 `CLAUDE.md`（建置/測試/突變測試的操作紀律）。
+> 本檔是**階段流水帳**，記錄每一輪做了什麼；細節在 `findings.md`／`progress.md`。
 
-## Baseline status (before changes)
-- [x] `make clean && make -j4`：0 warning / 0 error（-Wall -Wextra）
-- [x] `make test`：全數通過（exit 0）— 這是回歸基準
+## Environment
+- Windows host，工具鏈全在 WSL distro `Ubuntu-26.04`：gcc 15.2.0 (-m32)、GNU as 2.46、
+  qemu-system-i386 10.2.1、python3 3.14.4。Windows 端沒有編譯器。
+- **建置一律用腳本擷取離開碼**（`wsl.exe -- bash -lc "...\$?"` 恆回報 0，會造成
+  假綠燈——見 Phase 5 的 M1）：
+  `MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-26.04 -- bash /mnt/c/<path>/verify.sh all`
+- 建置目標：`make all -j4`（裸 `make` 只建第一個目標，不是核心）、`make unit`（<1s）、
+  `make test`（完整，~8-10 分鐘）、`make bench`（資訊性，不在 `make test` 內）。
+- flat layout：核心原始碼在根目錄 (*.c/*.h/*.s)，`user/` 是 ring-3 程式，
+  `tests/` 是原生單元測試，`gen_*.py` 產生內嵌資源，`Makefile` 為唯一建置系統。
+
+## 目前基準（Session 25 結束時，checkpoint commit）
+- `make clean && make all -j4`：0 warning / 0 error（-Wall -Wextra）
+- `make test`：**真實離開碼 0**（unit 16 套件 + test-ata-absent/test-boot/
+  test-iso/test-shell）
+- test-shell 結尾的洩漏偵測斷言：`running=0 zombies=0 peak=4`、`blocked=0`、
+  `sleeping=0`、`RAMFS nodes=58`、`spaces=0`
 
 ## Phases
 
@@ -290,16 +300,76 @@ Status: complete
   記憶體越界」的盲點，7 個全抓到。
 - 單元測試現 14 套件；clean build 0 warning/0 error、真實離開碼 0。
 
-## 本輪結論
-所有已識別、可驗證觸發的 P0/P1 bug 均已修復並在 QEMU 中實測驗證；P2/P3
-記憶體安全與效能問題也已修復；文件與建置腳本的小瑕疵已順手修正。剩餘項目
-（ATA 驅動 cli 持有時間、ramfs 成長策略、排程公平性、多執行緒訊號投遞、
-elf_loader 僅讀 RAMFS）都是需要更大幅度重構或觸發門檻在目前系統規模下極難
-達到的架構取捨，依保守原則本輪不動，已記錄供未來參考。
+## Phase 26: Session 24 — ELF 載入器信任邊界（審查 + 兩個修復 + 單元測試）
+Status: complete
+- 動機：FEAT1（Session 6）讓可執行檔改走 VFS 之後，使用者可寫任意位元組到檔案再
+  執行，ELF 的每個欄位都變成攻擊者可控，而 `paging_map_user_page` 不做範圍檢查。
+- **F20（P1，記憶體安全）**：`elf_load_image` 全程未取得 VFS 參照 → 載入中被
+  `rm` 就是核心 UAF（與 F11 同型）。修：`open_fs`/`close_fs` 包住整個載入，
+  主體拆成 `elf_load_from_node()` 以確保單一出口成對釋放。窗口：RAMFS 上只有
+  微秒級（撞不到），但 FAT16/DiskFS 走 ATA PIO 時跨多個 tick，是毫秒級。
+- **F21（P2，TOCTOU）**：program header 驗證後又重新讀取，中間可被改寫，未驗證的
+  p_vaddr 直達 `paging_map_user_page`。修：抽出 `phdr_in_user_range()` 兩處共用，
+  使用前重驗。誠實評估影響僅及行程自身（`user_pte` 擋住核心位址），故列 P2。
+- **CAP12：tests/test_elf.c**（139 檢查）。第三條「解析不受信任資料」的信任邊界
+  測試。每個拒絕都驗「不得建立位址空間」或「建立後必須銷毀」。
+- 突變 5 個：E1/E1b/E2 抓到；**E3 一開始存活**（溢位被 entry-point 檢查遮蔽），
+  補「第二個 segment 繞回」的案例後抓到；**E4 確認為等價突變**（被 p_memsz 界限
+  遮蔽，路徑到不了），誠實記錄不硬寫測試。
+- **第二組獨立突變 12 個（12/12）**：本輪有兩個 session 各自對同一個檔案做突變，
+  注入集不同、逼出的缺口也不同——單一組突變不等於測夠了。第二組漏網的兩個都是
+  「我的案例被另一條子句先擋掉、被測子句沒被隔離」，修正後才有鑑別力。
+- **過程教訓**：兩個 session 並行改同一棵樹時，**會改原始碼的突變腳本其還原會
+  覆蓋對方的編輯**，第一輪結果因此不可信。腳本已加入 baseline 完整性檢查
+  （檔案被動過就中止而非覆蓋）。
+
+## Phase 27: Session 25 — RAMFS（找到一個 P0：使用者可讓整機凍結）
+Status: complete
+- 動機：RAMFS 的開啟計數是 F11/F20 兩個已修 P1 的依賴基礎，但只被端對端間接測到。
+- **F22（P0，DoS）**：PERF2 幾何成長的溢位守衛差一步——`new_cap == 0x80000000` 時
+  `> 0x80000000` 不成立，`*= 2` 截斷成 0，之後**無窮迴圈**。`sys_seek` 允許 offset
+  到 0x7FFFFFFF，寫 2 bytes 即可觸發；而 `int $0x80` 是 interrupt gate（`0xEE`），
+  CPU 進入時清 IF，於是迴圈在**關中斷**下永遠轉 → **整台機器停機**。
+  修：守衛改為 `new_cap > 0xFFFFFFFFU / 2`（在乘法之前擋）。
+- **教訓**：Session 13 用 `make bench` 量過 PERF2 的效能，卻沒測算術邊界；
+  「量過效能」不等於「驗證過正確性」。
+- **CAP13：tests/test_ramfs.c**（4300 檢查）。看門狗 `alarm(30)` 讓無窮迴圈回歸
+  變成失敗而非掛住；配置器毒化（填 0xAA）讓缺失的清零無法被「malloc 剛好給零」遮蔽。
+- **端對端 user/bigseek.c**：在 QEMU 中實際執行該攻擊，跑到 `[bigseek survived]`
+  即證明核心存活。
+- 突變 7 個抓到 6：R7 一開始存活（兩段清零互為備援），補「稀疏寫入跨越容量」的
+  案例後抓到；R6 確認是冗餘防禦（註解自承），誠實記錄不硬殺。
+- 節點數 58、README 程式數 50、逾時 280s。
+
+## 目前結論（Session 25）
+F1–F22 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P1（F7、F10、F11、F20）、
+7 個 P2、5 個 P3、2 個 P4。功能擴充 FEAT1、排程公平性 FAIR1、效能 PERF1/PERF2（已實測）、
+去重 REFACTOR1（已證明 codegen 不變）。測試能力累積到 16 個單元套件 + 4 個 QEMU
+端對端目標。
+
+**未完項目與下一輪候選見 `PROJECT_STATE.md` 第 5、6 節**（已知限制 6 項、
+候選工作 A/B/C 三類，附價值與風險評估）。
+
+### 方法論上最值得記住的三件事
+1. **假綠燈**（Phase 5 / M1）：`wsl.exe -- bash -lc "...$?"` 恆回報 0，一整輪的
+   「測試通過」結論曾因此無效。離開碼必須在單一 bash 程序內擷取。
+2. **突變測試是證明測試有效的手段，不是形式**：它多次逼出真實的測試缺口
+   （CAP10 的 stub 遮蔽溢位、CAP12 的 entry-point 檢查遮蔽 E3、CAP13 的兩段
+   清零互為備援）。存活的突變要追查是缺口還是等價突變，不可略過。
+3. **「量過效能」≠「驗證過正確性」**：PERF2 在 Session 13 被 `make bench` 量過
+   效能，但沒人測過它的算術邊界，F22（P0，凍結整台機器）因此潛伏了 23 輪。
 
 ## Decisions & Assumptions Log
-(見 findings.md 中對應條目；重大假設會複製一份到這裡)
+重大設計決策集中在 `PROJECT_STATE.md` 第 4 節；每個項目的完整分析在 `findings.md`。
 
 ## Errors Encountered
-| Error | Attempt | Resolution |
-|-------|---------|------------|
+本專案刻意記錄自己犯的錯（含更正），詳見 `progress.md` 各 session 段落。
+較重大的幾筆：
+
+| Error | Resolution |
+|-------|------------|
+| 離開碼擷取恆為 0，造成假綠燈（Session 1） | 改用腳本內擷取，重建真正基準（Session 2 / M1） |
+| 節點數斷言未隨新增程式更新，卻被誤判為通過 | 同上；此後每次新增程式都同步更新 N |
+| 突變測試中斷把 mutant 留在工作樹 | 還原改放 `trap ... EXIT`，每輪驗證位元組相同 |
+| 突變 pattern 對不上（CRLF 樹用 `\n`） | Python 字面替換 + LF 正規化後依原行尾寫回 |
+| `bigseek` 誤用 API 導致節點數飄移（Session 25） | `sys_create` 已回傳開啟的 fd；測試改為**斷言**清理成功 |

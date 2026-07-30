@@ -426,8 +426,8 @@ RUNNING，等它的人永遠阻塞（F17 誠實記錄的殘留限制，本輪根
   - 單元（scheduler）：tests/test_task.c 加 21 個檢查（72 total）——只喚醒目標行程的
     blocked task、旗標同時落在 ready 的 task 上、其他行程完全不受影響、回傳計數、
     NULL 為 no-op、`task_kill_pending` 只反映當前 task。
-  - 單元（timer_sleep 的三條 kill 路徑）：tests/test_timer.c 加 11 個檢查
-    （50→61）。`task_exit` 在測試中用 `longjmp` 模擬「不會回來」，因此三條路徑
+  - 單元（timer_sleep 的三條 kill 路徑）：tests/test_timer.c 加 13 個檢查
+    （50→63）。`task_exit` 在測試中用 `longjmp` 模擬「不會回來」，因此三條路徑
     都能確定性走到：(1) 已被標記時**根本不取 slot** 就離開（同時斷言
     `g_blocks == 0`，否則後置檢查會遮蔽前置檢查的缺失）；(2) 睡著時才被標記 →
     離開前必須歸還 slot；(3) 自己的期限已到、slot 已被**別的 sleeper** 接手時，
@@ -436,7 +436,9 @@ RUNNING，等它的人永遠阻塞（F17 誠實記錄的殘留限制，本輪根
   - 端對端：新增 user/killwait.c。worker thread 卡在沒人 post 的 semaphore，
     main 卡在 `sys_thread_join()`，**兩個 task 都在睡**的時候由 fork 出來的子
     行程發出 kill。以背景執行，回歸時不會 hang 整個測試。
-  - 突變測試：4 個注入全部被抓到（見 progress.md Session 21）。其中 M1
+  - 突變測試：9 個注入全部被抓到（task.c 6 + timer.c 3；最初只做了 task.c 的 4 個，
+    timer 的三條 kill 路徑是 Session 23 才補上的，補的過程又逼出兩個測試缺口）。
+    其中 M1
     （`task_kill_pending` 恆回 0＝修復前的行為）同時被單元測試與 killwait
     端對端測試抓到：QEMU 跑完的結尾變成
     `Processes: running=1 zombies=1`、`Tasks: blocked=2`、`spaces=1`
@@ -448,6 +450,86 @@ RUNNING，等它的人永遠阻塞（F17 誠實記錄的殘留限制，本輪根
   提早返回本身符合 POSIX `sleep()` 語意，slot 滯留是有界且會自癒的（不會被
   解參照，只是佔位），而要修就得改動 test_timer 對「睡著」的建模方式，與本輪
   主題無關。
+
+### F20 [P1][記憶體安全] ELF 載入器全程不持有 VFS 參照 —— 載入中被 unlink 就是
+核心 use-after-free（與 F11 同型，可從 shell 觸發）
+- 檔案: elf_loader.c `elf_load_image`
+- **問題**：`elf_load_image` 用 `resolve_fs(name)` 取得節點後，**沒有 `open_fs`**
+  就一路讀下去：ELF header、每一個 program header、再把每個 segment 以 256 bytes
+  為單位讀進來——中間會經過很多次計時器中斷而被排程。此時另一個行程若把該檔
+  `rm` 掉，RAMFS 的 `ramfs_remove_node` 因為參照為 0 而放行，`kfree(node->ptr)`
+  ＋`kfree(node)`；載入器手上的 `file` 立刻變成懸空指標，下一次 `read_fs(file, ...)`
+  會**從已釋放的堆積記憶體讀出 `node->read` 函式指標並呼叫它**。這正是 F11 的
+  模式（控制流層級的核心 UAF）。
+- **為什麼現在才成立**：Session 6 的 FEAT1 讓可執行檔改走 VFS 查找之後，程式不再
+  限於唯讀的內嵌 RAMFS 映像。內嵌程式是 `ramfs_create_static_file`（非
+  RAMFS_DYNAMIC，本來就刪不掉），但 `cp hello prog` 產生的複本、FAT16 與 DiskFS
+  上的檔案全都刪得掉——三者都有開啟計數，卻沒有人替載入器取得那個參照。
+- **時序窗口有多大（不誇大）**：從 RAMFS 載入時，每次讀取只是 memcpy，整個載入
+  只要幾微秒，遠短於一個 10ms 的 timer tick，實務上幾乎撞不到。**但從 FAT16 或
+  DiskFS 載入就完全不同**：每個 256-byte chunk 都要走 ATA PIO 讀磁區，載入一支
+  程式跨越多個 tick，窗口是毫秒級而非微秒級——而「從其他檔案系統執行程式」正是
+  FEAT1 加進來的能力（測試裡就有 `cp hello fat/hello` 然後執行 `fat/hello`）。
+  所以這不是純理論問題，但也不是隨手就能撞到的；修它的理由是「安全性不該建立在
+  時序假設上」，而不是「很容易被利用」。
+- 修法：`elf_load_image` 取得節點後 `open_fs(file)`，載入結束 `close_fs(file)`。
+  為了讓「取得/釋放」不會在任何一條失敗路徑上漏掉，把原本有 6 個 return 的主體
+  拆成 `elf_load_from_node()`，外層只剩單一出口成對呼叫。三個檔案系統的 unlink
+  在檔案開啟時都會拒絕，所以安全性來自這個參照，而不是任何時序假設。
+- 狀態: **已修＋已驗證**（tests/test_elf.c 的 open/close 配對測試；突變 E1「不取
+  參照」與 E1b「取了不放」分別被抓到 5 個與 6 個失敗）。
+
+### F21 [P2][安全性/TOCTOU] program header 驗證過後又重新讀取，中間可被改寫 ——
+未經驗證的 p_vaddr 會直接送進不做任何範圍檢查的 paging_map_user_page
+- 檔案: elf_loader.c `phdr_in_user_range`、`validate_segments`、`load_segments`
+- **問題**：`validate_segments()` 把每個 program header 讀出來檢查通過後，
+  `load_segments()` **再從檔案讀一次同樣的 header** 才拿去用。兩次讀取之間載入器
+  會被排程（見 F20），檔案內容可被另一個行程改寫——F20 的參照只擋得住 unlink，
+  擋不住覆寫。於是「驗證時合法、使用時不合法」的 p_vaddr 會被送進
+  `paging_map_user_page()`，而那個函式**自己完全不做範圍檢查**。
+- **實際影響範圍（誠實評估）**：`user_pte()` 只對低 0-4MB 與 32-36MB 兩個視窗回傳
+  頁表項，其餘一律 NULL，所以核心位址映射不進去。可達的傷害是讓該行程自己的
+  0x0-0x300000（含 null page）變成可存取，削弱它自身的保護，不影響核心。因此列
+  P2 而非 P0——但這條防線本來就是唯一的一條，不該靠下游巧合。
+- 修法：把邊界檢查抽成 `phdr_in_user_range(phdr, file_length)`，`validate_segments`
+  與 `load_segments` **共用同一份**，後者在使用前重驗一次。每個比較都寫成不會
+  溢位的形式（先確立 `p_vaddr < USER_STACK_BOTTOM`，再用
+  `p_memsz <= USER_STACK_BOTTOM - p_vaddr`）。
+- 狀態: **已修＋已驗證**（tests/test_elf.c 直接模擬「第二次讀取時被改寫」；
+  突變 E2「移除第二次檢查」被抓到）。
+
+### F22 [P0][安全性/DoS] ramfs_write 的容量倍增溢位守衛差一步 —— 使用者程式可讓
+**整台機器凍結**（無窮迴圈，且全程關中斷）
+- 檔案: ramfs.c `ramfs_write`
+- **問題**：幾何成長（PERF2）從 64 開始倍增直到容量覆蓋 `offset + size`：
+  ```c
+  while (new_cap < new_length) {
+      if (new_cap > 0x80000000U) { new_cap = new_length; break; }
+      new_cap *= 2;
+  }
+  ```
+  當 `new_cap == 0x80000000` 時，`> 0x80000000` **不成立**，於是執行 `*= 2` →
+  0x100000000 截斷成 **0**。之後每一輪都是「0 < new_length 成立、0 > 0x80000000
+  不成立、0 *= 2 還是 0」→ **無窮迴圈**。守衛必須在乘法**之前**擋下，改成
+  `new_cap > 0xFFFFFFFFU / 2`。
+- **可觸發性（這是 P0 的原因）**：`sys_seek` 允許 offset 最大到 0x7FFFFFFF，接著
+  寫 2 bytes 就得到 `new_length == 0x80000001` —— 剛好需要跨過倍增上限。而
+  `int $0x80` 的 IDT 閘門是 `0xEE`，**type nibble = E 是 interrupt gate**，CPU 進入
+  時自動清 IF，所以整個系統呼叫全程關中斷。於是這個迴圈會在**關中斷**下永遠轉：
+  收不到 timer tick、跑不到排程器、鍵盤也沒反應——**整台機器停機**，連 Ctrl+C 都
+  救不了。與 F2、F14 同一級（使用者程式可讓核心整台當掉），但成因完全不同：那兩個
+  是未驗證的指標，這個是純算術的 off-by-one。
+- 修法：守衛改為在倍增前檢查會不會繞回（`new_cap > 0xFFFFFFFFU / 2`）。之後
+  `kmalloc(0x80000001)` 自然失敗、fallback 的精確配置也失敗，於是乾淨回傳 0。
+- **為什麼前幾輪沒發現**：PERF2 是 Session 2 加的，Session 13 用 `make bench` 量過
+  它的**效能**（重新配置次數 N→log2(N)），但從來沒有人測過它的**算術邊界**。
+  「量過效能」被誤當成「驗證過正確性」。
+- 狀態: **已修＋已驗證**。單元測試 tests/test_ramfs.c 直接呼叫
+  `write(0x7FFFFFFF, 2 bytes)`，並**為整個測試檔裝上 30 秒看門狗**，讓這個
+  回歸表現為失敗而不是把 `make test` 掛住（突變 R1 把守衛改回去，看門狗實測開火）。
+  端對端 user/bigseek.c 在 QEMU 中**實際執行這個攻擊**：`[bigseek arming]` →
+  `[bigseek refused]` → `[bigseek survived]`，能跑到最後一行就證明核心還活著、
+  還在排程它。
 
 ## 驗證能力建設（Session 10）
 
@@ -802,6 +884,80 @@ RUNNING，等它的人永遠阻塞（F17 誠實記錄的殘留限制，本輪根
   把越界存取變成硬陷阱（ud2/Illegal instruction）。加上後 **7 個全抓到**。
   這補足了突變測試的一類盲點：功能上不可觀察的記憶體越界，可用 sanitizer 陷阱
   轉成可觀察的失敗。
+
+### CAP12 ELF 載入器單元測試（第三條「解析不受信任資料」的信任邊界）
+- 檔案: tests/test_elf.c、Makefile
+- 為什麼是信任邊界：Session 6 的 FEAT1 之後，可執行檔改走 VFS 查找，使用者可以把
+  **任意位元組**寫到 FAT16/DiskFS/RAMFS 的檔案再執行它。於是 `e_phoff`、`e_phnum`、
+  `p_offset`、`p_vaddr`、`p_filesz`、`p_memsz` 全部是攻擊者可控，而下游沒有人複查
+  ——`paging_map_user_page()` 不做任何範圍檢查。這與 CAP4（diskfs mount 解析不受
+  信任的磁碟資料）同型，是第三條這類邊界。
+- shell 幾乎測不到：它頂多能造出「根本不是 ELF」的檔案（端對端測試涵蓋這一個），
+  造不出「header 格式正確但 p_vaddr 惡意」、「e_phnum 溢位」、「offset/length 刻意
+  選來讓減法繞回」的映像。所有拒絕路徑在此之前**從未被執行過**。
+- 手法（同 --gc-sections）：`#include "../elf_loader.c"` 取得 static 驗證函式，
+  連結器丟掉 elf_spawn/elf_exec 與其 process 相依；stub 面只剩 VFS 進入點、
+  paging 呼叫與 terminal_writestring。在記憶體中組出映像，一次只汙染一個欄位。
+- 每個拒絕都檢查**兩件事**，不只是回傳 NULL：建立位址空間前被拒的不得建立、
+  建立後才失敗的必須銷毀（否則每個壞映像都洩漏一個位址空間與其 frame）。
+- 涵蓋：magic/class/machine/type、截斷檔、e_phentsize、header table 越界、
+  e_phnum 上界與剛好合法的邊界、segment 起點/終點與使用者視窗、entry 必須落在
+  已載入的段內、非 PT_LOAD 被忽略、heap_base 取最高段且與順序無關、目錄不是
+  可執行檔、晚期失敗的位址空間釋放、**F20 的參照配對**、**F21 的載入中改寫**。
+- **突變測試（5 個）與一個真實的測試缺口**：
+  - E1（不取參照）、E1b（取了不放）、E2（移除第二次驗證）都被抓到。
+  - **E3（把 `p_memsz <= BOTTOM - p_vaddr` 改成會繞回的 `p_vaddr + p_memsz <=
+    BOTTOM`）一開始存活**。追查原因：繞回後的上界必然**低於** p_vaddr，於是
+    entry-point 檢查（entry 必須落在該段內）順手擋掉了單段的溢位案例——溢位路徑
+    被另一個檢查遮蔽了，與 CAP10 的教訓同型。補上「**第二個** segment 用繞回的
+    p_memsz」的案例（entry 已由第一段滿足，沒有那層意外保護）後，E3 被抓到。
+  - **E4（`p_filesz <= file_length - p_offset` 改成會繞回的
+    `p_offset + p_filesz <= file_length`）存活，且經推算確認是等價突變**：要讓和
+    繞回需要 `p_filesz >= 2^32 - file_length`（約 0xFFFFFEC0），但短路求值中
+    `p_filesz <= p_memsz` 與 `p_memsz <= USER_STACK_BOTTOM - p_vaddr`（上限約
+    0xE8000）都排在它前面，那條路徑到不了。誠實記錄為「無法被單獨觸發」，不硬寫
+    一個假測試。該條件本身仍有作用（擋一般的「p_filesz 超出檔尾」），已有測試。
+- 139 檢查。
+
+### CAP13 RAMFS 單元測試（F11/F20 所依賴的參照機制，以及 PERF2 的算術邊界）
+- 檔案: tests/test_ramfs.c、Makefile
+- 為什麼值得測：RAMFS 是根檔案系統，所有內嵌程式都在上面。兩個結構性理由——
+  1. `fs_node_t::impl` **一個欄位身兼兩用**：bit 0 是 RAMFS_DYNAMIC 旗標、
+     其上是開啟參照計數。每次 open/close 都必須不動到旗標，否則檔案會變成
+     「永遠刪不掉」或**「開啟中卻刪得掉」**，而後者就是 F11/F20 的核心 UAF。
+     「開啟中不得 unlink」這個性質先前只被端對端間接測到。
+  2. PERF2 的幾何成長只被 `make bench` 量過**效能**，沒有人測過**算術邊界**——
+     F22 就藏在那裡。
+- 手法：連結 ramfs.c + 真實 utils.c，只 stub 配置器；ramfs.c 只需要 `fs_root`
+  這個全域，所以不連結 fs.c，stub 面就只有 kmalloc/kfree。
+- **兩個測試設計上的關鍵決定**：
+  1. **看門狗**：F22 是無窮迴圈，若沒有 `alarm(30)`，回歸會把 `make test` 掛住
+     而不是讓它失敗。裝了看門狗後 R1 突變實測「開火 → FAIL」。
+  2. **配置器毒化**：stub 的 kmalloc 把新區塊全部填 0xAA。真實的 kmalloc 回收的是
+     還帶著前一個檔案位元組的堆積區塊，**清零是檔案系統的責任**；若 stub 回傳乾淨
+     記憶體，稀疏檔案的空洞會因為「malloc 剛好給了零」而讀到 0，缺失的清零就被
+     遮蔽了。這與 CAP10「stub 太嚴格反而遮蔽受測 bug」是同一類陷阱的反面。
+- 涵蓋：建立/讀寫/覆寫/短讀、稀疏寫入補零（**兩種**：在既有容量內、以及跨越容量
+  而觸發重新配置）、幾何成長的容量重用（用配置計數區分「重用」與「重新配置」）、
+  F22 的巨大 offset、開啟參照阻止 unlink 且可嵌套、旗標在 open/close 後完好、
+  未配對的 close 不得偽造參照數、static 檔案唯讀且永不可刪、目錄巢狀與非空拒刪、
+  root 不可刪、路徑解析邊界（`//`、結尾 `/`、`.`、`..`、過長路徑、過長 component）、
+  配置失敗時的乾淨失敗、節點表上限與釋放後可再用。4300 檢查。
+- **突變測試 7 個，6 個被抓到，並逼出一個真實的測試缺口**：
+  - R1（F22 守衛改回去）→ **看門狗開火**；R2（移除 refs 檢查）5 個失敗；
+    R3（open 用 `|=` 不計數）2 個失敗；R4（close 無下溢保護）3 個失敗；
+    R5（PERF2 回退成每次精確配置）3 個失敗。
+  - **R7（移除成長路徑的清零）一開始存活**。追查發現：原本的稀疏測試把空洞放在
+    既有容量之內（41 < 初始容量 64），只走「重用」分支，於是**兩段清零互為備援**，
+    單獨移除任一段都看不出來（Session 12 在 diskfs 記錄過同型現象）。這次可以做得
+    更好：補上「稀疏寫入同時跨越容量」的案例（空洞由重新配置本身產生，重用分支
+    不執行），R7 隨即被抓到。
+  - **R6（移除重用路徑的清零）仍存活，且確認是冗餘防禦**：程式碼註解本來就寫著
+    「the gap is already zero by the invariant, but make it explicit for
+    clarity/safety」——那段 memset 本來就是備援。誠實記錄，不硬寫測試去殺它。
+  - 兩個測試設計錯誤是我的假設錯、程式碼對：OOM 測試原本沒讓寫入跨越**容量**
+    （只跨越長度，走重用分支根本不配置）；節點表測試原本斷言絕對節點數，但
+    node_count 是 file-static 且前面的測試刻意留下檔案。都已改成測真正的性質。
 
 ## 效能改善（已實作）
 
