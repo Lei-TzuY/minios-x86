@@ -38,3 +38,4 @@ tests/test_process_env
 tests/test_syscall_valid
 tests/test_paging_cow
 tests/test_elf
+tests/test_ramfs

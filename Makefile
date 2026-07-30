@@ -14,7 +14,7 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
        cat_embed.o fault_embed.o badptr_embed.o worker_embed.o spawner_embed.o \
        orphan_embed.o sleeptest_embed.o fstest_embed.o echo_embed.o \
        malloctest_embed.o wc_embed.o grep_embed.o \
-       head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o forkredir_embed.o sigretguard_embed.o killthread_embed.o killwait_embed.o ush_embed.o
+       head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o forkredir_embed.o sigretguard_embed.o killthread_embed.o killwait_embed.o bigseek_embed.o ush_embed.o
 
 .PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot test-iso test-shell unit bench
 
@@ -33,10 +33,17 @@ UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
             tests/test_fat16 tests/test_diskfs tests/test_pipe tests/test_sem \
             tests/test_timer tests/test_task tests/test_rtc \
             tests/test_process_env tests/test_syscall_valid \
-            tests/test_paging_cow tests/test_elf
+            tests/test_paging_cow tests/test_elf tests/test_ramfs
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
+
+# ramfs.c needs only the allocator (stubbed in the test) and fs_root, so fs.c is
+# not linked. The real utils.c is used so the memcpy/memset the filesystem
+# actually ships is what moves the data.
+tests/test_ramfs: tests/test_ramfs.c tests/test.h ramfs.c ramfs.h fs.h heap.h \
+                  utils.c utils.h
+	$(CC) $(UNIT_CFLAGS) tests/test_ramfs.c ramfs.c utils.c -o $@
 
 tests/test_fs_path: tests/test_fs_path.c tests/test.h fs.c fs.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_fs_path.c fs.c utils.c -o $@
@@ -311,6 +318,9 @@ user/killthread.elf: user/killthread.c user/user_syscall.h user/crt0.s user/Make
 
 user/killwait.elf: user/killwait.c user/user_syscall.h user/crt0.s user/Makefile
 	$(MAKE) -C user killwait.elf
+
+user/bigseek.elf: user/bigseek.c user/user_syscall.h user/crt0.s user/Makefile
+	$(MAKE) -C user bigseek.elf
 
 user/ush.elf: user/ush.c user/user_syscall.h user/crt0.s user/Makefile
 	$(MAKE) -C user ush.elf
@@ -628,7 +638,7 @@ $(ATA_IMAGE): gen_ata_image.py
 
 # Utility targets
 clean:
-	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c forkredir_embed.c sigretguard_embed.c killthread_embed.c killwait_embed.c ush_embed.c fat16.img fat16_image_embed.c
+	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c forkredir_embed.c sigretguard_embed.c killthread_embed.c killwait_embed.c bigseek_embed.c ush_embed.c fat16.img fat16_image_embed.c
 	rm -rf isodir miniOS.iso
 	rm -f $(UNIT_BINS) $(BENCH_BINS)
 	$(MAKE) -C user clean
