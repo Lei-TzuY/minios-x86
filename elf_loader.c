@@ -29,6 +29,27 @@ static int read_program_header(fs_node_t *file, const Elf32_Ehdr *ehdr,
                       (uint8_t *)phdr);
 }
 
+/* Bounds every PT_LOAD segment must satisfy: it has to land inside the user
+ * image region, and the bytes it claims to occupy in the file have to be there.
+ * Each comparison is written so the subtraction cannot wrap.
+ *
+ * This is checked TWICE on purpose -- once in validate_segments() so a bad
+ * image is rejected before any address space is built, and again in
+ * load_segments() right before the values are used. The two passes re-read the
+ * headers from the file, and the open reference the loader holds only stops the
+ * file being unlinked, not rewritten: another process can modify it in between
+ * (the loader yields on every timer tick). Without the second check such a
+ * rewrite would hand an unvalidated p_vaddr straight to paging_map_user_page(),
+ * which does no range checking of its own. */
+static int phdr_in_user_range(const Elf32_Phdr *phdr, uint32_t file_length) {
+    return phdr->p_vaddr >= USER_LOAD_BASE &&
+           phdr->p_vaddr < USER_STACK_BOTTOM &&
+           phdr->p_memsz <= USER_STACK_BOTTOM - phdr->p_vaddr &&
+           phdr->p_filesz <= phdr->p_memsz &&
+           phdr->p_offset <= file_length &&
+           phdr->p_filesz <= file_length - phdr->p_offset;
+}
+
 static int validate_segments(fs_node_t *file, const Elf32_Ehdr *ehdr) {
     int entry_mapped = 0;
 
@@ -41,12 +62,7 @@ static int validate_segments(fs_node_t *file, const Elf32_Ehdr *ehdr) {
 
         if (phdr.p_type != PT_LOAD) continue;
 
-        if (phdr.p_vaddr < USER_LOAD_BASE ||
-            phdr.p_vaddr >= USER_STACK_BOTTOM ||
-            phdr.p_memsz > USER_STACK_BOTTOM - phdr.p_vaddr ||
-            phdr.p_filesz > phdr.p_memsz ||
-            phdr.p_offset > file->length ||
-            phdr.p_filesz > file->length - phdr.p_offset) {
+        if (!phdr_in_user_range(&phdr, file->length)) {
             terminal_writestring("exec: segment out of user range\n");
             return 0;
         }
@@ -74,6 +90,14 @@ static int load_segments(address_space_t *space, fs_node_t *file,
 
         if (!read_program_header(file, ehdr, i, &phdr)) return 0;
         if (phdr.p_type != PT_LOAD) continue;
+
+        /* Re-check: this is a second read of the header, and the file may have
+         * been rewritten since validate_segments() approved it. See
+         * phdr_in_user_range(). */
+        if (!phdr_in_user_range(&phdr, file->length)) {
+            terminal_writestring("exec: segment out of user range\n");
+            return 0;
+        }
 
         if (phdr.p_vaddr + phdr.p_memsz > heap_base)
             heap_base = phdr.p_vaddr + phdr.p_memsz;
@@ -166,33 +190,20 @@ static uint32_t setup_user_argv(address_space_t *space,
     return esp;
 }
 
-address_space_t *elf_load_image(const char *name, int argc, const char **argv,
-                                uint32_t *entry, uint32_t *user_esp,
-                                uint32_t *heap_base_out) {
-    /* Resolve through the VFS, not just RAMFS, so a program can be executed
-     * from any mounted filesystem (e.g. "fat/prog" or "/disk/prog") and not
-     * only from the embedded RAMFS image. Everything below already reads the
-     * file through the generic read_fs()/node->length interface, so no backend
-     * knows or cares which filesystem the image came from.
-     *
-     * Names without a leading '/' still resolve from the root, exactly as the
-     * previous RAMFS-only lookup did. This is deliberately NOT relative to the
-     * caller's working directory: bare command names must keep working after a
-     * `cd` (ush does `cd fat` and then runs `cat`, which lives at /cat). */
-    fs_node_t *file = resolve_fs(name);
+/* Build the address space from an already-resolved, already-referenced file.
+ * Split out from elf_load_image() so that the open reference taken there is
+ * released on exactly one path, no matter which of the failure exits below
+ * runs. */
+static address_space_t *elf_load_from_node(fs_node_t *file, const char *name,
+                                           int argc, const char **argv,
+                                           uint32_t *entry, uint32_t *user_esp,
+                                           uint32_t *heap_base_out) {
     address_space_t *space;
-
-    if (file && file->flags != FS_FILE) file = NULL;   /* directories are not images */
     Elf32_Ehdr ehdr;
     uint32_t esp;
     uint32_t heap_base = USER_LOAD_BASE;
 
-    if (!file) {
-        terminal_writestring("exec: not found: ");
-        terminal_writestring(name);
-        terminal_writestring("\n");
-        return NULL;
-    }
+    (void)name;
 
     if (!read_exact(file, 0, sizeof(Elf32_Ehdr), (uint8_t *)&ehdr) ||
         !elf_valid(&ehdr)) {
@@ -239,6 +250,47 @@ address_space_t *elf_load_image(const char *name, int argc, const char **argv,
     *entry = ehdr.e_entry;
     *user_esp = esp;
     *heap_base_out = heap_base;
+    return space;
+}
+
+address_space_t *elf_load_image(const char *name, int argc, const char **argv,
+                                uint32_t *entry, uint32_t *user_esp,
+                                uint32_t *heap_base_out) {
+    /* Resolve through the VFS, not just RAMFS, so a program can be executed
+     * from any mounted filesystem (e.g. "fat/prog" or "/disk/prog") and not
+     * only from the embedded RAMFS image. Everything below already reads the
+     * file through the generic read_fs()/node->length interface, so no backend
+     * knows or cares which filesystem the image came from.
+     *
+     * Names without a leading '/' still resolve from the root, exactly as the
+     * previous RAMFS-only lookup did. This is deliberately NOT relative to the
+     * caller's working directory: bare command names must keep working after a
+     * `cd` (ush does `cd fat` and then runs `cat`, which lives at /cat). */
+    fs_node_t *file = resolve_fs(name);
+    address_space_t *space;
+
+    if (file && file->flags != FS_FILE) file = NULL;   /* directories are not images */
+
+    if (!file) {
+        terminal_writestring("exec: not found: ");
+        terminal_writestring(name);
+        terminal_writestring("\n");
+        return NULL;
+    }
+
+    /* Hold an open reference for the whole load. Loading reads the file many
+     * times (header, every program header, then each segment in 256-byte
+     * chunks) and yields on every timer tick in between, so without this the
+     * image can be unlinked mid-load: RAMFS would kfree() the node and this
+     * loader would keep using it, calling node->read read out of freed heap
+     * memory. That is the same class of kernel use-after-free as F11, and it is
+     * reachable from the shell (`cp hello prog &` ... `rm prog`). All three
+     * filesystems refuse to unlink a file that is open, so the reference is
+     * what makes the load safe rather than any timing assumption. */
+    open_fs(file);
+    space = elf_load_from_node(file, name, argc, argv,
+                               entry, user_esp, heap_base_out);
+    close_fs(file);
     return space;
 }
 
