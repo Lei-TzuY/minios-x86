@@ -10,7 +10,33 @@
  * what the shell-driven suite cannot probe precisely, so pin it down here.
  */
 
-static char out[FS_MAX_PATH];
+/* The output buffer, with a canary immediately behind it.
+ *
+ * vfs_resolve_path's contract is that `out` holds FS_MAX_PATH bytes. A bound
+ * that is one byte too generous writes the terminator at out[FS_MAX_PATH] --
+ * and the return value still comes back as -1, because a second length check
+ * at the end of the function rejects the result anyway. The two checks back
+ * each other up, which is good for the kernel and bad for a test: the overflow
+ * is invisible from the return value alone. The canary is what makes it
+ * visible. */
+static struct {
+    char          path[FS_MAX_PATH];
+    unsigned char guard[16];
+} buf;
+
+static char *const out = buf.path;
+
+#define GUARD_BYTE 0x5A
+
+static void arm_guard(void) {
+    for (unsigned i = 0; i < sizeof(buf.guard); i++) buf.guard[i] = GUARD_BYTE;
+}
+
+static int guard_intact(void) {
+    for (unsigned i = 0; i < sizeof(buf.guard); i++)
+        if (buf.guard[i] != GUARD_BYTE) return 0;
+    return 1;
+}
 
 static void test_absolute(void) {
     TEST("absolute");
@@ -82,6 +108,12 @@ static void test_length_boundary(void) {
 
     CHECK_EQ(vfs_resolve_path(cwd, "x", out), -1);
 
+    /* ... and it must reject without having written anything past the buffer
+     * on the way there. This cwd is 126 characters, so appending "/x" lands
+     * the terminator exactly one byte past the end: the case a too-generous
+     * bound would let through. */
+    CHECK(guard_intact());
+
     /* The same cwd used on its own still resolves (nothing to append). */
     CHECK_EQ(vfs_resolve_path(cwd, ".", out), 0);
     CHECK_STREQ(out, cwd);
@@ -108,11 +140,16 @@ static void test_bad_args(void) {
 }
 
 int main(void) {
+    arm_guard();
     test_absolute();
     test_relative();
     test_dot_and_dotdot();
     test_rejects_empty_component();
     test_length_boundary();
     test_bad_args();
+
+    /* Nothing in the whole suite may have written past the buffer. */
+    TEST("output buffer intact");
+    CHECK(guard_intact());
     TEST_REPORT("fs-path");
 }

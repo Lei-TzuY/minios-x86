@@ -212,6 +212,62 @@ static void test_write_out_of_space(void) {
     for (i = 0; i < written; i++) CHECK_EQ(back[i], huge[i]);
 }
 
+static void test_write_stores_nothing(void) {
+    fs_node_t *root = remount();
+    fs_node_t *filler, *f, *again;
+    static unsigned char huge[40000];
+    unsigned char probe[600];
+    uint32_t written;
+    unsigned i;
+
+    /*
+     * The sibling case of "write past end of volume", and the one it left
+     * open: a write that stores ZERO bytes. F9's fix records offset + written
+     * as the new end of file, which is the true end only when something was
+     * written there. Start a write beyond the last cluster the chain can be
+     * extended to and nothing is stored -- yet the file used to grow to the
+     * seek offset anyway, claiming a length its own chain could not back.
+     *
+     * Reachable from user space: the volume is 32 KB, sys_seek accepts any
+     * offset up to 0x7FFFFFFF, and both are ordinary shell operations. It is
+     * the same seek-past-the-end shape as F22, against a different filesystem.
+     */
+    TEST("write that stores nothing");
+    for (i = 0; i < sizeof(huge); i++) huge[i] = (unsigned char)(i * 17 + 3);
+
+    /* A small file that owns exactly one cluster ... */
+    f = make_file(root, "stuck.txt");
+    CHECK(f != NULL);
+    if (!f) return;
+    CHECK_EQ(write_fs(f, 0, 4, huge), 4);
+    CHECK_EQ(f->length, 4);
+
+    /* ... and then no free clusters left for it to grow into. */
+    filler = make_file(root, "full.txt");
+    CHECK(filler != NULL);
+    if (!filler) return;
+    CHECK(write_fs(filler, 0, sizeof(huge), huge) > 0);
+
+    /* Write starting well past the one cluster the file has. Nothing can be
+     * stored, so nothing may change. */
+    written = write_fs(f, 4096, 4, huge);
+    CHECK_EQ(written, 0);
+    CHECK_EQ(f->length, 4);
+
+    /* The persisted directory entry has to agree with the node: a length
+     * corrected only in RAM would come back wrong on the next lookup. */
+    again = root->finddir(root, "stuck.txt");
+    CHECK(again != NULL);
+    if (again) CHECK_EQ(again->length, 4);
+
+    /* And the file still reads back as the four bytes it actually holds --
+     * not the remainder of its last cluster served up as file data. */
+    for (i = 0; i < sizeof(probe); i++) probe[i] = 0xCC;
+    CHECK_EQ(read_fs(f, 0, sizeof(probe), probe), 4);
+    for (i = 0; i < 4; i++) CHECK_EQ(probe[i], huge[i]);
+    CHECK_EQ(probe[4], 0xCC);              /* untouched past the real end */
+}
+
 static void test_create_unlink(void) {
     fs_node_t *root = remount();
     fs_node_t *f;
@@ -280,6 +336,7 @@ int main(void) {
     test_nested_directory();
     test_multi_cluster_roundtrip();
     test_write_out_of_space();
+    test_write_stores_nothing();
     test_create_unlink();
     test_open_blocks_unlink();
     test_name_encoding();

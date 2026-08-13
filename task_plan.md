@@ -21,12 +21,12 @@
 - flat layout：核心原始碼在根目錄 (*.c/*.h/*.s)，`user/` 是 ring-3 程式，
   `tests/` 是原生單元測試，`gen_*.py` 產生內嵌資源，`Makefile` 為唯一建置系統。
 
-## 目前基準（Session 25 結束時，checkpoint commit）
+## 目前基準（Session 27 結束時）
 - `make clean && make all -j4`：0 warning / 0 error（-Wall -Wextra）
-- `make test`：**真實離開碼 0**（unit 16 套件 + test-ata-absent/test-boot/
+- `make test`：**真實離開碼 0**（unit 18 套件 + test-ata-absent/test-boot/
   test-iso/test-shell）
 - test-shell 結尾的洩漏偵測斷言：`running=0 zombies=0 peak=4`、`blocked=0`、
-  `sleeping=0`、`RAMFS nodes=58`、`spaces=0`
+  `sleeping=0`、`RAMFS nodes=59`、`spaces=0`
 
 ## Phases
 
@@ -341,11 +341,52 @@ Status: complete
   案例後抓到；R6 確認是冗餘防禦（註解自承），誠實記錄不硬殺。
 - 節點數 58、README 程式數 50、逾時 280s。
 
-## 目前結論（Session 25）
-F1–F22 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P1（F7、F10、F11、F20）、
-7 個 P2、5 個 P3、2 個 P4。功能擴充 FEAT1、排程公平性 FAIR1、效能 PERF1/PERF2（已實測）、
-去重 REFACTOR1（已證明 codegen 不變）。測試能力累積到 16 個單元套件 + 4 個 QEMU
-端對端目標。
+## Phase 28: Session 26 — VFS 核心（fs.c）＋ FAT16 長度記帳的殘留缺口
+Status: complete
+- 動機：每個帶路徑的系統呼叫都經過 fs.c 的兩個嚴格解析器，而它們一個單元測試都
+  沒有（只有正規化器有，34 檢查，全專案最薄）。F8 就住在這裡。
+- **CAP14：tests/test_fs.c**（277 檢查）。mock 檔案系統刻意比任何真實後端寬鬆，
+  樹裡放進「名字就叫 `.`／`..`／空字串」與「FS_FILE 卻帶著完整目錄操作」的節點，
+  用來隔離「是哪一層擋下來的」。斷言派送到哪個節點、帶什麼名字，而不只是成敗
+  ——路徑解析器壞掉的樣子是安靜地回答錯的物件。
+- **HARD1**：`resolve_fs` 補上與 `resolve_parent_fs` 相同的「中途組件必須是目錄」
+  檢查。**目前不可觸發**，是縱深防禦而非修掉的 bug，誠實記錄。
+- **F23（P3）**：`fat16_vfs_write` 在 `written == 0` 時仍把長度推到 offset。
+  修：`if (written > 0)` 包住長度更新。端對端 user/fatgrow.c。
+- 突變：fs.c 22/22（4 個一開始存活，逼出 3 個真實缺口 + 1 個被我誤判為等價的）、
+  fat16.c 3/3（各由不同測試抓到）。
+- 節點數 59、README 程式數 51、逾時 285s。
+
+## Phase 29: Session 27 — kb.c（鍵盤驅動：環狀緩衝 / 修飾鍵 / Ctrl+C）
+Status: complete
+- 動機：核心裡唯一一處「中斷處理常式與 task 同碰一個結構」的地方，而 QEMU 那套只走
+  最窄的一條路（緩衝區永不滿、索引永不繞回、沒有按鍵被丟掉）。
+- **CAP15：tests/test_kb.c**（1675 檢查）。`#define IO_H` 換掉 io.h 自備 `inb`，
+  不動任何核心標頭；`setjmp`/`longjmp` 接住 noreturn 的 `task_exit`。
+- **kb.c 本身沒有找到 bug**（誠實記錄）。
+- 突變 18/18，其中 3 個以逾時被抓到（症狀是掛住而非答錯，腳本層加 `timeout 20s`）。
+  **K17 一開始存活**：`count == 0` 的案例被「緩衝區裡剛好有字元」遮蔽，改成對空
+  緩衝區呼叫才有鑑別力——本專案第三次踩到同一形狀。
+- 0xE0 延伸掃描碼「不處理但後果良性」的推導已轉成測試，並用 K18（看似合理的修法）
+  證明右 Ctrl 會因此壞掉。
+
+## Phase 30: Session 28 — procfs（F3 的守衛第一次被執行）
+Status: complete
+- 動機：F3 是 procfs 的緩衝區溢位，而它的修法（/proc/processes 界限檢查）**從來
+  沒有執行過一次**——只有 pid 到十位數或行程名塞滿欄位時才發火，QEMU 執行碰不到。
+- **CAP16：tests/test_procfs.c**（183 檢查）。`gen_buf` 灌毒 0x7F + 「回報長度之後
+  必須全是毒」的結構化不變式，外加 `-fsanitize=bounds` trap 模式第二道網。
+- **procfs.c 沒有找到 bug**（誠實記錄）。產出是 F3 守衛的精確邊界被釘住，以及兩個
+  **完全沒有界限檢查**的產生器最壞情況被算出並守住。
+- 突變 16 個：14 抓到（P1 即 F3 溢位本身，被 sanitizer trap）、**P2/P3 一開始存活**
+  （均勻的 40-byte 行讓 `pos` 只取 40 的倍數，完全碰不到守衛邊界；改成精準落在 473
+  之後被抓到，並從 472 那側夾住）、P4/P12 推導確認為等價突變。
+
+## 目前結論（Session 28）
+F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P1（F7、F10、F11、F20）、
+7 個 P2、6 個 P3、2 個 P4。功能擴充 FEAT1、排程公平性 FAIR1、效能 PERF1/PERF2（已實測）、
+去重 REFACTOR1（已證明 codegen 不變）、強化 HARD1（誠實標示為不可觸發的縱深防禦）。
+測試能力累積到 17 個單元套件 + 4 個 QEMU 端對端目標。
 
 **未完項目與下一輪候選見 `PROJECT_STATE.md` 第 5、6 節**（已知限制 6 項、
 候選工作 A/B/C 三類，附價值與風險評估）。

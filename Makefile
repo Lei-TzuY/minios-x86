@@ -14,7 +14,7 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
        cat_embed.o fault_embed.o badptr_embed.o worker_embed.o spawner_embed.o \
        orphan_embed.o sleeptest_embed.o fstest_embed.o echo_embed.o \
        malloctest_embed.o wc_embed.o grep_embed.o \
-       head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o forkredir_embed.o sigretguard_embed.o killthread_embed.o killwait_embed.o bigseek_embed.o ush_embed.o
+       head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o fatgrow_embed.o forkredir_embed.o sigretguard_embed.o killthread_embed.o killwait_embed.o bigseek_embed.o ush_embed.o
 
 .PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot test-iso test-shell unit bench
 
@@ -29,11 +29,13 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
 # -fno-builtin stops gcc from turning our own memcpy/memset bodies into calls
 # to themselves, and from replacing the calls under test with its builtins.
 UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
-UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_pmm tests/test_heap \
+UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_fs tests/test_pmm \
+            tests/test_heap \
             tests/test_fat16 tests/test_diskfs tests/test_pipe tests/test_sem \
             tests/test_timer tests/test_task tests/test_rtc \
             tests/test_process_env tests/test_syscall_valid \
-            tests/test_paging_cow tests/test_elf tests/test_ramfs
+            tests/test_paging_cow tests/test_elf tests/test_ramfs \
+            tests/test_kb tests/test_procfs
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -47,6 +49,13 @@ tests/test_ramfs: tests/test_ramfs.c tests/test.h ramfs.c ramfs.h fs.h heap.h \
 
 tests/test_fs_path: tests/test_fs_path.c tests/test.h fs.c fs.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_fs_path.c fs.c utils.c -o $@
+
+# The VFS core: the strict resolvers and the dispatch wrappers, driven against
+# a mock filesystem the test builds itself. No real backend is linked -- the
+# mock is deliberately more permissive than any of them (it will return a child
+# literally named "."), so every rejection the test observes is fs.c's own.
+tests/test_fs: tests/test_fs.c tests/test.h fs.c fs.h utils.c utils.h
+	$(CC) $(UNIT_CFLAGS) tests/test_fs.c fs.c utils.c -o $@
 
 tests/test_pmm: tests/test_pmm.c tests/test.h pmm.c pmm.h
 	$(CC) $(UNIT_CFLAGS) tests/test_pmm.c pmm.c -o $@
@@ -87,6 +96,25 @@ tests/test_timer: tests/test_timer.c tests/test.h timer.c timer.h isr.h io.h irq
 # cli lives in task_exit, which the test never calls.
 tests/test_task: tests/test_task.c tests/test.h task.c task.h pmm.h irq.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_task.c task.c -o $@
+
+# procfs.c is included directly so the tests can reach the generators and the
+# shared render buffer. The three things it calls out to (the process
+# snapshot, the current process, the tick count) are stubbed by the test, so
+# neither process.c nor timer.c is linked. The bounds sanitizer in trap mode is
+# the second net under the buffer invariant: one generator's guard has never
+# executed in a real boot and two others have no guard at all, so a write past
+# gen_buf must fault rather than be inferred from a length.
+tests/test_procfs: tests/test_procfs.c tests/test.h procfs.c procfs.h fs.h \
+                   process.h timer.h utils.c utils.h
+	$(CC) $(UNIT_CFLAGS) -fsanitize=undefined,bounds \
+	    -fsanitize-undefined-trap-on-error tests/test_procfs.c utils.c -o $@
+
+# Includes kb.c directly to reach its statics (the ring indices, the modifier
+# flags) and the handler handed to register_interrupt_handler. io.h is replaced
+# by the test rather than compiled out: the hosted inb() returns a constant 0,
+# which would leave a scancode-driven driver with no way to receive input.
+tests/test_kb: tests/test_kb.c tests/test.h kb.c kb.h isr.h io.h irq.h task.h process.h vga.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_kb.c -o $@
 
 # Includes rtc.c directly to reach the static rtc_decode; the CMOS port I/O is
 # compiled out by HOSTED_TEST. No separate rtc.c object is linked.
@@ -306,6 +334,9 @@ user/redirref.elf: user/redirref.c user/user_syscall.h user/crt0.s user/Makefile
 
 user/fatref.elf: user/fatref.c user/user_syscall.h user/crt0.s user/Makefile
 	$(MAKE) -C user fatref.elf
+
+user/fatgrow.elf: user/fatgrow.c user/user_syscall.h user/crt0.s user/Makefile
+	$(MAKE) -C user fatgrow.elf
 
 user/forkredir.elf: user/forkredir.c user/user_syscall.h user/crt0.s user/Makefile
 	$(MAKE) -C user forkredir.elf
@@ -589,6 +620,12 @@ fatref_embed.c: user/fatref.elf gen_embed.py
 fatref_embed.o: fatref_embed.c
 	$(CC) -c $< -o $@ $(CFLAGS)
 
+fatgrow_embed.c: user/fatgrow.elf gen_embed.py
+	python3 gen_embed.py user/fatgrow.elf fatgrow_elf > $@
+
+fatgrow_embed.o: fatgrow_embed.c
+	$(CC) -c $< -o $@ $(CFLAGS)
+
 forkredir_embed.c: user/forkredir.elf gen_embed.py
 	python3 gen_embed.py user/forkredir.elf forkredir_elf > $@
 
@@ -644,7 +681,7 @@ $(ATA_IMAGE): gen_ata_image.py
 
 # Utility targets
 clean:
-	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c forkredir_embed.c sigretguard_embed.c killthread_embed.c killwait_embed.c bigseek_embed.c ush_embed.c fat16.img fat16_image_embed.c
+	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c fatgrow_embed.c forkredir_embed.c sigretguard_embed.c killthread_embed.c killwait_embed.c bigseek_embed.c ush_embed.c fat16.img fat16_image_embed.c
 	rm -rf isodir miniOS.iso
 	rm -f $(UNIT_BINS) $(BENCH_BINS)
 	$(MAKE) -C user clean
@@ -813,6 +850,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	    send_keys c p spc h e l l o spc f a t slash h e l l o ret; sleep 2.5; \
 	    send_keys f a t slash h e l l o ret; sleep 1.5; \
 	    send_keys r m spc f a t slash h e l l o ret; sleep 0.6; \
+	    send_keys f a t g r o w ret; sleep 2; \
 	    send_keys f o r k r e d i r ret; sleep 2; \
 	    send_keys s i g r e t g u a r d ret; sleep 1.5; \
 	    send_keys k i l l t h r e a d spc shift-7 ret; sleep 2; \
@@ -861,7 +899,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	    send_keys m e m ret; sleep 0.5; \
 	    send_keys c l e a r ret; sleep 0.5; \
 	    echo quit; \
-	} | timeout 280s $(QEMU) -rtc base=2020-01-01T00:00:00 $(ATA_DRIVE) -display none -monitor stdio -serial none \
+	} | timeout 285s $(QEMU) -rtc base=2020-01-01T00:00:00 $(ATA_DRIVE) -display none -monitor stdio -serial none \
 	    -debugcon file:$$log -no-reboot -no-shutdown -kernel kernel.bin \
 	    >/dev/null 2>&1; \
 	status=$$?; \
@@ -916,6 +954,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "^killthread$$" $$log && \
 	grep -q "^killwait$$" $$log && \
 	grep -q "^bigseek$$" $$log && \
+	grep -q "^fatgrow$$" $$log && \
 	grep -q "^ush$$" $$log && \
 	grep -q "^readme.txt$$" $$log && \
 	grep -q "^disk$$" $$log && \
@@ -975,6 +1014,15 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "\[fatref content ok\]" $$log && \
 	grep -q "\[fatref file intact\]" $$log && \
 	grep -q "\[fatref done\]" $$log && \
+	grep -q "\[fatgrow armed\]" $$log && \
+	grep -q "\[fatgrow write refused\]" $$log && \
+	grep -q "\[fatgrow size intact\]" $$log && \
+	grep -q "\[fatgrow read intact\]" $$log && \
+	grep -q "\[fatgrow done\]" $$log && \
+	! grep -q "\[fatgrow write WRONGLY stored\]" $$log && \
+	! grep -q "\[fatgrow size FAIL\]" $$log && \
+	! grep -q "\[fatgrow read FAIL\]" $$log && \
+	! grep -q "\[fatgrow\] " $$log && \
 	! grep -q "fatref inuse unlink WRONGLY" $$log && \
 	! grep -q "\[fatref content FAIL\]" $$log && \
 	! grep -q "\[fatref file intact FAIL\]" $$log && \
@@ -1090,7 +1138,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "Processes: running=0 zombies=0 peak=4" $$log && \
 	grep -q "Tasks: blocked=0" $$log && \
 	grep -q "Timers: sleeping=0" $$log && \
-	grep -q "RAMFS nodes=58" $$log && \
+	grep -q "RAMFS nodes=59" $$log && \
 	test $$(grep -c "\[heap test passed\]" $$log) -eq 2 && \
 	grep -q "\[pmm high-memory test passed\]" $$log && \
 	grep -q "\[ata pio read/write test passed\]" $$log && \

@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 25 / 2026-07-31）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 28 / 2026-08-13）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -13,11 +13,11 @@
 | 項目 | 數量 |
 |---|---|
 | 核心 C/ASM（不含 `*_embed.c` 產生檔） | ~9,100 行 |
-| `user/` ring-3 程式與 syscall wrapper | ~3,500 行 |
-| `tests/` 原生單元測試 | ~4,200 行 |
+| `user/` ring-3 程式與 syscall wrapper | ~3,600 行 |
+| `tests/` 原生單元測試 | ~5,800 行 |
 | 系統呼叫 | 51 |
-| 使用者程式 | 50 |
-| 單元測試套件 | 16 |
+| 使用者程式 | 51 |
+| 單元測試套件 | 19 |
 
 ### 子系統
 
@@ -81,7 +81,7 @@ User pages: accessible=0 spaces=0
 Processes: running=0 zombies=0 peak=4
 Tasks: blocked=0
 Timers: sleeping=0
-RAMFS nodes=58
+RAMFS nodes=59
 ATA sectors: available=2048 reads=19 writes=76
 DiskFS: mounted=1 generation=9 files=0
 ```
@@ -91,10 +91,10 @@ DiskFS: mounted=1 generation=9 files=0
 
 ## 3. 已完成工作
 
-### 已修問題（F1–F22）
+### 已修問題（F1–F23）
 
 分佈：**4 個 P0**（F1、F2、F14、F22，其中三個可讓**整台機器停機**）、
-4 個 P1、7 個 P2、5 個 P3、2 個 P4。
+4 個 P1、7 個 P2、6 個 P3、2 個 P4。
 
 | ID | 級別 | 摘要 |
 |---|---|---|
@@ -118,6 +118,7 @@ DiskFS: mounted=1 generation=9 files=0
 | F20 | P1 | ELF 載入器全程不持有 VFS 參照 → 載入中被 unlink = UAF |
 | F21 | P2 | program header 驗證後重讀，中間可被改寫（TOCTOU） |
 | F22 | **P0** | RAMFS 容量倍增溢位守衛差一步 → **無窮迴圈凍結整台機器** |
+| F23 | P3 | FAT16 寫入 0 位元組時仍把長度推到 seek 位置（F9 修法的殘留邊界） |
 
 ### 功能與效能
 
@@ -128,6 +129,9 @@ DiskFS: mounted=1 generation=9 files=0
   無改善**，已誠實記錄）。
 - **PERF2**：ramfs_write 幾何成長（攤還 O(1) append）。
 - **REFACTOR1**：`irq.h` 抽出重複 7 次的 save/restore，**實測 7 個 `.o` 位元組相同**。
+- **HARD1**：`resolve_fs` 補上與 `resolve_parent_fs` 一致的「中途組件必須是目錄」
+  檢查。**目前不可觸發**（所有後端的檔案節點 finddir 都是 NULL），是縱深防禦而非
+  修掉的 bug——補它是因為原本同一個路徑在兩個進入點意義不同，而那正是 F8 的溫床。
 
 ### 測試能力（CAP1–CAP13）
 
@@ -135,13 +139,22 @@ DiskFS: mounted=1 generation=9 files=0
 - **CAP2** `tests/` 原生單元測試框架 + 突變測試方法論。
 - **CAP3–CAP13**：fat16 / diskfs / pipe / sem / timer / task / rtc / process-env /
   syscall-valid / paging-cow / elf / ramfs 各套件。
+- **CAP14** `test_fs`：VFS 核心（兩個嚴格解析器 + 六個 dispatch wrapper），用刻意
+  寬鬆的 mock 後端，讓每一次拒絕都能歸因到 fs.c 自己。
+- **CAP15** `test_kb`：鍵盤驅動（環狀緩衝、修飾鍵狀態機、Ctrl+C 派送）。用
+  `#define IO_H` 換掉 io.h 自備 `inb`，不動任何核心標頭。**沒找到 bug**，產出是
+  18 個突變證明過的測試。
+- **CAP16** `test_procfs`：**F3 的守衛第一次被實際執行**，精確邊界（473/512、
+  12 行）被釘住；兩個完全沒有界限檢查的產生器最壞情況被算出並守住。灌毒 +
+  `-fsanitize=bounds` 雙重不變式。
 
-目前 16 套件，`make unit` <1 秒：
+目前 19 套件，`make unit` <1 秒：
 
 ```
-utils 50032 / fs-path 34 / pmm 58 / heap 378 / fat16 37351 / diskfs 943 /
-pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 / process-env 47 /
-syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4300
+utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 378 / fat16 37366 /
+diskfs 943 / pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 /
+process-env 47 / syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4300 /
+kb 1675 / procfs 183
 ```
 
 ---
@@ -185,6 +198,16 @@ syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4300
    短路求值中 `p_filesz <= p_memsz` 與 `p_memsz <= USER_STACK_BOTTOM - p_vaddr`
    排在它前面，路徑到不了。等價突變。
 
+7. **procfs 的兩個等價突變**（P4、P12，Session 28）：`/proc/processes` 的守衛只看
+   `pos`，而略過一個行程不改變 `pos`，所以 `break` 與 `continue` 產生的位元組完全
+   相同；`proc_read` 的 `offset >= len` 改成 `> len` 之後，`offset == len` 會被
+   下一行的 size 夾成 0、`memcpy` 0 bytes，回傳同樣是 0。兩者都是刻意的縱深防禦，
+   誠實記錄不硬寫測試去殺。
+
+8. **`/proc/self/name` 與 `/proc/self/status` 完全沒有界限檢查**：今天安全是因為
+   欄位剛好夠窄（status 最壞 75 bytes vs 512 緩衝區），**不是任何程式碼在維護的
+   性質**。已由 CAP16 的最壞情況測試守住——欄位一變寬，那個測試就會失敗。
+
 6. **Git-for-Windows 的 CRLF 轉換**使 WSL 內 git 視整棵樹為已修改。
 
 ---
@@ -195,12 +218,16 @@ syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4300
 
 ### A. 尚未單元測試的模組（延續 CAP 系列）
 
-- **`procfs.c`**：F3 修過緩衝區截斷，但那條路徑（大量 fork 後 pid 位數變長）
-  從未被實際執行過。純格式化邏輯，好測。
-- **`kb.c`**：掃描碼表、環狀緩衝 wrap、Ctrl+C 的 shift/ctrl 狀態機。純邏輯。
+- ~~**`procfs.c`**~~：**Session 28 完成，見 CAP16**（沒找到 bug；F3 的守衛第一次
+  被實際執行，精確邊界已釘住；兩個無守衛產生器的最壞情況已算出並守住）。
+- ~~**`kb.c`**~~：**Session 27 完成，見 CAP15**（沒找到 bug；0xE0 延伸掃描碼
+  「不處理但後果良性」的推導已轉成測試）。
 - **`vga.c`**：捲動、游標、`terminal_write_dec`（Session 1 改過但沒單元測試）。
-- **`fs.c` 的 `vfs_resolve_path`**：目前 `test_fs_path` 只有 34 檢查，是所有套件
-  裡最薄的，而 F8 正是這裡的 bug。**投報率可能最高**。
+  **現在是 A 類剩下裡最單純的一個**；可沿用 CAP15 的 `#define` 換掉標頭的手法，
+  把 VGA 記憶體指向測試自己的陣列。
+- ~~**`fs.c` 的 `vfs_resolve_path`**~~：**Session 26 完成，見 CAP14**——並且做的是
+  比原本設想更完整的範圍（兩個嚴格解析器 + dispatch wrapper + 正規化器與解析器的
+  一致性），因為缺口其實在「消費正規化輸出的那一層」。
 - **`heap.c`**：378 檢查，coalescing 邏輯值得再深入。
 
 ### B. 已知限制的攻堅
@@ -213,8 +240,10 @@ syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4300
 ### C. 方法論
 
 - **`sys_seek` 的上界**：目前允許 offset 到 `0x7FFFFFFF`，而檔案系統實際能支撐的
-  遠小於此。F22 正是從這個縫隙進來的。考慮把上界收到合理範圍（但要確認不破壞
-  既有 seek 測試），屬於「消除整類問題」而非修單一 bug。
+  遠小於此。F22 與 **F23 都是從這個縫隙進來的**（同一種形狀，打在兩個不同的檔案
+  系統上）。三個後端現在各自都擋住了，但**下一個後端還是得自己重擋一次**——把上界
+  收到合理範圍屬於「消除整類問題」而非修單一 bug。**兩次命中之後，這一項的優先度
+  應該提高。**
 - **對其他「量過效能但沒測正確性」的地方做一輪盤點**——F22 潛伏 23 輪的根因。
 
 ---
