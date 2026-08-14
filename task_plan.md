@@ -21,9 +21,9 @@
 - flat layout：核心原始碼在根目錄 (*.c/*.h/*.s)，`user/` 是 ring-3 程式，
   `tests/` 是原生單元測試，`gen_*.py` 產生內嵌資源，`Makefile` 為唯一建置系統。
 
-## 目前基準（Session 27 結束時）
-- `make clean && make all -j4`：0 warning / 0 error（-Wall -Wextra）
-- `make test`：**真實離開碼 0**（unit 18 套件 + test-ata-absent/test-boot/
+## 目前基準（Session 29 結束時）
+- `make clean && make all -j4`：0 warning / 0 error（-Wall -Wextra，實測計數）
+- `make test`：**真實離開碼 0**（unit 20 套件 + test-ata-absent/test-boot/
   test-iso/test-shell）
 - test-shell 結尾的洩漏偵測斷言：`running=0 zombies=0 peak=4`、`blocked=0`、
   `sleeping=0`、`RAMFS nodes=59`、`spaces=0`
@@ -382,7 +382,21 @@ Status: complete
   （均勻的 40-byte 行讓 `pos` 只取 40 的倍數，完全碰不到守衛邊界；改成精準落在 473
   之後被抓到，並從 472 那側夾住）、P4/P12 推導確認為等價突變。
 
-## 目前結論（Session 28）
+## Phase 31: Session 29 — sys_seek 上界調查、後端契約、VGA、heap 稽核
+Status: complete
+- 先為 Session 26–28 建立 checkpoint commit（未 push）。
+- **SEEK1**：實證調查後**決定不改** `sys_seek` 語義（三個後端已正確、沒有有依據的
+  全域常數、收窄會讓 user/bigseek.c 這個唯一的 F22 端對端證據失效）。完整推導在
+  findings.md。
+- **CONF1**：tests/fs_conformance.h——把「下一個後端要自己重擋」變成三個後端都跑的
+  可執行契約。突變 3/3，其中 **C3 只有契約抓到**（既有 943 檢查全漏），
+  **C1 是既有看門狗抓到的、不是契約**（誠實記錄）。
+- **CAP17**：tests/test_vga.c（4769 檢查），突變 21/21 全由斷言抓到。
+  附帶修正 tests/test.h：失敗訊息逐筆 flush，否則崩潰會吃掉所有失敗訊息。
+- **HEAP1**：heap.c 稽核無缺陷；補四個真實測試缺口（378 → 720 檢查），突變 15/15
+  無等價突變。stub 改為單一 arena 依序配發以貼近真實 PMM。
+
+## 目前結論（Session 29）
 F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P1（F7、F10、F11、F20）、
 7 個 P2、6 個 P3、2 個 P4。功能擴充 FEAT1、排程公平性 FAIR1、效能 PERF1/PERF2（已實測）、
 去重 REFACTOR1（已證明 codegen 不變）、強化 HARD1（誠實標示為不可觸發的縱深防禦）。

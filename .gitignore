@@ -42,3 +42,4 @@ tests/test_elf
 tests/test_ramfs
 tests/test_kb
 tests/test_procfs
+tests/test_vga

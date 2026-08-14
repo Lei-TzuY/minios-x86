@@ -1,4 +1,5 @@
 #include "test.h"
+#include "fs_conformance.h"
 #include "../fat16.h"
 #include "../fs.h"
 #include "../pmm.h"
@@ -329,7 +330,27 @@ static void test_name_encoding(void) {
     CHECK(finddir_fs(root, "noext") != NULL);
 }
 
+
+/* The shared contract every backend owes (see tests/fs_conformance.h).
+ * Deliberately last: reaching for an offset it cannot satisfy makes FAT16
+ * allocate every free cluster on the way to giving up, so the volume is full
+ * afterwards. Each test remounts a pristine image, so that costs nothing here
+ * -- but it would quietly starve any test that ran after it. */
+static void test_backend_conformance(void) {
+    static const uint8_t content[] = { 'f', 'a', 't' };
+    fs_node_t *root = remount();
+    fs_node_t *f = make_file(root, "conf.txt");
+
+    CHECK(f != NULL);
+    if (!f) return;
+    CHECK_EQ(f->write(f, 0, sizeof(content), (uint8_t *)content),
+             sizeof(content));
+
+    fs_conformance_extreme_offsets(f, content, sizeof(content), "fat16");
+}
+
 int main(void) {
+    fs_conformance_arm_watchdog(30);
     test_mount();
     test_readdir_root();
     test_read_file();
@@ -340,5 +361,6 @@ int main(void) {
     test_create_unlink();
     test_open_blocks_unlink();
     test_name_encoding();
+    test_backend_conformance();
     TEST_REPORT("fat16");
 }

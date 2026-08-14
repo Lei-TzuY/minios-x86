@@ -1,6 +1,7 @@
 #include "../ramfs.h"
 
 #include "test.h"
+#include "fs_conformance.h"
 
 #include <signal.h>
 #include <stdlib.h>
@@ -534,6 +535,33 @@ static void test_node_table_limit(void) {
     CHECK(ramfs_find_node("/") == fs_root);
 }
 
+
+/* The shared contract every backend owes (see tests/fs_conformance.h). RAMFS
+ * is where F22 came from, so this is the backend the contract was written
+ * against; the allocator stub refuses anything over a megabyte, which is what
+ * makes "the allocation cannot succeed" deterministic rather than dependent on
+ * how the host's malloc feels about a two-gigabyte request. */
+static void test_backend_conformance(void) {
+    static const uint8_t content[] = { 'r', 'a', 'm', 'f', 's' };
+    fs_node_t *f;
+
+    /* Earlier tests leave the allocator stub refusing allocations on
+     * purpose. Restore the default ceiling so this test depends on the
+     * contract rather than on where it happens to sit in main(): it still
+     * has to be low enough that a two-gigabyte request cannot succeed,
+     * which is what makes "the backend cannot reach that offset"
+     * deterministic instead of a question about the host's malloc. */
+    g_alloc_limit = 1u << 20;
+    f = ramfs_create_file("/conf.txt");
+
+    CHECK(f != NULL);
+    if (!f) return;
+    CHECK_EQ(f->write(f, 0, sizeof(content), (uint8_t *)content),
+             sizeof(content));
+
+    fs_conformance_extreme_offsets(f, content, sizeof(content), "ramfs");
+}
+
 int main(void) {
     /* A hang here would stall `make test`; fail loudly instead. */
     signal(SIGALRM, on_alarm);
@@ -551,6 +579,10 @@ int main(void) {
     test_directories();
     test_path_parsing();
     test_out_of_memory_is_clean();
+    /* Before test_node_table_limit(): that one deliberately fills the
+     * node table to MAX_RAMFS_NODES, after which nothing can create the
+     * file the contract needs. */
+    test_backend_conformance();
     test_node_table_limit();
 
     alarm(0);

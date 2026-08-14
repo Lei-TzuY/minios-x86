@@ -1,4 +1,5 @@
 #include "test.h"
+#include "fs_conformance.h"
 #include "../diskfs.h"
 #include "../fs.h"
 #include "../ata.h"
@@ -417,7 +418,33 @@ static void test_no_device(void) {
              (int)(sizeof(payload) - 1));
 }
 
+
+/* The shared contract every backend owes (see tests/fs_conformance.h).
+ * DiskFS caps a file at DISKFS_FILE_SECTORS sectors, four orders of magnitude
+ * below what sys_seek will hand it, so every offset the contract uses is
+ * unreachable here by a wide margin. */
+static void test_backend_conformance(void) {
+    static const uint8_t content[] = { 'd', 'i', 's', 'k' };
+    fs_node_t *root;
+    fs_node_t *f;
+
+    diskfs_format();
+    CHECK(diskfs_mount());
+    root = diskfs_get_root_node();
+    CHECK(root != NULL);
+    if (!root) return;
+
+    f = root->create(root, "conf.txt");
+    CHECK(f != NULL);
+    if (!f) return;
+    CHECK_EQ(f->write(f, 0, sizeof(content), (uint8_t *)content),
+             sizeof(content));
+
+    fs_conformance_extreme_offsets(f, content, sizeof(content), "diskfs");
+}
+
 int main(void) {
+    fs_conformance_arm_watchdog(30);
     test_format_and_mount();
     test_file_roundtrip();
     test_write_holes_and_sector_spans();
@@ -427,5 +454,6 @@ int main(void) {
     test_superblock_validation();
     test_entry_validation();
     test_no_device();
+    test_backend_conformance();
     TEST_REPORT("diskfs");
 }

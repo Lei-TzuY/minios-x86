@@ -35,7 +35,7 @@ UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_fs tests/test_pmm \
             tests/test_timer tests/test_task tests/test_rtc \
             tests/test_process_env tests/test_syscall_valid \
             tests/test_paging_cow tests/test_elf tests/test_ramfs \
-            tests/test_kb tests/test_procfs
+            tests/test_kb tests/test_procfs tests/test_vga
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -43,8 +43,8 @@ tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 # ramfs.c needs only the allocator (stubbed in the test) and fs_root, so fs.c is
 # not linked. The real utils.c is used so the memcpy/memset the filesystem
 # actually ships is what moves the data.
-tests/test_ramfs: tests/test_ramfs.c tests/test.h ramfs.c ramfs.h fs.h heap.h \
-                  utils.c utils.h
+tests/test_ramfs: tests/test_ramfs.c tests/test.h tests/fs_conformance.h \
+                  ramfs.c ramfs.h fs.h heap.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_ramfs.c ramfs.c utils.c -o $@
 
 tests/test_fs_path: tests/test_fs_path.c tests/test.h fs.c fs.h utils.c utils.h
@@ -65,15 +65,15 @@ tests/test_heap: tests/test_heap.c tests/test.h heap.c heap.h pmm.h
 
 # Links the same embedded image the kernel mounts, so the tests run against
 # the real generated filesystem rather than a hand-built approximation.
-tests/test_fat16: tests/test_fat16.c tests/test.h fat16.c fat16.h fs.c fs.h \
-                  utils.c utils.h fat16_image_embed.c
+tests/test_fat16: tests/test_fat16.c tests/test.h tests/fs_conformance.h \
+                  fat16.c fat16.h fs.c fs.h utils.c utils.h fat16_image_embed.c
 	$(CC) $(UNIT_CFLAGS) tests/test_fat16.c fat16.c fs.c utils.c \
 	    fat16_image_embed.c -o $@
 
 # ATA is stubbed with a RAM array by the test itself, so ata.c is not linked:
 # that is what lets the test hand diskfs a deliberately corrupt disk.
-tests/test_diskfs: tests/test_diskfs.c tests/test.h diskfs.c diskfs.h fs.c fs.h \
-                   utils.c utils.h ata.h
+tests/test_diskfs: tests/test_diskfs.c tests/test.h tests/fs_conformance.h \
+                   diskfs.c diskfs.h fs.c fs.h utils.c utils.h ata.h
 	$(CC) $(UNIT_CFLAGS) tests/test_diskfs.c diskfs.c fs.c utils.c -o $@
 
 # pipe.c and sem.c guard their cli/sti behind HOSTED_TEST so the privileged
@@ -108,6 +108,15 @@ tests/test_procfs: tests/test_procfs.c tests/test.h procfs.c procfs.h fs.h \
                    process.h timer.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) -fsanitize=undefined,bounds \
 	    -fsanitize-undefined-trap-on-error tests/test_procfs.c utils.c -o $@
+
+# vga.c is included directly to reach terminal_scroll and the cursor globals.
+# io.h is replaced by the test rather than compiled out, for two reasons: the
+# port-0xE9 write is the byte stream the QEMU suite greps, so it is worth
+# asserting on, and terminal_buffer can then be pointed at an ordinary array
+# instead of the hardware address. terminal_initialize() is the one function
+# that cannot run hosted -- its body is the 0xB8000 assignment.
+tests/test_vga: tests/test_vga.c tests/test.h vga.c vga.h io.h utils.h
+	$(CC) $(UNIT_CFLAGS) tests/test_vga.c -o $@
 
 # Includes kb.c directly to reach its statics (the ring indices, the modifier
 # flags) and the handler handed to register_interrupt_handler. io.h is replaced

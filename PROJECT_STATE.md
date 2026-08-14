@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 28 / 2026-08-13）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 29 / 2026-08-14）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -17,7 +17,7 @@
 | `tests/` 原生單元測試 | ~5,800 行 |
 | 系統呼叫 | 51 |
 | 使用者程式 | 51 |
-| 單元測試套件 | 19 |
+| 單元測試套件 | 20 |
 
 ### 子系統
 
@@ -147,14 +147,21 @@ DiskFS: mounted=1 generation=9 files=0
 - **CAP16** `test_procfs`：**F3 的守衛第一次被實際執行**，精確邊界（473/512、
   12 行）被釘住；兩個完全沒有界限檢查的產生器最壞情況被算出並守住。灌毒 +
   `-fsanitize=bounds` 雙重不變式。
+- **CAP17** `test_vga`：文字主控台（捲動、環繞、退格、十進位格式化）。QEMU 那套讀
+  的是 putchar **在游標運算之前**就送出的 port 0xE9 位元組流，所以這些錯誤對端對端
+  完全不可見。突變 21/21 全由斷言抓到。
+- **CONF1** `tests/fs_conformance.h`：三個檔案系統後端共用的一致性契約
+  （不可能觸及的寫入必須：會回來、存 0 位元組、檔案完全不變、讀取安全回 EOF）。
+  **突變 C3 只有契約抓到，既有 943 個 diskfs 檢查全漏**。
+- **HEAP1**：heap.c 稽核無缺陷，但補上四個真實測試缺口（378 → 720 檢查）。
 
-目前 19 套件，`make unit` <1 秒：
+目前 20 套件，`make unit` <1 秒：
 
 ```
-utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 378 / fat16 37366 /
-diskfs 943 / pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 /
-process-env 47 / syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4300 /
-kb 1675 / procfs 183
+utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37399 /
+diskfs 979 / pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 /
+process-env 47 / syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4335 /
+kb 1675 / procfs 183 / vga 4769
 ```
 
 ---
@@ -198,17 +205,23 @@ kb 1675 / procfs 183
    短路求值中 `p_filesz <= p_memsz` 與 `p_memsz <= USER_STACK_BOTTOM - p_vaddr`
    排在它前面，路徑到不了。等價突變。
 
-7. **procfs 的兩個等價突變**（P4、P12，Session 28）：`/proc/processes` 的守衛只看
+6. **procfs 的兩個等價突變**（P4、P12，Session 28）：`/proc/processes` 的守衛只看
    `pos`，而略過一個行程不改變 `pos`，所以 `break` 與 `continue` 產生的位元組完全
    相同；`proc_read` 的 `offset >= len` 改成 `> len` 之後，`offset == len` 會被
    下一行的 size 夾成 0、`memcpy` 0 bytes，回傳同樣是 0。兩者都是刻意的縱深防禦，
    誠實記錄不硬寫測試去殺。
 
-8. **`/proc/self/name` 與 `/proc/self/status` 完全沒有界限檢查**：今天安全是因為
+7. **`/proc/self/name` 與 `/proc/self/status` 完全沒有界限檢查**：今天安全是因為
    欄位剛好夠窄（status 最壞 75 bytes vs 512 緩衝區），**不是任何程式碼在維護的
    性質**。已由 CAP16 的最壞情況測試守住——欄位一變寬，那個測試就會失敗。
 
-6. **Git-for-Windows 的 CRLF 轉換**使 WSL 內 git 視整棵樹為已修改。
+8. **Git-for-Windows 的 CRLF 轉換**使 WSL 內 git 視整棵樹為已修改。
+
+9. **`sys_seek` 允許的 offset 遠超任何後端能支撐的範圍**（最大 0x7FFFFFFF）。
+   Session 29 調查後**刻意不改**，理由見 findings.md 的 SEEK1：三個後端目前
+   全部正確、沒有一個有依據的全域常數（各後端上限相差四個數量級）、且收窄會讓
+   `user/bigseek.c` 這個唯一的 F22 端對端證據失效。殘留風險由 CONF1 的可執行
+   後端契約承接。
 
 ---
 
@@ -222,13 +235,17 @@ kb 1675 / procfs 183
   被實際執行，精確邊界已釘住；兩個無守衛產生器的最壞情況已算出並守住）。
 - ~~**`kb.c`**~~：**Session 27 完成，見 CAP15**（沒找到 bug；0xE0 延伸掃描碼
   「不處理但後果良性」的推導已轉成測試）。
-- **`vga.c`**：捲動、游標、`terminal_write_dec`（Session 1 改過但沒單元測試）。
-  **現在是 A 類剩下裡最單純的一個**；可沿用 CAP15 的 `#define` 換掉標頭的手法，
-  把 VGA 記憶體指向測試自己的陣列。
+- ~~**`vga.c`**~~：**Session 29 完成，見 CAP17**（沒找到 bug；順帶修正 test.h 讓
+  失敗訊息在崩潰前被 flush 出來）。
 - ~~**`fs.c` 的 `vfs_resolve_path`**~~：**Session 26 完成，見 CAP14**——並且做的是
   比原本設想更完整的範圍（兩個嚴格解析器 + dispatch wrapper + 正規化器與解析器的
   一致性），因為缺口其實在「消費正規化輸出的那一層」。
-- **`heap.c`**：378 檢查，coalescing 邏輯值得再深入。
+- ~~**`heap.c`**~~：**Session 29 完成，見 HEAP1**（稽核無缺陷；補四個真實測試缺口，
+  378 → 720 檢查；stub 改為貼近真實 PMM 的連續配發）。
+
+**A 類已全部完成。** 剩下的候選集中在 B 類（已知限制的攻堅）與新的方向：
+`ata.c`（唯一還沒有單元測試的驅動，且限制 1 的重構需要它當安全網）、
+`process.c` / `syscall.c` 的其餘部分（目前只有 env 與指標驗證兩塊被測到）。
 
 ### B. 已知限制的攻堅
 
@@ -239,11 +256,11 @@ kb 1675 / procfs 183
 
 ### C. 方法論
 
-- **`sys_seek` 的上界**：目前允許 offset 到 `0x7FFFFFFF`，而檔案系統實際能支撐的
-  遠小於此。F22 與 **F23 都是從這個縫隙進來的**（同一種形狀，打在兩個不同的檔案
-  系統上）。三個後端現在各自都擋住了，但**下一個後端還是得自己重擋一次**——把上界
-  收到合理範圍屬於「消除整類問題」而非修單一 bug。**兩次命中之後，這一項的優先度
-  應該提高。**
+- ~~**`sys_seek` 的上界**~~：**Session 29 已調查並決定不改，見 findings.md 的
+  SEEK1**。三個實測理由：三個後端目前全部正確；**沒有一個有依據的常數**可放在
+  syscall 邊界（各後端上限相差四個數量級，且 syscall 那層看不出 fd 屬於哪個後端）；
+  收窄會讓 `user/bigseek.c` 失效——那是唯一證明 ring-3 整條路徑撐得住 F22 的產物。
+  殘留風險（新後端要自己重擋）改由 **CONF1 的可執行契約**處理。
 - **對其他「量過效能但沒測正確性」的地方做一輪盤點**——F22 潛伏 23 輪的根因。
 
 ---
