@@ -461,6 +461,18 @@ F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P
 新增 `tests/test_signal.c`（88 檢查），突變 22/23（S14 為等價突變，附推導）。
 三個原本只被 segfault／timeout 抓到的突變改成具名斷言。
 
+### Session 34 — CAP22 mmap / sbrk 位址空間所有權
+- 審計 `ext_map` reservation 與 demand-paged PTE teardown，新增 `tests/test_vm_lifecycle.c`
+  （36 檢查），並把 fork/exec/slot-reuse metadata 契約擴進 `test_process`（397 檢查）。
+- 一度懷疑 `sys_munmap` 先清 bitmap、再 unmap PTE 的中間會被 sibling 搶到位址；後來
+  發現這是 hosted harness 漏模型化 `int $0x80` interrupt gate 的假競態。現行單核 ABI
+  下 IF 在 syscall 全程為 0，task 只能在 iret 後執行；模型已改為明確驗證該順序，
+  **沒有為正確程式加入冗餘 lock**。
+- 釘住 sbrk 上/下界與 `INT32_MIN`、mmap first-fit/reuse/invalid-free 原子性、fork bitmap
+  複製但 parent/child 隔離、exec 換 image 清 bitmap、以及 syscall-gate 到 iret 的
+  lifecycle 邊界。突變 **7/7 meaningful killed**；「未加 outer lock」在現行 ABI 下
+  為 equivalent/unreachable，誠實排除。
+
 ### 方法論上最值得記住的三件事
 1. **假綠燈**（Phase 5 / M1）：`wsl.exe -- bash -lc "...$?"` 恆回報 0，一整輪的
    「測試通過」結論曾因此無效。離開碼必須在單一 bash 程序內擷取。

@@ -1636,6 +1636,35 @@ regs->eflags = (sc->eflags & EFLAGS_USER_MASK) | EFLAGS_ALWAYS_SET;
   - 這條界線是本專案的既有紀律：**timeout 與 crash 證明「有事發生」，不證明
     「斷言起作用了」**。
 
+## Session 34 — 2026-08-16
+
+### CAP22 mmap / sbrk 位址空間所有權
+- 檔案: `tests/test_vm_lifecycle.c`, `tests/test_process.c`, `process.c`, `syscall.c`
+- 類別: 正確性 / 併發模型 / 所有權
+- 結論: **沒有現存 kernel defect；修正了一個 hosted 測試模型的錯誤假設。**
+- `sys_munmap()` 乍看先清 `ext_map`、再清 PTE，似乎可讓 sibling thread 在中間重用
+  位址而看到舊 mapping。然而 `SYS_MUNMAP` 只能由 `int $0x80` dispatcher 呼叫；該
+  IDT entry 是 interrupt gate（0xEE），CPU 進入時已清 IF，且這個單核核心只會在
+  可中斷點排程。因此 bitmap update 與 PTE teardown 之間沒有可達的 task switch。
+- 初版 hosted stub 錯把 `process_ext_free()` 的 nested restore 當成「重新開中斷」，
+  於是製造假 race。已改為顯式模型化 syscall gate：sibling 只在模擬 iret 後才可執行，
+  並確認它取得重用位址時 PTE 已解除。若日後把 syscall 改成 trap gate 或允許 syscall
+  內 preemption，這個測試會立刻指出 `sys_munmap` 必須取得外層 lock；在目前 ABI 下，
+  額外 lock 是冗餘，故不改 production code。
+- 新的 `test_vm_lifecycle`（36 checks）釘住：sbrk 查詢/增長/縮減、heap 下界與 stack
+  guard 上界、`INT32_MIN`；mmap first-fit/reuse；free 的全範圍驗證與 double-free
+  原子失敗；以及 syscall-gate 下 reservation→PTE→可重用的順序。
+- `test_process` 369 → **397 checks**：fork 複製 mmap reservations 但 child free 不污染
+  parent；slot reuse 清掉 reservation；exec 成功換新 address space 時清 bitmap/heap/signal
+  image，且有 live sibling 時拒絕 exec 並保持舊 image。
+- **突變 7/7 killed，零 survivor**：提前開 IF、漏 unmap PTE、free 不驗證全範圍、fork
+  不複製 bitmap、sbrk 下溢/上溢、exec 不清 bitmap。全數由具名 assertion 失敗，不以
+  crash 或 timeout 判定。最初「缺 outer lock」的 mutant 經 ABI 推導為**等價／不可達**，
+  不納入分數。
+- 最終驗證：25 個 hosted suite 全綠；`make clean && make all -j4` 0 warning / 0 error；
+  `make test` 在 284.4 秒以 **MAKE_TEST_RC=0** 結束，行程／task／timer／user-space
+  counters 均回 baseline。
+
 ## 已知限制（本輪審查有發現、但刻意不修的項目，附理由）
 以下項目屬於真實觀察到的架構/效能取捨，但要嘛需要較大幅度重構、要嘛觸發
 門檻在這個專案的實際使用場景下極難達到，依照「保守、相容現有設計」的原則

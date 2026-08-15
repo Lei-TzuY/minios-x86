@@ -47,3 +47,4 @@ tests/test_ata
 tests/test_fdtable
 tests/test_process
 tests/test_signal
+tests/test_vm_lifecycle

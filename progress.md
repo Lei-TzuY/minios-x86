@@ -1057,3 +1057,25 @@
     `RUN_MAY_EXIT`、以及 park 次數上限之後，它們才變成**具名斷言**。
     **crash 與 timeout 說「有事發生」，不說「斷言起作用了」**——這條界線是本專案
     判斷測試有沒有牙齒的標準，不是文字遊戲。
+
+## Session 34 — 2026-08-16
+
+- **CAP22：mmap / sbrk address-space ownership**。新增 `tests/test_vm_lifecycle.c`（36 checks），
+  並擴充 `test_process` 369 → **397 checks**。
+- 初步的手動審計認為 `sys_munmap`「先清 `ext_map`、後 unmap PTE」會讓同一 process 的
+  sibling 在中間重用舊 mapping。這個推導遺漏了最重要的跨模組前提：`int $0x80` 是
+  interrupt gate，進入 syscall 時 CPU 已清 IF；單核核心不會在 syscall 中切 task。
+  先前 hosted stub 讓 nested `process_ext_free` restore 假裝重新開中斷，造成**假 defect**。
+  已撤回冗餘 production 修補，將 harness 改為模擬 gate→iret；sibling 只能在 iret 後看到
+  可重用位址，並斷言 PTE 已經解除。這是測試模型修正，不是 F26。
+- 釘住：sbrk query/grow/shrink、heap lower bound、stack guard upper bound、`INT32_MIN`；
+  mmap first-fit/reuse、invalid range 不得部分 free、double free；fork reservation copy 且
+  child free 不污染 parent；exec 成功清新 image metadata、live sibling 時拒絕；slot reuse
+  不得殘留 reservation。
+- 突變 **7/7 meaningful killed**：提前開 IF、漏 PTE unmap、free 跳過全範圍驗證、fork
+  漏 copy、sbrk 下溢/上溢、exec 漏清 bitmap。全部是具名 assertion；「未加 outer lock」
+  在目前 interrupt-gate ABI 下是 equivalent/unreachable，不拿 crash／timeout 當證明。
+- 最終驗證：`make unit` **25/25** green；`make clean && make all -j4` 0 warning / 0 error；
+  完整 `make test` 在 **284.4 s、MAKE_TEST_RC=0** 完成。末段資源計數為
+  `User pages: accessible=0 spaces=0`、`Processes: running=0 zombies=0 peak=4`、
+  `Tasks: blocked=0`、`Timers: sleeping=0`。

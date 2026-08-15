@@ -36,7 +36,8 @@ UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_fs tests/test_pmm \
             tests/test_process_env tests/test_syscall_valid \
             tests/test_paging_cow tests/test_elf tests/test_ramfs \
             tests/test_kb tests/test_procfs tests/test_vga tests/test_ata \
-            tests/test_fdtable tests/test_process tests/test_signal
+            tests/test_fdtable tests/test_process tests/test_signal \
+            tests/test_vm_lifecycle
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -159,6 +160,14 @@ tests/test_signal: tests/test_signal.c tests/test.h syscall.c syscall.h \
                    process.h task.h elf_loader.h isr.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
 	    -Wl,--gc-sections tests/test_signal.c -o $@
+
+# mmap/munmap couples a per-process reservation bitmap to page-table teardown.
+# This model deliberately schedules a sibling precisely when interrupts first
+# re-enable, so an early bitmap release cannot hide behind a serial host run.
+tests/test_vm_lifecycle: tests/test_vm_lifecycle.c tests/test.h process.c \
+                         syscall.c process.h task.h paging.h irq.h elf_loader.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
+	    -Wl,--gc-sections tests/test_vm_lifecycle.c -o $@
 
 # Includes kb.c directly to reach its statics (the ring indices, the modifier
 # flags) and the handler handed to register_interrupt_handler. io.h is replaced

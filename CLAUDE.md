@@ -16,7 +16,7 @@ python3）。Windows 端沒有編譯器。
 | 指令 | 用途 | 時間 |
 |---|---|---|
 | `make all -j4` | 建置核心（**不是** `make`，見下） | ~30s |
-| `make unit` | 24 套原生單元測試 | <1s |
+| `make unit` | 25 套原生單元測試 | <1s |
 | `make test` | 完整回歸：`unit` + 4 個 QEMU 目標 | ~8-10 分鐘 |
 | `make bench` | 效能量測（資訊性，不在 `make test` 內） | ~5s |
 

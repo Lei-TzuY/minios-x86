@@ -1151,6 +1151,7 @@ static void test_slot_reuse_carries_nothing_over(void) {
     first->alarm_tick = 12345;
     first->env_count = 4;
     first->heap_break = 0x9000;
+    CHECK_EQ(process_ext_alloc(first, 2), (int32_t)USER_EXT_BASE);
 
     first->thread_count = 0;               /* let the exit complete */
     exit_task(first->task, 0);
@@ -1174,6 +1175,8 @@ static void test_slot_reuse_carries_nothing_over(void) {
     CHECK_EQ(second->exit_status, 0);
     CHECK_EQ(second->state, PROCESS_RUNNING);
     CHECK_EQ(second->slot, first->slot);   /* the slot number survives, by design */
+    CHECK_EQ(process_ext_reserved(second, USER_EXT_BASE), 0);
+    CHECK_EQ(process_ext_alloc(second, 2), (int32_t)USER_EXT_BASE);
 }
 
 static void test_pids_are_monotonic(void) {
@@ -1237,6 +1240,7 @@ static void test_fork_success(void) {
     process_t *parent, *child;
     fork_frame_t frame;
     int32_t pid;
+    int32_t ext;
 
     TEST("fork: the child inherits and the parent is untouched");
     reset_world();
@@ -1249,6 +1253,8 @@ static void test_fork_success(void) {
     parent->sig_pending = 0x10;
     parent->stdout_node = &g_nodes[0];
     open_fs(parent->stdout_node);
+    ext = process_ext_alloc(parent, 2);
+    CHECK_EQ(ext, (int32_t)USER_EXT_BASE);
 
     memset(&frame, 0, sizeof(frame));
     frame.eip = 0x5555;
@@ -1270,6 +1276,11 @@ static void test_fork_success(void) {
     CHECK_EQ(child->sig_pending, 0);       /* pending signals are NOT inherited */
     CHECK_EQ(child->fork_frame.eip, 0x5555);
     CHECK_EQ(g_copy_files_calls, 1);
+    CHECK_EQ(process_ext_reserved(child, (uint32_t)ext), 1);
+    CHECK_EQ(process_ext_reserved(child, (uint32_t)ext + 0x1000U), 1);
+    CHECK_EQ(process_ext_free(child, (uint32_t)ext, 1), 0);
+    CHECK_EQ(process_ext_reserved(child, (uint32_t)ext), 0);
+    CHECK_EQ(process_ext_reserved(parent, (uint32_t)ext), 1);
 
     /* The inherited stdout took its own reference. */
     CHECK_EQ(g_node_refs[0], 2);
@@ -1338,6 +1349,49 @@ static void test_fork_rejects_bad_arguments(void) {
     CHECK_EQ(process_fork(parent, NULL, &frame), -1);
     CHECK_EQ(process_fork(parent, &g_spaces[1], NULL), -1);
     CHECK_EQ(used_slots(), 1);
+}
+
+static void test_exec_reset_retires_old_mmap_contract(void) {
+    process_t *p;
+    int32_t ext;
+
+    TEST("exec reset: new image owns a fresh heap and mmap reservation map");
+    reset_world();
+    p = launch("old", 0);
+    CHECK(p != NULL);
+    if (!p) return;
+    ext = process_ext_alloc(p, 3);
+    CHECK_EQ(ext, (int32_t)USER_EXT_BASE);
+    p->heap_break = 0x9000;
+    p->sig_handler[SIGUSR1] = 0x5555;
+    g_current_task = p->task;
+    g_active_space = &g_spaces[0];
+
+    CHECK_EQ(process_exec_reset(&g_spaces[1], 0x5000, "new"), 0);
+    CHECK(p->address_space == &g_spaces[1]);
+    CHECK(p->task->address_space == &g_spaces[1]);
+    CHECK_EQ(p->heap_start, 0x5000);
+    CHECK_EQ(p->heap_break, 0x5000);
+    CHECK_EQ(process_ext_reserved(p, (uint32_t)ext), 0);
+    CHECK_EQ(p->sig_handler[SIGUSR1], 0);
+    CHECK_EQ(g_activate_calls, 1);
+    CHECK_EQ(g_space_destroyed[0], 1);
+    CHECK_EQ(g_destroy_while_active, 0);
+
+    TEST("exec reset: a live sibling retains the old image unchanged");
+    reset_world();
+    p = launch("old", 0);
+    CHECK(p != NULL);
+    if (!p) return;
+    ext = process_ext_alloc(p, 1);
+    p->thread_count = 1;
+    g_current_task = p->task;
+    CHECK_EQ(process_exec_reset(&g_spaces[1], 0x5000, "new"), -1);
+    CHECK(p->address_space == &g_spaces[0]);
+    CHECK(p->task->address_space == &g_spaces[0]);
+    CHECK_EQ(process_ext_reserved(p, (uint32_t)ext), 1);
+    CHECK_EQ(g_activate_calls, 0);
+    CHECK_EQ(g_space_destroyed[0], 0);
 }
 
 static void test_child_exit_does_not_disturb_the_parent(void) {
@@ -1554,6 +1608,7 @@ int main(void) {
     test_fork_success();
     test_fork_task_failure_rolls_back();
     test_fork_rejects_bad_arguments();
+    test_exec_reset_retires_old_mmap_contract();
     test_child_exit_does_not_disturb_the_parent();
 
     test_send_signal_wakes_a_blocked_target();
