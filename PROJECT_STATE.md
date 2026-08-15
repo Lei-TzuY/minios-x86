@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 29 / 2026-08-14）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 30 / 2026-08-15）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -17,7 +17,7 @@
 | `tests/` 原生單元測試 | ~5,800 行 |
 | 系統呼叫 | 51 |
 | 使用者程式 | 51 |
-| 單元測試套件 | 20 |
+| 單元測試套件 | 21 |
 
 ### 子系統
 
@@ -91,10 +91,10 @@ DiskFS: mounted=1 generation=9 files=0
 
 ## 3. 已完成工作
 
-### 已修問題（F1–F23）
+### 已修問題（F1–F24）
 
 分佈：**4 個 P0**（F1、F2、F14、F22，其中三個可讓**整台機器停機**）、
-4 個 P1、7 個 P2、6 個 P3、2 個 P4。
+4 個 P1、8 個 P2、6 個 P3、2 個 P4。
 
 | ID | 級別 | 摘要 |
 |---|---|---|
@@ -119,6 +119,7 @@ DiskFS: mounted=1 generation=9 files=0
 | F21 | P2 | program header 驗證後重讀，中間可被改寫（TOCTOU） |
 | F22 | **P0** | RAMFS 容量倍增溢位守衛差一步 → **無窮迴圈凍結整台機器** |
 | F23 | P3 | FAT16 寫入 0 位元組時仍把長度推到 seek 位置（F9 修法的殘留邊界） |
+| F24 | P2 | ATA 逾時的命令會答覆**下一個**操作 → 讀到別的 sector／假的寫入成功 |
 
 ### 功能與效能
 
@@ -154,14 +155,18 @@ DiskFS: mounted=1 generation=9 files=0
   （不可能觸及的寫入必須：會回來、存 0 位元組、檔案完全不變、讀取安全回 EOF）。
   **突變 C3 只有契約抓到，既有 943 個 diskfs 檢查全漏**。
 - **HEAP1**：heap.c 稽核無缺陷，但補上四個真實測試缺口（378 → 720 檢查）。
+- **CAP18** `test_ata`：ATA PIO 驅動，用**有狀態的假 IDE 裝置**（BSY 依可設定的輪詢
+  次數才清、DRQ 在 256 words 後自落、BSY/DRQ 期間的命令寫入一律忽略、讀取失敗時
+  ERR 與 DRQ 同時拉起）。irq.h 也換成計數版本，驗證八條 return path 的 save/restore
+  配對。找到 **F24**。
 
-目前 20 套件，`make unit` <1 秒：
+目前 21 套件，`make unit` <1 秒：
 
 ```
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37399 /
 diskfs 979 / pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 /
 process-env 47 / syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4335 /
-kb 1675 / procfs 183 / vga 4769
+kb 1675 / procfs 183 / vga 4769 / ata 8967
 ```
 
 ---
@@ -185,7 +190,13 @@ kb 1675 / procfs 183 / vga 4769
 1. **`ata.c` 的 PIO 輪詢全程 cli**：`ata_read_sector`/`ata_write_sector` 從
    `save_irq_disable()` 到 `restore_irq()` 之間包含等待 BSY/DRQ 的忙等（最多
    `ATA_POLL_LIMIT=100000` 次）全程關中斷。代價是磁碟 I/O 期間漏 timer tick、
-   體感卡頓。要修需改成 IRQ-driven ATA，對這個以 PIO 忙等為核心的驅動改動幅度大。
+   體感卡頓。
+   **Session 30 重新評估（見 findings.md 的 ASSESS1）：測試安全網已經足夠**
+   （CAP18 的假裝置能編寫任意 BSY/DRQ/ERR/逾時序列，28 個突變證明有牙齒），
+   **但阻礙不在驅動**：`ata_read_sector` 目前永不阻塞，而 `diskfs.c` **完全沒有
+   序列化**（整個檔案沒有鎖、沒有 cli），它的狀態全靠「syscall 全程關中斷」這個從
+   interrupt gate 繼承來的假設。改成阻塞式 = 先替儲存堆疊引入併發模型，與下面第 2
+   項同一性質的架構決定。
 
 2. **訊號遞送無法觸及阻塞中的 thread**（終止的部分已由 F19 修好）：
    `process_send_signal` 只喚醒 `process->task`，且訊號只在返回使用者模式時遞送

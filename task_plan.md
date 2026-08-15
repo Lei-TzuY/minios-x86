@@ -21,9 +21,9 @@
 - flat layout：核心原始碼在根目錄 (*.c/*.h/*.s)，`user/` 是 ring-3 程式，
   `tests/` 是原生單元測試，`gen_*.py` 產生內嵌資源，`Makefile` 為唯一建置系統。
 
-## 目前基準（Session 29 結束時）
+## 目前基準（Session 30 結束時）
 - `make clean && make all -j4`：0 warning / 0 error（-Wall -Wextra，實測計數）
-- `make test`：**真實離開碼 0**（unit 20 套件 + test-ata-absent/test-boot/
+- `make test`：**真實離開碼 0**（unit 21 套件 + test-ata-absent/test-boot/
   test-iso/test-shell）
 - test-shell 結尾的洩漏偵測斷言：`running=0 zombies=0 peak=4`、`blocked=0`、
   `sleeping=0`、`RAMFS nodes=59`、`spaces=0`
@@ -396,7 +396,21 @@ Status: complete
 - **HEAP1**：heap.c 稽核無缺陷；補四個真實測試缺口（378 → 720 檢查），突變 15/15
   無等價突變。stub 改為單一 arena 依序配發以貼近真實 PMM。
 
-## 目前結論（Session 29）
+## Phase 32: Session 30 — ATA PIO 驅動（找到一個 P2）＋ IRQ-driven 可行性評估
+Status: complete
+- 動機：最後一個沒有單元測試的驅動，位於儲存堆疊最底層；QEMU 的模擬 IDE 從不逾時、
+  從不報錯，所以所有失敗路徑都是未執行過的程式碼。
+- **F24（P2）**：逾時的命令讓磁碟停在命令中途，下一個操作因此讀到**上一個 sector**，
+  或**回報寫入成功卻一個位元組都沒寫**。修：`ata_wait_idle()`——等 BSY **並排空滯留的
+  DRQ**，所以是復原而非拒絕。QEMU 裡不可觸發（模擬 IDE 立刻回應），真實硬體會。
+- **CAP18：tests/test_ata.c**（8967 檢查）。有狀態的假 IDE 裝置保留真實握手時序；
+  irq.h 換成計數版本以驗證八條 return path 的 save/restore 配對。
+- 突變 28/28，零等價突變；一開始 8 個存活，其中 A4/A5、A8 暴露的是**測試模型自身**
+  的問題（故障注入太黏、對驅動太寬容）。
+- **ASSESS1**：IRQ-driven ATA 現在不做——阻礙不是測試覆蓋，而是 `diskfs.c` 完全沒有
+  序列化，改成阻塞式需要先替儲存堆疊引入併發模型。
+
+## 目前結論（Session 30）
 F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P1（F7、F10、F11、F20）、
 7 個 P2、6 個 P3、2 個 P4。功能擴充 FEAT1、排程公平性 FAIR1、效能 PERF1/PERF2（已實測）、
 去重 REFACTOR1（已證明 codegen 不變）、強化 HARD1（誠實標示為不可觸發的縱深防禦）。

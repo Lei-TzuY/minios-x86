@@ -35,7 +35,7 @@ UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_fs tests/test_pmm \
             tests/test_timer tests/test_task tests/test_rtc \
             tests/test_process_env tests/test_syscall_valid \
             tests/test_paging_cow tests/test_elf tests/test_ramfs \
-            tests/test_kb tests/test_procfs tests/test_vga
+            tests/test_kb tests/test_procfs tests/test_vga tests/test_ata
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -117,6 +117,16 @@ tests/test_procfs: tests/test_procfs.c tests/test.h procfs.c procfs.h fs.h \
 # that cannot run hosted -- its body is the 0xB8000 assignment.
 tests/test_vga: tests/test_vga.c tests/test.h vga.c vga.h io.h utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_vga.c -o $@
+
+# ata.c is included directly so the tests reach the polling helpers and the
+# driver's static state. BOTH io.h and irq.h are replaced by the test rather
+# than compiled out: io.h becomes a fake IDE drive (a state machine that keeps
+# the real BSY/DRQ handshake, ignores command-block writes while busy, and
+# drops DRQ after exactly 256 words), and irq.h becomes a counting pair so the
+# eight return paths through this driver can be checked for a missing restore
+# -- which would otherwise leave interrupts off with nothing to notice.
+tests/test_ata: tests/test_ata.c tests/test.h ata.c ata.h io.h irq.h
+	$(CC) $(UNIT_CFLAGS) tests/test_ata.c -o $@
 
 # Includes kb.c directly to reach its statics (the ring indices, the modifier
 # flags) and the handler handed to register_interrupt_handler. io.h is replaced
