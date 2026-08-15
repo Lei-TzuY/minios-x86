@@ -65,6 +65,13 @@ static void process_release(process_t *process) {
     uint32_t slot;
 
     if (!process) return;
+#ifdef HOSTED_TEST
+    /* CAP20's hosted lifecycle model must distinguish a slot becoming UNUSED
+     * from it being released twice. This hook is compiled out of the kernel,
+     * so it cannot alter its ABI or code generation. */
+    extern void process_test_observe_release(process_t *process);
+    process_test_observe_release(process);
+#endif
     slot = process->slot;
     memset(process, 0, sizeof(*process));
     process->slot = slot;

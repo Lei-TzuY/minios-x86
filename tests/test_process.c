@@ -133,6 +133,13 @@ void pipe_close_write(pipe_t *p) {
 static int g_close_files_calls;
 static int g_copy_files_calls;
 static int32_t g_last_closed_pid;
+static int g_process_release_calls;
+static process_t *g_last_released_process;
+
+void process_test_observe_release(process_t *p) {
+    g_process_release_calls++;
+    g_last_released_process = p;
+}
 
 void syscall_close_user_files(struct process *p) {
     g_close_files_calls++;
@@ -163,6 +170,13 @@ static int          g_stuck_blocks;        /* parked with nothing to wake us */
 static int          g_woke_me;             /* set by a wake aimed at us */
 static int          g_kill_pending;
 
+/* A real scheduler has a blocked list. Keeping one in the stub matters: a
+ * channel wake has to choose an actual waiter, so the harness can distinguish
+ * the intended parent task from an older decoy on the same channel. */
+static task_t       *g_blocked_tasks[MAX_TASKS];
+static const void   *g_blocked_channels[MAX_TASKS];
+static int           g_blocked_count;
+
 static int          g_wake_task_calls;
 static task_t      *g_last_wake_task;
 static int          g_wake_all_calls;
@@ -186,6 +200,45 @@ static int32_t g_task_exit_status;
  * wrong. */
 #define STUCK_BLOCK_LIMIT 64
 static int g_hang_detected;
+
+static void record_blocked(task_t *task, const void *channel) {
+    if (!task || g_blocked_count >= MAX_TASKS) return;
+    g_blocked_tasks[g_blocked_count] = task;
+    g_blocked_channels[g_blocked_count] = channel;
+    g_blocked_count++;
+}
+
+static int remove_blocked(task_t *task) {
+    for (int i = 0; i < g_blocked_count; i++) {
+        if (g_blocked_tasks[i] == task) {
+            for (; i + 1 < g_blocked_count; i++) {
+                g_blocked_tasks[i] = g_blocked_tasks[i + 1];
+                g_blocked_channels[i] = g_blocked_channels[i + 1];
+            }
+            g_blocked_count--;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static task_t *remove_one_blocked(const void *channel) {
+    for (int i = 0; i < g_blocked_count; i++) {
+        task_t *task;
+
+        if (g_blocked_channels[i] != channel) continue;
+        task = g_blocked_tasks[i];
+        (void)remove_blocked(task);
+        return task;
+    }
+    return NULL;
+}
+
+static void park_decoy(task_t *task, const void *channel) {
+    if (!task) return;
+    task->state = TASK_BLOCKED;
+    record_blocked(task, channel);
+}
 
 task_t *create_task(void (*entry)(void), task_exit_callback_t on_exit,
                     address_space_t *address_space, struct process *process,
@@ -224,6 +277,7 @@ void task_block_current(const void *channel) {
     g_last_block_channel = channel;
     g_last_block_task = g_current_task;
     if (g_current_task) g_current_task->state = TASK_BLOCKED;
+    record_blocked(g_current_task, channel);
     g_woke_me = 0;
 
     /* Something else runs while this task is parked -- the event it is waiting
@@ -237,6 +291,7 @@ void task_block_current(const void *channel) {
      * parked forever, and the caller's loop would never run again. */
     if (!g_woke_me) g_stuck_blocks++;
     else g_stuck_blocks = 0;
+    (void)remove_blocked(g_current_task);
     if (g_current_task) g_current_task->state = TASK_READY;
 
     if (g_stuck_blocks > STUCK_BLOCK_LIMIT) {
@@ -252,20 +307,28 @@ void task_wake_task(task_t *task) {
      * is blocked the CPU belongs to someone else -- here, to the child
      * that is exiting and sending the signal. */
     if (task == g_last_block_task) g_woke_me = 1;
+    (void)remove_blocked(task);
     if (task) task->state = TASK_READY;
 }
 
 void task_wake_all(const void *channel) {
+    task_t *task;
+
     g_wake_all_calls++;
     g_last_wake_all_channel = channel;
-    /* A broadcast reaches the parked task only if it is the channel that
-     * task parked on. */
-    if (channel == g_last_block_channel) g_woke_me = 1;
+    while ((task = remove_one_blocked(channel)) != NULL) {
+        if (task == g_last_block_task) g_woke_me = 1;
+        task->state = TASK_READY;
+    }
 }
 
 void task_wake_one(const void *channel) {
+    task_t *task;
+
     g_wake_one_calls++;
-    if (channel == g_last_block_channel) g_woke_me = 1;
+    task = remove_one_blocked(channel);
+    if (task == g_last_block_task) g_woke_me = 1;
+    if (task) task->state = TASK_READY;
 }
 
 uint32_t task_kill_blocked(struct process *process) {
@@ -303,6 +366,8 @@ static void reset_world(void) {
     }
     g_node_underflow = g_pipe_underflow = 0;
     g_close_files_calls = g_copy_files_calls = 0;
+    g_process_release_calls = 0;
+    g_last_released_process = NULL;
     g_seq = 0;
     g_seq_destroy_space = g_seq_close_files = g_seq_release_streams = 0;
     g_last_closed_pid = -1;
@@ -322,6 +387,7 @@ static void reset_world(void) {
     g_stuck_blocks = 0;
     g_woke_me = 0;
     g_kill_pending = 0;
+    g_blocked_count = 0;
     g_wake_task_calls = 0;
     g_last_wake_task = NULL;
     g_wake_all_calls = 0;
@@ -382,6 +448,25 @@ static void child_exits(void *arg) {
     process_t *child = (process_t *)arg;
 
     exit_task(child->task, 7);
+}
+
+typedef struct wake_script {
+    process_t *parent;
+    process_t *child;
+    int step;
+} wake_script_t;
+
+static void spurious_wake_then_child_exit(void *arg) {
+    wake_script_t *script = (wake_script_t *)arg;
+
+    /* SIGUSR1 is deliberately irrelevant to waitpid's predicate. It wakes
+     * the task, but there is still no zombie to reap, so the loop must park
+     * again. On the third park the actual child exit supplies the predicate. */
+    if (script->step++ < 2) {
+        (void)process_send_signal(script->parent->pid, SIGUSR1);
+    } else {
+        exit_task(script->child->task, 7);
+    }
 }
 
 static void test_waitpid_is_woken_without_a_sigchld_handler(void) {
@@ -473,6 +558,43 @@ static void test_waitpid_blocks_on_its_own_process(void) {
     CHECK(g_last_block_channel != g_last_wake_all_channel);
 }
 
+static void test_waitpid_wake_is_identity_not_channel_luck(void) {
+    process_t *parent, *child, *decoy;
+    int32_t status = 0;
+
+    TEST("waitpid SIGCHLD wakes its parent, not an older same-channel waiter");
+    reset_world();
+    parent = launch("parent", 0);
+    child = launch("child", 1);
+    decoy = launch("decoy", 2);
+    CHECK(parent && child && decoy);
+    if (!parent || !child || !decoy) return;
+    child->parent_pid = parent->pid;
+
+    /* Model another older task that is blocked on the exact channel a wrong
+     * implementation might broadcast/wake_one(). The true SIGCHLD route must
+     * target parent->task by identity and leave this decoy untouched. */
+    park_decoy(decoy->task, parent);
+    CHECK_EQ(g_blocked_count, 1);
+
+    g_current_task = parent->task;
+    g_on_block = child_exits;
+    g_on_block_arg = child;
+    g_on_block_remaining = 1;
+
+    {
+        int32_t want = child->pid;
+
+        CHECK_EQ(process_waitpid(want, &status, 0), want);
+    }
+    CHECK_EQ(status, 7);
+    CHECK_EQ(g_stuck_blocks, 0);
+    CHECK(g_last_wake_task == parent->task);
+    CHECK_EQ(g_wake_one_calls, 0);
+    CHECK_EQ(decoy->task->state, TASK_BLOCKED);
+    CHECK_EQ(g_blocked_count, 1);
+}
+
 static void test_wait_parks_on_the_child(void) {
     process_t *parent, *child;
     int32_t status;
@@ -507,6 +629,7 @@ static void test_spurious_wake_rechecks(void) {
     process_t *parent, *child;
     int32_t status = 0;
     int32_t reaped;
+    wake_script_t script;
 
     TEST("a wake with nothing to reap parks again");
     reset_world();
@@ -522,10 +645,12 @@ static void test_spurious_wake_rechecks(void) {
      * followed by the child actually exiting. Every blocking site in this
      * kernel is written as `while (cond) block;` precisely so that a wake
      * that proves nothing is harmless. */
-    g_on_block = child_exits;
-    g_on_block_arg = child;
+    script.parent = parent;
+    script.child = child;
+    script.step = 0;
+    g_on_block = spurious_wake_then_child_exit;
+    g_on_block_arg = &script;
     g_on_block_remaining = 3;
-    g_woke_me = 0;
 
     {
         int32_t want = child->pid;
@@ -533,7 +658,10 @@ static void test_spurious_wake_rechecks(void) {
         reaped = process_waitpid(child->pid, &status, 0);
         CHECK_EQ(reaped, want);
     }
-    CHECK(g_block_calls >= 1);
+    CHECK_EQ(g_block_calls, 3);
+    CHECK_EQ(g_stuck_blocks, 0);
+    CHECK_EQ(script.step, 3);
+    CHECK_EQ(g_wake_task_calls, 3); /* two spurious signals + SIGCHLD */
 }
 
 static void test_waitpid_nohang(void) {
@@ -769,6 +897,8 @@ static void test_reap_frees_the_slot(void) {
     /* Reaping releases; it must not release a second time. */
     CHECK_EQ(g_space_destroyed[1], 1);
     CHECK_EQ(g_close_files_calls, 1);
+    CHECK_EQ(g_process_release_calls, 1);
+    CHECK(g_last_released_process == child);
     expect_no_underflow();
 }
 
@@ -789,6 +919,8 @@ static void test_auto_reap_leaves_no_zombie(void) {
     CHECK_EQ(used_slots(), 0);
     CHECK_EQ(g_space_destroyed[0], 1);     /* exactly once */
     CHECK_EQ(g_close_files_calls, 1);
+    CHECK_EQ(g_process_release_calls, 1);
+    CHECK(g_last_released_process == p);
     expect_no_underflow();
 }
 
@@ -980,6 +1112,7 @@ static void test_detach(void) {
     CHECK_EQ(zombie->state, PROCESS_ZOMBIE);
     CHECK_EQ(process_detach(zombie->pid), 0);
     CHECK_EQ(zombie->state, PROCESS_UNUSED);
+    CHECK_EQ(g_process_release_calls, 1);
 
     /* Detaching something that does not exist is an error, not a crash. */
     CHECK_EQ(process_detach(4242), -1);
@@ -991,6 +1124,7 @@ static void test_detach(void) {
     CHECK_EQ(used_slots(), 0);
     CHECK_EQ(g_space_destroyed[0], 1);
     CHECK_EQ(g_space_destroyed[1], 1);
+    CHECK_EQ(g_process_release_calls, 2); /* zombie detach + live auto-reap */
     expect_no_underflow();
 }
 
@@ -1387,6 +1521,7 @@ int main(void) {
 
     test_waitpid_is_woken_without_a_sigchld_handler();
     test_waitpid_blocks_on_its_own_process();
+    test_waitpid_wake_is_identity_not_channel_luck();
     test_wait_parks_on_the_child();
     test_spurious_wake_rechecks();
     test_waitpid_nohang();
