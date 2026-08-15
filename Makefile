@@ -36,7 +36,7 @@ UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_fs tests/test_pmm \
             tests/test_process_env tests/test_syscall_valid \
             tests/test_paging_cow tests/test_elf tests/test_ramfs \
             tests/test_kb tests/test_procfs tests/test_vga tests/test_ata \
-            tests/test_fdtable
+            tests/test_fdtable tests/test_process
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -139,6 +139,18 @@ tests/test_fdtable: tests/test_fdtable.c tests/test.h syscall.c syscall.h \
                     process.h fs.h pipe.h paging.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
 	    -Wl,--gc-sections tests/test_fdtable.c -o $@
+
+# The process lifecycle state machine. process.c is included directly to reach
+# its statics and the three internal exit paths; the scheduler is MODELLED
+# rather than stubbed away, because every question here is about who blocked,
+# on which channel, and who woke them. task_block_current records the sleeper,
+# runs the scripted event it is waiting for, and then checks whether anything
+# actually aimed a wake at it -- which is what turns "this would hang forever"
+# into an assertion. Address spaces count their own destroy/activate so
+# teardown ordering is checkable.
+tests/test_process: tests/test_process.c tests/test.h process.c process.h \
+                    task.h paging.h fs.h pipe.h syscall.h elf_loader.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_process.c -o $@
 
 # Includes kb.c directly to reach its statics (the ring indices, the modifier
 # flags) and the handler handed to register_interrupt_handler. io.h is replaced

@@ -1450,6 +1450,57 @@ resolve_parent_fs 不一致
   harness 需要 stub task.c（含 `task_wake_task` / `task_block_killable` 的可觀察版本）
   與 paging.c，規模與 CAP18 的假裝置相當。
 
+### CAP20 行程生命週期狀態機（F1/F7/F17/F19 的發源地，首次有直接測試）
+- 檔案: tests/test_process.c（351 檢查）、Makefile、.gitignore
+- **harness 的核心決定：把排程器「模型化」而不是 stub 掉**。這裡值得問的每個問題都
+  是「誰被 block、block 在哪個 channel、誰把他叫醒」，所以：
+  - `task_block_current()` 記下**被 park 的 task 與 channel**，執行測試腳本安排的
+    「這段期間發生的事」（例如子行程退出），然後檢查**有沒有任何喚醒是瞄準這個
+    task 的**。沒有就記為 stuck——**這就是把「這會永遠掛住」變成斷言的方法**。
+  - `task_wake_task()`（依身分）與 `task_wake_all()`（依 channel）分開記錄，因為
+    process.c 裡**兩個等待函式用的是不同機制**，測試必須分得出來。
+  - address space 自己記錄 create/activate/destroy 次數與**「被銷毀時是否仍是
+    active」**，讓 teardown ordering 可檢查而非假設。
+  - teardown 的每一步記錄**發生順序**（序號）而非只有次數：交換兩步不會改變任何
+    計數，只會改變順序。
+- **第一優先釘住的隱性相依（ASSESS2 找到的）**：
+  `process_waitpid` 阻塞在**父行程自己**的 `process_t` 上，而 `process_finish_exit`
+  只 `task_wake_all(child)`——**不同 channel**。父行程實際上是被 SIGCHLD 遞送路徑的
+  `task_wake_task(parent->task)` 依身分喚醒的，而那條路徑可靠的前提是
+  `process_send_signal` **無條件**喚醒被阻塞的目標。測試因此斷言三件事：
+  父行程**沒有安裝 SIGCHLD handler** 時仍被喚醒、喚醒是**瞄準父行程的 task**、
+  以及**block 的 channel 與 broadcast 的 channel 確實不同**。
+  相對地 `process_wait` 阻塞在**子行程**的 `process_t` 上、與 broadcast 相符——
+  兩者分別驗證，不假設相同。
+- **覆蓋**：launch（成功、`create_task` 失敗回滾、address space 所有權留在呼叫端、
+  無 address space、表滿）；exit（zombie 轉換、標準串流恰好釋放一次、teardown
+  不得釋放仍 active 的 address space、teardown 順序）；reap（waitpid/wait/nohang/
+  非子行程/不存在的 pid、slot 歸還、auto_reap 不留 zombie）；parent exit（zombie 子
+  立即回收、running 子 orphan + auto_reap）；threads（main 先退出時延後 teardown、
+  thread 先退出、**兩個 thread 時只有最後一個能完成**、joiner 喚醒、finish_exit
+  只跑一次）；detach（running / zombie / 不存在）；slot 與 pid 重用（不繼承任何舊
+  狀態、pid 單調、24 輪循環不洩漏）；fork（繼承與 rollback、pending signal 不繼承、
+  子行程退出不污染父行程）；signal 作為生命週期參與者。
+- **突變測試 35 個，33 個抓到、2 個確認為等價突變**。一開始 4 個存活，兩個是真實缺口：
+  - **P9（每個 thread 退出都完成 exit，而非只有最後一個）存活**：**一個 thread 時
+    「計數歸零」與「有 thread 離開」是同一件事**，兩種寫法讀起來一樣。補上「main
+    先退出、還有**兩個** thread」的案例後才抓到——而那正是 F1 的形狀：第一個 thread
+    退出就銷毀 address space，而它的手足還在上面跑。
+  - **P17（把 teardown 兩步對調）存活**：交換順序**不改變任何計數**。改成記錄每一步
+    的發生序號、斷言「串流 → 描述子表 → address space」之後才抓到。
+  - **P25／P26 確認為等價突變，而且是互為備援的一對**：`process_allocate` 的 memset
+    與 `process_release` 的 memset 各自都足以清乾淨 slot，拿掉任一個都由另一個
+    掩護。而且**沒有任何讀者會碰 UNUSED slot 的欄位**（`process_find`、
+    `process_get_used_count`、finish_exit 的子行程迴圈都先跳過 UNUSED）。
+    與 CAP19 的 D14、ramfs 的 R6 同型。誠實記錄，不硬寫測試去殺。
+- **三個突變原本只被 timeout 抓到，已改為具名斷言**：`state` 不轉 ZOMBIE、nohang
+  失效、非子行程檢查被拿掉——三者都讓 `waitpid` 永遠 park。harness 現在在連續
+  64 次「park 了卻沒有任何喚醒瞄準自己」之後停下並印出
+  「a wait parked N times with nothing to wake it: this would hang the kernel」。
+  **timeout 只說「某處出事」，不說「斷言起作用了」**，而那正是突變測試要分辨的。
+- **沒有找到缺陷**。產出是把四個 P0/P1 修復後留下的、由多個函式交互維持的不變式，
+  變成 33 個突變證明過的安全網。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）

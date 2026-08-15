@@ -979,3 +979,39 @@
     所以那個檢查不是死碼——這一點已寫進 findings。
   - **D14 是等價突變**：`close_fd_entry` 已清零 offset，沒有任何路徑能產生
     「OF_NONE 但 offset 非零」的 entry。兩處清零互為備援，與 ramfs R6 同型。
+
+## Session 32 — 2026-08-15
+
+- **CAP20 啟動**：承接 ASSESS2，目標是建立 process lifecycle state machine 的
+  hosted/mutation-tested safety net，而不是重做 CAP19 或預設程式有 defect。已確認工作樹
+  有未提交的 `tests/test_process.c` 與其 Makefile/.gitignore 接線，將在不覆寫現有內容的
+  前提下驗證與完成它。
+- 首先鎖定的依賴：`waitpid` 阻塞父行程，而 child exit 的 channel broadcast 是子行程；
+  無 SIGCHLD handler 時仍須藉 `process_send_signal` 對 parent task 的 identity wake
+  返回。`process_wait` 的 child-channel broadcast 機制將獨立驗證。
+
+## Session 32 — 2026-08-15
+
+- **主題：行程生命週期狀態機（CAP20）**。F1/F7/F17/F19 四個 P0/P1 都出自這裡，
+  而它們留下的不變式是**由多個函式交互維持**的，沒有任何單一函式擁有它——所以
+  一個測試都沒有。
+- **harness 把排程器模型化而不是 stub 掉**：`task_block_current` 記下被 park 的
+  task 與 channel、執行腳本安排的「這段期間發生的事」、再檢查**有沒有喚醒瞄準
+  這個 task**。沒有就記為 stuck——**這就是把「會永遠掛住」變成斷言的方法**。
+  依身分的 `task_wake_task` 與依 channel 的 `task_wake_all` 分開記錄；teardown
+  每一步記錄**發生順序**而非只有次數。
+- **第一優先的隱性相依已釘住**：父行程**沒有安裝 SIGCHLD handler** 時，blocking
+  `waitpid` 仍必須被子行程的退出喚醒；喚醒必須**瞄準父行程的 task**；而且
+  block 的 channel 與 broadcast 的 channel **確實不同**（證明 broadcast 不是喚醒
+  來源）。`process_wait` 走的是另一套機制，分別驗證。
+- **突變 35 個：33 抓到、2 個等價**。一開始 4 個存活，兩個真實缺口值得記：
+  - **P9：一個 thread 時「計數歸零」與「有 thread 離開」是同一件事**，所以
+    「每個 thread 退出都完成 exit」這個突變讀起來完全一樣。補上「main 先退出、
+    還有**兩個** thread」才抓到——那正是 F1 的形狀。
+  - **P17：交換 teardown 兩步不改變任何計數**。要記錄發生**順序**才看得見。
+  - P25/P26 是**互為備援的一對**等價突變（allocate 與 release 各自的 memset），
+    且沒有任何讀者會碰 UNUSED slot 的欄位。誠實記錄。
+- **三個突變原本只被 timeout 抓到，已改成具名斷言**。連續 64 次「park 了卻沒有
+  任何喚醒瞄準自己」之後 harness 停下並說明這會掛住核心。**timeout 只說「某處
+  出事」，不說「斷言起作用了」** —— 這正是突變測試要分辨的那條界線。
+- **沒有找到缺陷**。

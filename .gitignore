@@ -45,3 +45,4 @@ tests/test_procfs
 tests/test_vga
 tests/test_ata
 tests/test_fdtable
+tests/test_process

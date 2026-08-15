@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 31 / 2026-08-15）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 32 / 2026-08-15）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -17,7 +17,7 @@
 | `tests/` 原生單元測試 | ~5,800 行 |
 | 系統呼叫 | 51 |
 | 使用者程式 | 51 |
-| 單元測試套件 | 22 |
+| 單元測試套件 | 23 |
 
 ### 子系統
 
@@ -163,14 +163,18 @@ DiskFS: mounted=1 generation=9 files=0
   沒有對應 open 的 close 記為 underflow——**只看回傳值的測試對每個突變都會通過**。
   把「每個交給新行程的 slot 必須帶著空的 `open_files[]`」這條跨 `syscall.c`／
   `process.c`、散落七條釋放路徑的假設變成可執行契約。沒找到缺陷。
+- **CAP20** `test_process`：行程生命週期狀態機（F1/F7/F17/F19 的發源地）。排程器被
+  **模型化**：記錄誰 park、park 在哪個 channel、誰被喚醒，以及「park 了卻沒人叫醒」
+  ——後者把「會永遠掛住」變成具名斷言。釘住 `waitpid` 對 SIGCHLD 喚醒的隱性相依。
+  沒找到缺陷。
 
-目前 22 套件，`make unit` <1 秒：
+目前 23 套件，`make unit` <1 秒：
 
 ```
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37399 /
 diskfs 979 / pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 /
 process-env 47 / syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4335 /
-kb 1675 / procfs 183 / vga 4769 / ata 8967 / fdtable 474
+kb 1675 / procfs 183 / vga 4769 / ata 8967 / fdtable 474 / process 351
 ```
 
 ---
@@ -260,13 +264,16 @@ kb 1675 / procfs 183 / vga 4769 / ata 8967 / fdtable 474
 
 **A 類已全部完成**，`ata.c`（CAP18）與描述子表（CAP19）也已完成。剩下的候選：
 
-- **CAP20：行程生命週期狀態機**（`allocate/launch → running → fork/thread → exit →
-  zombie → wait/reap/detach → slot reuse`）。Session 31 已完成**稽核**（見
-  findings.md 的 ASSESS2）：**沒有缺陷**，但找到一條該被釘住的隱性相依——
-  `process_waitpid` 阻塞在自己的 `process_t` 上，而 `process_finish_exit` 喚醒的是
-  **子行程**的 `process_t`，父行程實際上靠 SIGCHLD 的 `task_wake_task` 才醒；
-  把 `process_send_signal` 改成「只在裝了 handler 時才喚醒」會讓 `waitpid` 永遠掛住。
-  **這是下一輪最高價值的單一斷言。**
+- ~~**CAP20：行程生命週期狀態機**~~：**Session 32 完成**（351 檢查、突變 33/35、
+  無缺陷）。ASSESS2 找到的隱性相依已被釘住。
+- **尚未直接覆蓋的核心區域**（依歷史缺陷密度排序）：
+  1. **訊號遞送的生命週期**：`signal_deliver` / `SYS_SIGRETURN` 的框架建立與還原
+     （F2、F14 兩個 P0 都在這裡，且都是「未驗證使用者指標」）。CAP10 只測了指標
+     驗證函式本身，沒測建框/還原的配對。
+  2. **mmap / sbrk 的位址空間所有權**：`sys_mmap`/`sys_munmap` 的 `ext_map` 位元圖
+     與 demand paging 的交互（F15/F16 是這附近的整數問題）。
+  3. **pipe / semaphore / timer 與行程 teardown 的跨模組交互**：各自都有單元測試，
+     但「行程在持有這些資源時退出」的路徑沒有被直接測過。
 - **B 類**：IRQ-driven ATA（見 ASSESS1，阻礙是 diskfs 沒有併發模型）、
   可中斷睡眠 + EINTR（會動 ABI）。兩者都需要人類決策。
 

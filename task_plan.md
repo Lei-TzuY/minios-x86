@@ -422,7 +422,21 @@ Status: complete
 - 一開始 6 個存活，逼出的兩個教訓：對稱狀態讓「搞反」不可觀察；只開兩三個描述子
   蓋不住迴圈邊界。
 
-## 目前結論（Session 31）
+## Phase 34: Session 32 — 行程生命週期狀態機（CAP20）
+Status: complete
+- 動機：F1/F7/F17/F19 四個 P0/P1 的發源地，而它們的不變式由多個函式交互維持，
+  沒有直接測試。
+- **CAP20：tests/test_process.c**（351 檢查）。排程器被**模型化**：記錄誰 park、
+  park 在哪個 channel、誰被喚醒、以及「park 了卻沒人叫醒」——後者把「會永遠掛住」
+  變成斷言。teardown 每一步記錄發生順序。
+- **第一優先的隱性相依已釘住**：無 SIGCHLD handler 時 `waitpid` 仍須被喚醒；
+  喚醒須瞄準父行程 task；block 與 broadcast 的 channel 確實不同。
+- 突變 35 個：33 抓到、**P25/P26 為互為備援的等價突變**。P9（一個 thread 看不出
+  差別，要兩個）與 P17（交換順序不改變計數，要記錄序號）是真實缺口。
+- 三個原本只被 timeout 抓到的突變已改為具名斷言。
+- **沒有找到缺陷**。
+
+## 目前結論（Session 32）
 F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P1（F7、F10、F11、F20）、
 7 個 P2、6 個 P3、2 個 P4。功能擴充 FEAT1、排程公平性 FAIR1、效能 PERF1/PERF2（已實測）、
 去重 REFACTOR1（已證明 codegen 不變）、強化 HARD1（誠實標示為不可觸發的縱深防禦）。
@@ -454,3 +468,16 @@ F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P
 | 突變測試中斷把 mutant 留在工作樹 | 還原改放 `trap ... EXIT`，每輪驗證位元組相同 |
 | 突變 pattern 對不上（CRLF 樹用 `\n`） | Python 字面替換 + LF 正規化後依原行尾寫回 |
 | `bigseek` 誤用 API 導致節點數飄移（Session 25） | `sys_create` 已回傳開啟的 fd；測試改為**斷言**清理成功 |
+
+## Phase 34: Session 32 — process lifecycle state machine（CAP20）
+Status: in_progress
+- 目標：將 `allocate/launch → running → fork/thread → main exit →
+  zombie/deferred exit → wait/waitpid/detach → reap → slot reuse` 的跨函式生命週期
+  不變式變成 hosted、可觀察、mutation-tested 的 safety net；不重做 CAP19，不以尋找
+  defect 為目的改動正確程式。
+- 首要不變式：`process_waitpid()` 阻塞在父行程自身的 `process_t`；子行程
+  `process_finish_exit()` 的 broadcast 在子行程 channel，父行程必須由 SIGCHLD 的
+  `process_send_signal()` → `task_wake_task(parent->task)`（不依賴 handler）喚醒。
+- 進度：審核既有 `tests/test_process.c` 的 scheduler/ownership stub 是否真的能觀察
+  block task、channel、identity wake、spurious wake、teardown order、resource counts，
+  再完成完整 mutation matrix 與回歸。
