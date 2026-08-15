@@ -128,6 +128,8 @@ extern const uint8_t  killthread_elf_data[];
 extern const uint32_t killthread_elf_size;
 extern const uint8_t  killwait_elf_data[];
 extern const uint32_t killwait_elf_size;
+extern const uint8_t  sigflags_elf_data[];
+extern const uint32_t sigflags_elf_size;
 extern const uint8_t  fatgrow_elf_data[];
 extern const uint32_t fatgrow_elf_size;
 extern const uint8_t  bigseek_elf_data[];
@@ -1104,11 +1106,12 @@ void kernel_main(uint32_t multiboot_magic, const multiboot_info_t *multiboot) {
     ramfs_create_static_file("sigretguard", sigretguard_elf_data, sigretguard_elf_size);
     ramfs_create_static_file("killthread", killthread_elf_data, killthread_elf_size);
     ramfs_create_static_file("killwait", killwait_elf_data, killwait_elf_size);
+    ramfs_create_static_file("sigflags", sigflags_elf_data, sigflags_elf_size);
     ramfs_create_static_file("fatgrow", fatgrow_elf_data, fatgrow_elf_size);
     ramfs_create_static_file("bigseek", bigseek_elf_data, bigseek_elf_size);
     ramfs_create_static_file("ush", ush_elf_data, ush_elf_size);
     ramfs_create_static_file("readme.txt", readme_text, sizeof(readme_text) - 1);
-    terminal_writestring("Loaded RAMFS files: ... forkredir, sigretguard, killthread, killwait, bigseek, fatgrow, ush, readme.txt\n");
+    terminal_writestring("Loaded RAMFS files: ... forkredir, sigretguard, killthread, killwait, bigseek, fatgrow, sigflags, ush, readme.txt\n");
 
     __asm__ volatile("sti");
     kernel_shell();

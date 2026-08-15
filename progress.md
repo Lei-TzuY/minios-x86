@@ -1015,3 +1015,45 @@
   任何喚醒瞄準自己」之後 harness 停下並說明這會掛住核心。**timeout 只說「某處
   出事」，不說「斷言起作用了」** —— 這正是突變測試要分辨的那條界線。
 - **沒有找到缺陷**。
+
+### CAP20 follow-up — scheduler model 與 retired-stack boundary
+
+- 修正的是 harness，不是 kernel behavior：原 spurious-wake test 沒有真的 spurious，且沒有
+  same-channel decoy；現在兩次無關 SIGUSR1 wake 後才 child exit，並驗證 SIGCHLD 必須精確
+  喚醒 parent task，不能碰巧叫醒較早的 decoy。
+- `test_process` 351 → **369 checks**。附加 process mutation matrix：**14/14 killed、1
+  equivalent**（release 不清欄位由 allocate memset 與 UNUSED 不可見性證明等價）。
+- `test_task` 直接跑真實 `task_exit`：驗證退出 task 的 kernel stack 到下一個 scheduler safe
+  point 才釋放；其 early-free / missing-reap mutants **2/2 killed**。目前未發現 lifecycle
+  defect；production object compare 已確認 hosted-only branches 不改變 `process.o`／`task.o`。
+- **最終驗證**：`make unit` 24 套件全綠；`make clean && make all -j4` 0 warning / 0 error；
+  `make test` 完整 unit + 四個 QEMU 目標在 **288.1 s、HOST_RC=0** 結束。末段 `mem` 回到
+  `User pages: accessible=0 spaces=0`、`Processes: running=0 zombies=0 peak=4`、
+  `Tasks: blocked=0`、`Timers: sleeping=0`，沒有 lifecycle leak/state residue。
+
+## Session 33 — 2026-08-15
+
+- **主題：訊號遞送生命週期（CAP21）**，接續 CAP20 後自選的最高價值區域。挑這裡的
+  理由是 defect 密度：`signal_deliver` / `sys_sigreturn` 出過 F2 與 F14，而且是核心
+  裡少數把**使用者提供的位元組寫進「返回 ring 3 的暫存器映像」**的程式碼，卻沒有
+  任何直接測試。
+- **找到 F25（P0，權限提升）**：`sys_sigreturn` 把使用者的 `eflags` 原封不動寫進
+  `iret` 會彈出的那一格。`iret` 在 CPL 0 執行時會**從堆疊映像載入 IOPL**，所以
+  使用者程式可以自己拿到 IOPL=3（直接下 `in`/`out`，繞過所有裝置抽象），也可以設
+  NT／VM、或**把 IF 關掉讓 timer tick 永遠停止**。不需要先安裝 handler、不需要
+  真的收過訊號——F14 的守衛檢查的是 frame **位址**，這個缺陷在 frame **內容**。
+- **修法**：`regs->eflags = (sc->eflags & EFLAGS_USER_MASK) | EFLAGS_ALWAYS_SET;`
+  只放行程自己的算術旗標，IF 強制設回。刻意**不放行 TF**（本核心沒有 #DB handler）。
+- **QEMU 雙向驗證**：`user/sigflags.c` 在 ring 3 手工組 sigcontext、`int $0x80`、
+  再用 `pushfl` 讀回真實 EFLAGS。移除修復 → `[sigflags ESCALATED iopl]`、
+  `[sigflags ESCALATED nt]`；修復在位 → `[sigflags iopl clear]`、`[sigflags nt clear]`、
+  `[sigflags if set]`。同一支程式、相反結果。
+- **突變 23 個：22 抓到、1 個等價（S14，附完整推導）**。F25 的修復被四個方向夾住
+  （沒遮／遮了但不設 IF／遮罩漏 IOPL／遮罩漏 NT／遮過頭連算術旗標都丟）。
+- **測試模型自身的兩個缺口是突變逼出來的**：
+  - 往返測試原本沒有模型化 handler 的 `ret` 會把 esp 推進 4 bytes，於是**在正確的
+    程式上也是因為錯的理由通過**。補上 `g_regs.useresp += 4` 才是真的往返。
+  - S7/S13/S23 原本只被 `rc=139` 與 timeout 抓到。加上 SIGSEGV handler ＋三值的
+    `RUN_MAY_EXIT`、以及 park 次數上限之後，它們才變成**具名斷言**。
+    **crash 與 timeout 說「有事發生」，不說「斷言起作用了」**——這條界線是本專案
+    判斷測試有沒有牙齒的標準，不是文字遊戲。

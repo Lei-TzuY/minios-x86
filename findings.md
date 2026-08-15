@@ -1500,6 +1500,18 @@ resolve_parent_fs 不一致
   **timeout 只說「某處出事」，不說「斷言起作用了」**，而那正是突變測試要分辨的。
 - **沒有找到缺陷**。產出是把四個 P0/P1 修復後留下的、由多個函式交互維持的不變式，
   變成 33 個突變證明過的安全網。
+- **Session 32 follow-up（CAP20 test-model repair）**：既有 spurious-wake test 的 callback
+  在第一個 block 就 child exit，實際沒有產生 spurious wake；而 stub 沒有 blocked queue，
+  所以 channel-based wake 無法和 identity wake 區分。改成兩次無關 SIGUSR1 identity wake
+  後才 child exit，並在同一 parent channel 放入較早的 decoy task。這把「SIGCHLD 只有
+  handler 才 wake」與「wake_one(channel)」兩個關鍵 mutant 都變成**具名斷言失敗**，不是
+  timeout。
+- `process_release()` 加入僅 `HOSTED_TEST` 的 release observation hook（production
+  codegen 不變），讓 auto-reap double release 可觀察。新增 matrix：14/14 killed；
+  「不清 release 的欄位」存活屬等價，因為 release 後 slot 不可觀察，重新 allocate 的第一步
+  必完整 memset，且 resources 均已由 `process_finish_exit` 先釋放。
+- `test_task` 補直接執行真實 `task_exit` 的 lifecycle test：callback 前 task kernel stack
+  尚未釋放，下一次 `schedule()` 才依序釋放 stack/task。兩個 task boundary mutants 2/2 killed。
 
 ## 效能改善（已實作）
 
@@ -1540,6 +1552,89 @@ resolve_parent_fs 不一致
     對齊時**才加速；兩者相對未對齊時會退回逐位元組，加速比約 **1.0x（毫無
     改善）**。這是刻意的正確性選擇（不做未對齊的 32-bit 存取），但確實是此改動
     的限制。數據見 tests/BENCHMARKS.md。
+
+### F25 [P0][安全性/權限提升] `sys_sigreturn` 讓 ring 3 自己挑 EFLAGS —— 含 IOPL
+- 檔案: syscall.c `sys_sigreturn()`；觸發路徑 interrupt.s 的 `iret`
+- 類別: 安全性（權限提升）
+- 嚴重度: **P0**
+- **現象**：`sys_sigreturn` 從使用者堆疊上的 `sigcontext_t` 逐欄還原被中斷的
+  情境，其中包含 `regs->eflags = sc->eflags;`。這個 struct 欄位**就是**
+  `interrupt.s` 尾端 `popa; add $8,%esp; sti; iret` 裡 `iret` 會彈出的那一格。
+- **為什麼是提權而不只是「值怪怪的」**：`iret` 在 **CPL 0 執行**時會從堆疊映像
+  **載入 IOPL**（只有在 CPL > 0 執行時 IOPL 才被保護不變）。而 sigreturn 是從
+  ring 0 的系統呼叫處理常式返回 ring 3，所以走的正是「CPL 0 執行 iret」這條。
+  使用者程式只要在堆疊上擺一個 `eflags = 0x3000` 的 sigcontext、呼叫
+  `int $0x80`（eax = 24），返回後就取得 **IOPL=3**——從此可以直接對任何 I/O
+  埠下 `in`/`out`，繞過整個核心的裝置抽象（ATA、PIC、PIT、鍵盤控制器）。
+  同一條路徑還能設 **NT**（下一次 `iret` 會改走 task switch，去讀 TSS 裡的
+  back link）、**VM**（要求進入 virtual-8086 模式）、以及**清掉 IF**（返回後
+  中斷永久關閉，timer tick 停止，整台機器只剩這一個行程在跑）。
+- **不需要任何前置條件**：不必先安裝 handler、不必真的收過訊號。`sys_sigreturn`
+  只檢查 `useresp` 落在使用者堆疊範圍內（F14 加的守衛），沒有檢查「現在真的
+  在訊號處理中」。守衛擋的是**位址**，這個缺陷在**內容**。
+- **修復**：只讓程式自己的算術旗標通過，其餘由核心決定。
+
+```c
+#define EFLAGS_USER_MASK   0x00000CD5u   /* CF PF AF ZF SF DF OF */
+#define EFLAGS_ALWAYS_SET  0x00000202u   /* IF + reserved bit 1 */
+...
+regs->eflags = (sc->eflags & EFLAGS_USER_MASK) | EFLAGS_ALWAYS_SET;
+```
+
+  遮罩**不含 TF**：這個核心沒有 #DB 處理常式，讓使用者設 trap flag 等於送一個
+  無人接手的例外。IF 是**強制設回 1**而不是「保留使用者的值」——ring 3 沒有
+  任何正當理由需要關中斷，而讓它關得掉就等於讓它獨佔 CPU。
+- **與 F22 是同一族**：都是「使用者提供的數字直接餵進核心會信任的欄位」。F22 是
+  長度算術，這次是處理器狀態暫存器。
+- 狀態: **已修＋單元測試（tests/test_signal.c）＋ QEMU 雙向驗證**。
+  `user/sigflags.c` 在 ring 3 手工組出 sigcontext、`int $0x80`，返回後用
+  `pushfl`/`popl` 讀回**真實的** EFLAGS：
+  - **移除修復**後：`[sigflags ESCALATED iopl]`、`[sigflags ESCALATED nt]`。
+  - **修復在位**：`[sigflags iopl clear]`、`[sigflags nt clear]`、
+    `[sigflags if set]`。
+  這是「同一支使用者程式在有／無修復下輸出相反結果」的證據，不是只有單元測試。
+
+### CAP21 訊號遞送生命週期單元測試（F2/F14 的發源地；F25 在這裡被找到）
+- 檔案: tests/test_signal.c（88 檢查）、Makefile、.gitignore、user/sigflags.c
+- **為什麼從這裡下手**：`signal_deliver` 與 `sys_sigreturn` 是核心裡少數
+  「直接把使用者提供的位元組寫進**返回 ring 3 用的暫存器映像**」的程式碼，
+  歷史上已經產出 F2（在核心情境上遞送）與 F14（frame 位址不檢查）兩個缺陷，
+  卻從來沒有直接測試——每次都靠 QEMU 端對端間接碰到。
+- **harness**：用 `--gc-sections` 連結真正的 `syscall.c`，並用
+  `mmap(MAP_FIXED_NOREPLACE)` 在 `USER_STACK_BOTTOM` 真的映射一段使用者堆疊，
+  所以 frame 的建立與讀回**走的是真的指標運算**，不是模型。
+- **釘住的不變式**：
+  - sigreturn 只還原程式自己的算術旗標；IOPL/NT/VM 一律清掉、IF 一律設回
+    （F25 的迴歸測試）。
+  - delivery → handler → sigreturn 的**完整往返**必須把被中斷的情境**逐欄**
+    還原（測試自己要模型化 handler 的 `ret` 會把 esp 推進 4 bytes，否則會
+    在正確的程式上因為錯的理由通過）。
+  - frame 必須完整落在使用者堆疊內：**上下界都測**，而且斷言「核心拒絕並
+    `task_exit`」而不是「發生了某種壞事」。
+  - 一次返回使用者模式只遞送一個訊號；handler 執行中不巢狀；
+    SIGCHLD 的預設動作是忽略（否則沒裝 handler 的父行程會被子行程的退出殺死）；
+    明確忽略（handler == 1）不建立 frame；SIGSTOP park 後必須能被 SIGCONT 釋放。
+- **突變 23 個：22 抓到、1 個等價**。
+  - S1（就是修復前的程式碼）、S2（遮了但不強制 IF）、S3（遮罩仍放 IOPL 過）、
+    S4（仍放 NT 過）、S5（連程式自己的旗標都丟掉）——F25 的修復被**四個方向**
+    夾住，不是只有「有沒有遮」。
+  - **S14 是等價突變**：把 `useresp - USER_STACK_BOTTOM < K` 改寫成
+    `useresp < USER_STACK_BOTTOM + K`。前一個 `||` 子句已經保證
+    `useresp >= USER_STACK_BOTTOM`（減法不會借位），而
+    `USER_STACK_BOTTOM + 60 ≈ 0x3E803C` 離 2³² 極遠（加法不會溢位），
+    兩種寫法在**所有可達輸入**上恆等。減法形式保留，因為它是本專案的慣例
+    （在一般情形下才是安全的那一種）；**誠實記錄，不硬寫假測試去殺它**。
+- **三個突變原本只被「行程死掉」或 timeout 抓到，已改成具名斷言**：
+  - S7/S13 拿掉界限檢查後，frame 落在未映射的位址，host 上是 SIGSEGV
+    （`rc=139`）。**但 `rc=139` 不是斷言**——它只說「某處出事」。加上 SIGSEGV
+    handler + 三值的 `RUN_MAY_EXIT`（0 正常返回／1 `task_exit`／2 碰到映射外
+    記憶體）之後，測試說的是「核心應該拒絕，但它去碰了那個位址」。這在真核心
+    裡的後果更嚴重：那次存取 CS 仍是 0x08，page fault handler 會判定是**核心
+    錯誤而停機**，不是殺掉一個行程——正是 F2 與 F14 的形狀。
+  - S23（SIGCONT 不釋放被 stop 的行程）原本讓測試無限迴圈。改成 park 超過
+    64 次就由 harness 停下並具名報告「停住的行程永遠不會再執行」。
+  - 這條界線是本專案的既有紀律：**timeout 與 crash 證明「有事發生」，不證明
+    「斷言起作用了」**。
 
 ## 已知限制（本輪審查有發現、但刻意不修的項目，附理由）
 以下項目屬於真實觀察到的架構/效能取捨，但要嘛需要較大幅度重構、要嘛觸發

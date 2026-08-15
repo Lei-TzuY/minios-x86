@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 32 / 2026-08-15）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 33 / 2026-08-15）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -12,12 +12,12 @@
 
 | 項目 | 數量 |
 |---|---|
-| 核心 C/ASM（不含 `*_embed.c` 產生檔） | ~9,100 行 |
-| `user/` ring-3 程式與 syscall wrapper | ~3,600 行 |
-| `tests/` 原生單元測試 | ~5,800 行 |
+| 核心 C/ASM（不含 `*_embed.c` 產生檔） | ~9,300 行 |
+| `user/` ring-3 程式與 syscall wrapper | ~3,700 行 |
+| `tests/` 原生單元測試 | ~12,100 行 |
 | 系統呼叫 | 51 |
-| 使用者程式 | 51 |
-| 單元測試套件 | 23 |
+| 使用者程式 | 52 |
+| 單元測試套件 | 24 |
 
 ### 子系統
 
@@ -91,9 +91,10 @@ DiskFS: mounted=1 generation=9 files=0
 
 ## 3. 已完成工作
 
-### 已修問題（F1–F24）
+### 已修問題（F1–F25）
 
-分佈：**4 個 P0**（F1、F2、F14、F22，其中三個可讓**整台機器停機**）、
+分佈：**5 個 P0**（F1、F2、F14、F22、F25；其中三個可讓**整台機器停機**，
+F25 則是**權限提升**——ring 3 自己取得 IOPL）、
 4 個 P1、8 個 P2、6 個 P3、2 個 P4。
 
 | ID | 級別 | 摘要 |
@@ -120,6 +121,7 @@ DiskFS: mounted=1 generation=9 files=0
 | F22 | **P0** | RAMFS 容量倍增溢位守衛差一步 → **無窮迴圈凍結整台機器** |
 | F23 | P3 | FAT16 寫入 0 位元組時仍把長度推到 seek 位置（F9 修法的殘留邊界） |
 | F24 | P2 | ATA 逾時的命令會答覆**下一個**操作 → 讀到別的 sector／假的寫入成功 |
+| F25 | **P0** | `sys_sigreturn` 讓 ring 3 自選 EFLAGS → **IOPL=3／NT／VM／關 IF** |
 
 ### 功能與效能
 
@@ -163,18 +165,24 @@ DiskFS: mounted=1 generation=9 files=0
   沒有對應 open 的 close 記為 underflow——**只看回傳值的測試對每個突變都會通過**。
   把「每個交給新行程的 slot 必須帶著空的 `open_files[]`」這條跨 `syscall.c`／
   `process.c`、散落七條釋放路徑的假設變成可執行契約。沒找到缺陷。
-- **CAP20** `test_process`：行程生命週期狀態機（F1/F7/F17/F19 的發源地）。排程器被
+- **CAP20** `test_process`（369 checks）：行程生命週期狀態機（F1/F7/F17/F19 的發源地）。排程器被
   **模型化**：記錄誰 park、park 在哪個 channel、誰被喚醒，以及「park 了卻沒人叫醒」
   ——後者把「會永遠掛住」變成具名斷言。釘住 `waitpid` 對 SIGCHLD 喚醒的隱性相依。
-  沒找到缺陷。
+  follow-up 補上真正的 spurious wake 與 same-channel decoy，並以僅 hosted 的 release
+  observer 驗證 auto-reap 不會 double release；`task_exit` 的 retired kernel stack 則由
+  `test_task`（82 checks）釘住「下一個 scheduler safe point 才回收」。沒找到缺陷。
+- **CAP21** `test_signal`：訊號遞送生命週期。以 `mmap(MAP_FIXED_NOREPLACE)` 真的
+  映射使用者堆疊，所以建框／還原走的是**真的指標運算**。找到 **F25**（P0，權限
+  提升）。三個原本只被 segfault 或 timeout 抓到的突變，改成具名斷言。
 
-目前 23 套件，`make unit` <1 秒：
+目前 24 套件，`make unit` <1 秒：
 
 ```
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37399 /
 diskfs 979 / pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 /
 process-env 47 / syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4335 /
-kb 1675 / procfs 183 / vga 4769 / ata 8967 / fdtable 474 / process 351
+kb 1675 / procfs 183 / vga 4769 / ata 8967 / fdtable 474 / process 369 /
+signal 88
 ```
 
 ---
@@ -264,15 +272,15 @@ kb 1675 / procfs 183 / vga 4769 / ata 8967 / fdtable 474 / process 351
 
 **A 類已全部完成**，`ata.c`（CAP18）與描述子表（CAP19）也已完成。剩下的候選：
 
-- ~~**CAP20：行程生命週期狀態機**~~：**Session 32 完成**（351 檢查、突變 33/35、
+- ~~**CAP20：行程生命週期狀態機**~~：**Session 32 完成**（`test_process` 369 checks；
+  額外 lifecycle mutants 14/14 killed、1 equivalent；retired-stack mutants 2/2 killed；
   無缺陷）。ASSESS2 找到的隱性相依已被釘住。
+- ~~**CAP21：訊號遞送的生命週期**~~：**Session 33 完成**（88 檢查、突變 22/23、
+  找到 **F25**，P0 權限提升）。
 - **尚未直接覆蓋的核心區域**（依歷史缺陷密度排序）：
-  1. **訊號遞送的生命週期**：`signal_deliver` / `SYS_SIGRETURN` 的框架建立與還原
-     （F2、F14 兩個 P0 都在這裡，且都是「未驗證使用者指標」）。CAP10 只測了指標
-     驗證函式本身，沒測建框/還原的配對。
-  2. **mmap / sbrk 的位址空間所有權**：`sys_mmap`/`sys_munmap` 的 `ext_map` 位元圖
+  1. **mmap / sbrk 的位址空間所有權**：`sys_mmap`/`sys_munmap` 的 `ext_map` 位元圖
      與 demand paging 的交互（F15/F16 是這附近的整數問題）。
-  3. **pipe / semaphore / timer 與行程 teardown 的跨模組交互**：各自都有單元測試，
+  2. **pipe / semaphore / timer 與行程 teardown 的跨模組交互**：各自都有單元測試，
      但「行程在持有這些資源時退出」的路徑沒有被直接測過。
 - **B 類**：IRQ-driven ATA（見 ASSESS1，阻礙是 diskfs 沒有併發模型）、
   可中斷睡眠 + EINTR（會動 ABI）。兩者都需要人類決策。

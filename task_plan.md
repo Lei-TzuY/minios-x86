@@ -435,6 +435,15 @@ Status: complete
   差別，要兩個）與 P17（交換順序不改變計數，要記錄序號）是真實缺口。
 - 三個原本只被 timeout 抓到的突變已改為具名斷言。
 - **沒有找到缺陷**。
+- Session 32 follow-up：harness 的 spurious-wake 腳本原本第一輪就讓 child exit，且沒有
+  same-channel decoy，因而無法區分 identity wake 與碰巧的 channel wake；這是**測試模型
+  缺口**，不是核心 defect。修正後 `test_process` 為 369 checks，新增的 lifecycle mutant
+  matrix 為 14/14 killed、`process_release` 不清欄位為等價（下一次 allocate 完整 memset，
+  且 UNUSED slot 不可查）；`test_task` 再以 2/2 mutants 證明 retired kernel stack 不會提前
+  free、也不會漏掉下一個 scheduler safe point 的回收。
+- 驗證完成：production `process.o`／`task.o` 與無 hosted instrumentation 的 baseline
+  位元組相同；`make unit` 24 套件、`make clean && make all -j4`、完整 `make test`
+  （288.1 s，HOST_RC=0）全綠，leak/state counters 回 baseline。
 
 ## 目前結論（Session 32）
 F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P1（F7、F10、F11、F20）、
@@ -444,6 +453,13 @@ F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P
 
 **未完項目與下一輪候選見 `PROJECT_STATE.md` 第 5、6 節**（已知限制 6 項、
 候選工作 A/B/C 三類，附價值與風險評估）。
+
+### Session 33 — CAP21 訊號遞送生命週期
+找到 **F25**（P0，權限提升）：`sys_sigreturn` 把使用者的 EFLAGS 原封不動交給
+`iret`，而 `iret` 在 CPL 0 執行時會**從堆疊映像載入 IOPL**。修法是只放行程式
+自己的算術旗標並強制設回 IF。QEMU 以同一支 `user/sigflags.c` 雙向驗證。
+新增 `tests/test_signal.c`（88 檢查），突變 22/23（S14 為等價突變，附推導）。
+三個原本只被 segfault／timeout 抓到的突變改成具名斷言。
 
 ### 方法論上最值得記住的三件事
 1. **假綠燈**（Phase 5 / M1）：`wsl.exe -- bash -lc "...$?"` 恆回報 0，一整輪的
@@ -468,16 +484,4 @@ F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P
 | 突變測試中斷把 mutant 留在工作樹 | 還原改放 `trap ... EXIT`，每輪驗證位元組相同 |
 | 突變 pattern 對不上（CRLF 樹用 `\n`） | Python 字面替換 + LF 正規化後依原行尾寫回 |
 | `bigseek` 誤用 API 導致節點數飄移（Session 25） | `sys_create` 已回傳開啟的 fd；測試改為**斷言**清理成功 |
-
-## Phase 34: Session 32 — process lifecycle state machine（CAP20）
-Status: in_progress
-- 目標：將 `allocate/launch → running → fork/thread → main exit →
-  zombie/deferred exit → wait/waitpid/detach → reap → slot reuse` 的跨函式生命週期
-  不變式變成 hosted、可觀察、mutation-tested 的 safety net；不重做 CAP19，不以尋找
-  defect 為目的改動正確程式。
-- 首要不變式：`process_waitpid()` 阻塞在父行程自身的 `process_t`；子行程
-  `process_finish_exit()` 的 broadcast 在子行程 channel，父行程必須由 SIGCHLD 的
-  `process_send_signal()` → `task_wake_task(parent->task)`（不依賴 handler）喚醒。
-- 進度：審核既有 `tests/test_process.c` 的 scheduler/ownership stub 是否真的能觀察
-  block task、channel、identity wake、spurious wake、teardown order、resource counts，
-  再完成完整 mutation matrix 與回歸。
+| 往返測試沒模型化 handler 的 `ret`，在正確程式上也因錯的理由通過（Session 33） | 突變測試逼出來；補上 `useresp += 4` 才是真的往返 |

@@ -734,6 +734,14 @@ void sys_exit(int32_t status) {
     task_exit(status);
 }
 
+/* The EFLAGS bits a ring-3 program may choose for itself: the arithmetic
+ * results (CF PF AF ZF SF OF) and the direction flag. Everything else is the
+ * kernel's to decide -- see the note in sys_sigreturn. */
+#define EFLAGS_USER_MASK   0x00000CD5u
+/* IF, so a program can never resume with interrupts disabled, plus the
+ * reserved bit 1 which is always set. */
+#define EFLAGS_ALWAYS_SET  0x00000202u
+
 /* User context saved on the user stack while a signal handler runs, so that
  * SYS_SIGRETURN can restore the interrupted code exactly. */
 typedef struct {
@@ -786,7 +794,26 @@ static void sys_sigreturn(registers_t *regs) {
 
     sc = (const sigcontext_t *)(regs->useresp + 4);
     regs->eip = sc->eip;
-    regs->eflags = sc->eflags;
+    /* EFLAGS is the one saved field that is not just data: the iret that
+     * returns to ring 3 loads it into the real register, and an iret executed
+     * at CPL 0 -- which is where the kernel is -- takes the IOPL field from
+     * the stack image instead of preserving it. Copying the saved value
+     * verbatim therefore lets a program choose its own EFLAGS, and the frame
+     * lives in its own stack, so the bounds check above says nothing about the
+     * contents. What it could pick:
+     *
+     *   IOPL=3  in/out on any port from ring 3, and cli/sti -- so either drive
+     *           the disk controller behind the filesystem's back, or simply
+     *           cli and stop the machine: no timer, no scheduler, no keyboard.
+     *   VM      return into virtual-8086 mode.
+     *   NT      make the next iret attempt a task switch through the TSS.
+     *   IF=0    return to ring 3 with interrupts disabled: the same freeze.
+     *
+     * Keep only the flags a program legitimately owns -- the arithmetic
+     * results and the direction flag, which code after a handler depends on --
+     * and supply the rest. TF is excluded as well: single-stepping from ring 3
+     * would raise #DB, which this kernel has no handler for. */
+    regs->eflags = (sc->eflags & EFLAGS_USER_MASK) | EFLAGS_ALWAYS_SET;
     regs->eax = sc->eax;
     regs->ebx = sc->ebx;
     regs->ecx = sc->ecx;
