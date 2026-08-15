@@ -1366,6 +1366,90 @@ resolve_parent_fs 不一致
   ATA 全程 cli 因此**仍留在已知限制**，但理由從「沒有安全網」更新為
   「**缺的是上層的併發模型，不是驅動的測試**」。
 
+### CAP19 每行程檔案描述子表的**所有權契約**（把跨檔案的不變式變成可執行檢查）
+- 檔案: tests/test_fdtable.c（474 檢查）、Makefile、.gitignore
+- **要釘住的不變式**（原本一個字都沒寫在程式碼裡）：
+
+  > 每一個交給新行程的 slot，都必須帶著一張空的 `open_files[]`；
+  > 任何 file 或 pipe 的參照都不得跨越 slot 重用而存活。
+
+  `process.c` 配置 slot 時只 `memset(process_t)`，**從不碰 `open_files[]`**；
+  正確性完全靠「每一條釋放 slot 的路徑都先關掉描述子」。稽核過全部**七個**
+  `process_release()` 呼叫點——四個回收已經過 `process_finish_exit` 的 zombie、
+  一個緊接其後、一個在 fork 失敗時明確呼叫 `syscall_close_user_files`、一個發生在
+  任何描述子存在之前——**全部正確，沒有現存缺陷**。但將來新增的第八條若忘記，
+  新行程就會拿到前一個佔用者的檔案參照，那正是 F11 的失敗模式。
+- **測試模型的核心決定：觀察所有權，不是回傳值**。`open_fs`/`close_fs` 與四個
+  pipe 參照函式全部換成**保有真實計數語意**的 stub，而且**沒有對應 open 的 close
+  會被記為 underflow**——那才是「重複釋放」唯一看得見的地方。**只檢查 `sys_close()`
+  回傳值的測試，對本輪設計的每一個突變都會通過。**
+- **覆蓋**：open 取得參照、close 釋放**並清空 entry**、描述子耗盡→關閉→重用、
+  exit 清空整張表、slot 重用看到空表、32 輪 allocate/open/exit 循環不累積、
+  fork 複製表並逐一 bump（含 offset）、fork 失敗回滾、子行程 exit 不影響父行程的
+  描述子、父行程 exit 不影響子行程、pipe 兩端分開計數、pipe 建立失敗與描述子不足的
+  兩條回滾路徑、dup2 的三種語意（表內互換、自我複製、掛上 stdout）、以及
+  NULL process／slot 越界等防禦路徑。
+- **突變測試 25 個，23 個抓到、2 個確認為等價突變**。一開始 6 個存活，5 個是真實缺口：
+  - **D6/D12（exit 或 fork 的迴圈少跑一格）**：其他測試只開兩三個描述子，少跑一格
+    剛好把它們檢查的都涵蓋了。**把整張表填滿**才讓迴圈邊界變得可觀察。
+  - **D11（fork 把 pipe 兩端 bump 反了）**：兩端都開著時，讀寫計數都是 1→2，
+    **對稱所以看不出來**。先關掉寫端讓兩者不對稱之後才抓到。
+  - **D14（`alloc_fd` 不重設 offset）→ 確認為等價突變**：`close_fd_entry` 已經把
+    offset 清零，而**沒有任何路徑能產生「OF_NONE 但 offset 非零」的 entry**
+    （靜態表初始為零、每次釋放都經過 close_fd_entry、fork 整份複製、dup2 只寫入
+    非 NONE 的 entry）。兩處清零互為備援，與 ramfs 的 R6 同型。誠實記錄。
+  - **D21（拿掉 `dup2(fd, fd)` 的自我複製檢查）→ 確認為等價突變，但理由值得記**：
+    突變版會先 `close_fd_entry` 再從先前複製的 `src` 寫回、再 `open_fs`，
+    參照數 1→0→1，最終狀態完全相同。**這只在本核心的全域 cli 模型下成立**——
+    中間那一瞬間參照為 0，而系統呼叫全程關中斷，沒有別的行程能在那個縫隙 unlink
+    並釋放節點（三個後端也都是「開啟中不得 unlink」，參照歸零本身不會釋放）。
+    **若併發模型改變，這就會變成真的 UAF**，所以那個檢查不是死碼。
+  - **D25（描述子完全沒空位時的 pipe 回滾）**：既有測試留了一格空位，只走到第二次
+    配置失敗那條路；填滿整張表才走得到第一次就失敗、必須交還兩個 pipe 端的那條。
+- **沒有找到缺陷**。本輪產出是把一個跨 `syscall.c`／`process.c` 兩個檔案、散落在七條
+  釋放路徑上的口頭假設，變成 23 個突變證明過的可執行契約。
+
+### ASSESS2 行程生命週期狀態機的稽核（沒有缺陷；但找到一條該被測試釘住的隱性相依）
+- 範圍: process.c 的 `process_allocate` / `process_launch` / `process_fork` /
+  `process_task_exit` / `thread_on_exit` / `process_finish_exit` / `process_wait` /
+  `process_waitpid` / `process_detach` / `process_release`，以及它們與 task.c、
+  paging.c 的交界。這是 F1、F7、F17、F19 四個 P0/P1 的發源地。
+- **逐項對照的結果，全部正確**：
+  - **`process_launch` 失敗回滾**：`create_task` 失敗時只 `process_release`，
+    address space 由**呼叫端**銷毀（elf_loader.c 的 `if (pid < 0)
+    paging_destroy_user_address_space(space)`），不是洩漏。
+  - **thread_count 所有權（F1 的修法）**：主 task 先退出時只設 `main_exited`、
+    `task = NULL` 並保留位址空間；真正的 teardown 延到 `thread_on_exit` 看到
+    `thread_count == 0 && main_exited` 才跑。
+  - **teardown ordering 有兩層互不依賴的保護**：`task_exit` 在呼叫 `on_exit`
+    **之前**就 `activate_task(next)` 把 CR3 切到下一個 task；而
+    `paging_destroy_user_address_space` 內部另有 `space == active_space` 的檢查會
+    切回 kernel space。退休 task 的 kernel stack 也是延後到**下一次** `task_exit`
+    的 `reap_retired_task()` 才釋放，不會在自己還站在上面時被回收。
+  - **父行程結束時的 children**：ZOMBIE 直接 release，RUNNING 改
+    `parent_pid = 0` + `auto_reap = 1`。`next_pid` 從 1 單調遞增且沒有行程的 pid 是
+    0，所以孤兒不會被後來的行程「認領」。
+  - **資源只釋放一次**：七條 `process_release()` 路徑在 Session 30/31 已逐一追查
+    （見 CAP19），全部先經過 `process_finish_exit` 或明確關檔。
+- **找到一條值得測試釘住的隱性相依（不是缺陷）**：
+  `process_waitpid` 阻塞在**自己**的 `process_t` 上：
+  ```c
+  task_block_killable(process_get_current());
+  ```
+  但 `process_finish_exit` 只 `task_wake_all(process)` —— 喚醒的是**子行程**的
+  `process_t`，是**不同的 channel**。父行程實際上是被 SIGCHLD 那條路徑的
+  `task_wake_task(parent->task)` 喚醒的，而那條路徑之所以可靠，是因為
+  `process_send_signal` **無條件**喚醒被阻塞的目標 task（不看有無安裝 handler）。
+  相對地，`process_wait` 阻塞在**子行程**的 `process_t` 上，與 `task_wake_all`
+  的 channel 相符——**同一個檔案裡兩個等待函式用了兩種不同的喚醒機制**。
+  把 `process_send_signal` 改成「只在裝了 handler 時才喚醒」是個看起來完全合理的
+  最佳化，而它會讓 `waitpid` **永遠掛住**。這是 CAP20 最該優先釘住的一條斷言。
+- **CAP20 的範圍（下一輪）**：`allocate/launch → running → fork/thread → exit →
+  zombie → wait/reap/detach → slot reuse` 的狀態機，重點是上面那條跨機制的喚醒
+  相依、thread_count 的延後 teardown、以及 auto_reap/reparent 的轉換。
+  harness 需要 stub task.c（含 `task_wake_task` / `task_block_killable` 的可觀察版本）
+  與 paging.c，規模與 CAP18 的假裝置相當。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）

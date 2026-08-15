@@ -35,7 +35,8 @@ UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_fs tests/test_pmm \
             tests/test_timer tests/test_task tests/test_rtc \
             tests/test_process_env tests/test_syscall_valid \
             tests/test_paging_cow tests/test_elf tests/test_ramfs \
-            tests/test_kb tests/test_procfs tests/test_vga tests/test_ata
+            tests/test_kb tests/test_procfs tests/test_vga tests/test_ata \
+            tests/test_fdtable
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -127,6 +128,17 @@ tests/test_vga: tests/test_vga.c tests/test.h vga.c vga.h io.h utils.h
 # -- which would otherwise leave interrupts off with nothing to notice.
 tests/test_ata: tests/test_ata.c tests/test.h ata.c ata.h io.h irq.h
 	$(CC) $(UNIT_CFLAGS) tests/test_ata.c -o $@
+
+# The per-process descriptor table. Same --gc-sections trick as
+# test_syscall_valid, but aimed at the ownership paths instead of the pointer
+# checks: open_fs/close_fs and the four pipe reference calls are stubbed with
+# COUNTING versions, so the tests can assert who owns what rather than only
+# what a syscall returned. A close with no matching open is recorded as an
+# underflow, which is what makes a double release visible at all.
+tests/test_fdtable: tests/test_fdtable.c tests/test.h syscall.c syscall.h \
+                    process.h fs.h pipe.h paging.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
+	    -Wl,--gc-sections tests/test_fdtable.c -o $@
 
 # Includes kb.c directly to reach its statics (the ring indices, the modifier
 # flags) and the handler handed to register_interrupt_handler. io.h is replaced

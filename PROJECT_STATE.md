@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 30 / 2026-08-15）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 31 / 2026-08-15）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -17,7 +17,7 @@
 | `tests/` 原生單元測試 | ~5,800 行 |
 | 系統呼叫 | 51 |
 | 使用者程式 | 51 |
-| 單元測試套件 | 21 |
+| 單元測試套件 | 22 |
 
 ### 子系統
 
@@ -159,14 +159,18 @@ DiskFS: mounted=1 generation=9 files=0
   次數才清、DRQ 在 256 words 後自落、BSY/DRQ 期間的命令寫入一律忽略、讀取失敗時
   ERR 與 DRQ 同時拉起）。irq.h 也換成計數版本，驗證八條 return path 的 save/restore
   配對。找到 **F24**。
+- **CAP19** `test_fdtable`：每行程描述子表的**所有權契約**。stub 保有真實參照計數，
+  沒有對應 open 的 close 記為 underflow——**只看回傳值的測試對每個突變都會通過**。
+  把「每個交給新行程的 slot 必須帶著空的 `open_files[]`」這條跨 `syscall.c`／
+  `process.c`、散落七條釋放路徑的假設變成可執行契約。沒找到缺陷。
 
-目前 21 套件，`make unit` <1 秒：
+目前 22 套件，`make unit` <1 秒：
 
 ```
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37399 /
 diskfs 979 / pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 /
 process-env 47 / syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4335 /
-kb 1675 / procfs 183 / vga 4769 / ata 8967
+kb 1675 / procfs 183 / vga 4769 / ata 8967 / fdtable 474
 ```
 
 ---
@@ -254,9 +258,17 @@ kb 1675 / procfs 183 / vga 4769 / ata 8967
 - ~~**`heap.c`**~~：**Session 29 完成，見 HEAP1**（稽核無缺陷；補四個真實測試缺口，
   378 → 720 檢查；stub 改為貼近真實 PMM 的連續配發）。
 
-**A 類已全部完成。** 剩下的候選集中在 B 類（已知限制的攻堅）與新的方向：
-`ata.c`（唯一還沒有單元測試的驅動，且限制 1 的重構需要它當安全網）、
-`process.c` / `syscall.c` 的其餘部分（目前只有 env 與指標驗證兩塊被測到）。
+**A 類已全部完成**，`ata.c`（CAP18）與描述子表（CAP19）也已完成。剩下的候選：
+
+- **CAP20：行程生命週期狀態機**（`allocate/launch → running → fork/thread → exit →
+  zombie → wait/reap/detach → slot reuse`）。Session 31 已完成**稽核**（見
+  findings.md 的 ASSESS2）：**沒有缺陷**，但找到一條該被釘住的隱性相依——
+  `process_waitpid` 阻塞在自己的 `process_t` 上，而 `process_finish_exit` 喚醒的是
+  **子行程**的 `process_t`，父行程實際上靠 SIGCHLD 的 `task_wake_task` 才醒；
+  把 `process_send_signal` 改成「只在裝了 handler 時才喚醒」會讓 `waitpid` 永遠掛住。
+  **這是下一輪最高價值的單一斷言。**
+- **B 類**：IRQ-driven ATA（見 ASSESS1，阻礙是 diskfs 沒有併發模型）、
+  可中斷睡眠 + EINTR（會動 ABI）。兩者都需要人類決策。
 
 ### B. 已知限制的攻堅
 
