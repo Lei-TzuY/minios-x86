@@ -132,6 +132,10 @@ void kfree(void *ptr) {
     merge_free_blocks();
 }
 
+heap_block_t *heap_first_block(void) {
+    return heap_head;
+}
+
 size_t heap_get_page_count(void) {
     return heap_pages;
 }

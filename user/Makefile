@@ -10,7 +10,7 @@ PROGRAMS = hello.elf cat.elf fault.elf badptr.elf worker.elf spawner.elf \
 	   demandtest.elf sigchld.elf waitdemo.elf cwddemo.elf statdemo.elf cowstress.elf \
 	   alarmdemo.elf pausedemo.elf pipedemo.elf jobctl.elf uptime.elf date.elf \
 	   printenv.elf cputime.elf shmtest.elf semtest.elf mmaptest.elf \
-	   threadtest.elf threadexit.elf execguard.elf ramgrow.elf pathlim.elf redirref.elf fatref.elf forkredir.elf sigretguard.elf killthread.elf killwait.elf bigseek.elf ush.elf
+	   threadtest.elf threadexit.elf execguard.elf ramgrow.elf pathlim.elf redirref.elf fatref.elf fatgrow.elf forkredir.elf sigretguard.elf sigflags.elf killthread.elf killwait.elf bigseek.elf ush.elf
 
 all: $(PROGRAMS)
 

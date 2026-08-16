@@ -2,6 +2,7 @@
 #include "../task.h"
 #include "../pmm.h"
 
+#include <setjmp.h>
 #include <stddef.h>
 
 /*
@@ -27,13 +28,26 @@
 /* --- stubs for everything task.c touches except the list logic ------------ */
 static uint8_t pool[80][PMM_BLOCK_SIZE] __attribute__((aligned(PMM_BLOCK_SIZE)));
 static int pool_next;
+static void *freed_blocks[8];
+static int free_count;
+static jmp_buf exit_switch_jmp;
+static int intercept_exit_switch;
 
 void *pmm_alloc_block(void) {
     return pool_next < (int)(sizeof(pool) / sizeof(pool[0])) ? pool[pool_next++] : NULL;
 }
-void pmm_free_block(void *p) { (void)p; }          /* leak in the test; fine */
+void pmm_free_block(void *p) {
+    if (free_count < (int)(sizeof(freed_blocks) / sizeof(freed_blocks[0]))) {
+        freed_blocks[free_count] = p;
+    }
+    free_count++;
+}
 
-void switch_task(uint32_t *old_esp, uint32_t new_esp) { (void)old_esp; (void)new_esp; }
+void switch_task(uint32_t *old_esp, uint32_t new_esp) {
+    (void)old_esp;
+    (void)new_esp;
+    if (intercept_exit_switch) longjmp(exit_switch_jmp, 1);
+}
 void set_kernel_stack(uint32_t s) { (void)s; }
 void paging_activate_address_space(address_space_t *s) { (void)s; }
 address_space_t *paging_get_kernel_address_space(void) {
@@ -279,6 +293,54 @@ static void test_kill_pending_is_per_task(void) {
     a->kill_pending = 0;                  /* leave the ring clean for later tests */
 }
 
+static int exit_callback_calls;
+static task_t *exit_callback_task;
+static int32_t exit_callback_status;
+
+static void observe_task_exit(task_t *task, int32_t status) {
+    exit_callback_calls++;
+    exit_callback_task = task;
+    exit_callback_status = status;
+    /* task_exit switched away before this callback; its stack must still
+     * exist until a later scheduler entry reaches the safe reap point. */
+    CHECK_EQ(free_count, 0);
+}
+
+static void test_task_exit_defers_its_own_reclamation(void) {
+    task_t *victim = create_task(noop_entry, observe_task_exit,
+                                 paging_get_kernel_address_space(), NULL, 0, 0);
+    void *stack;
+
+    TEST("task_exit retires, then the next scheduler entry reaps its stack");
+    CHECK(victim != NULL);
+    if (!victim) return;
+    stack = victim->stack_bottom;
+    free_count = 0;
+    exit_callback_calls = 0;
+    exit_callback_task = NULL;
+    exit_callback_status = 0;
+
+    current_task = victim;
+    if (setjmp(exit_switch_jmp) == 0) {
+        intercept_exit_switch = 1;
+        task_exit(73);
+    }
+    intercept_exit_switch = 0;
+
+    CHECK(current_task != victim);         /* scheduler left its old stack */
+    CHECK_EQ(exit_callback_calls, 1);
+    CHECK(exit_callback_task == victim);
+    CHECK_EQ(exit_callback_status, 73);
+    CHECK_EQ(free_count, 0);               /* no self-stack UAF */
+
+    /* schedule() is the later safe point. It first reaps the retired task,
+     * then switches a still-live task; stack and task are released once. */
+    schedule();
+    CHECK_EQ(free_count, 2);
+    CHECK(freed_blocks[0] == stack);
+    CHECK(freed_blocks[1] == victim);
+}
+
 int main(void) {
     test_setup();
     test_block_removes_from_ready();
@@ -287,5 +349,6 @@ int main(void) {
     test_wake_channel_selectivity();
     test_kill_blocked();
     test_kill_pending_is_per_task();
+    test_task_exit_defers_its_own_reclamation();
     TEST_REPORT("task");
 }

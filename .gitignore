@@ -23,6 +23,7 @@ runlog.sh
 # Native unit-test binaries (built by `make unit`)
 tests/test_utils
 tests/test_fs_path
+tests/test_fs
 tests/test_pmm
 tests/test_heap
 tests/test_fat16
@@ -39,3 +40,11 @@ tests/test_syscall_valid
 tests/test_paging_cow
 tests/test_elf
 tests/test_ramfs
+tests/test_kb
+tests/test_procfs
+tests/test_vga
+tests/test_ata
+tests/test_fdtable
+tests/test_process
+tests/test_signal
+tests/test_vm_lifecycle

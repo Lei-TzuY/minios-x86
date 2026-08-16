@@ -21,12 +21,12 @@
 - flat layout：核心原始碼在根目錄 (*.c/*.h/*.s)，`user/` 是 ring-3 程式，
   `tests/` 是原生單元測試，`gen_*.py` 產生內嵌資源，`Makefile` 為唯一建置系統。
 
-## 目前基準（Session 25 結束時，checkpoint commit）
-- `make clean && make all -j4`：0 warning / 0 error（-Wall -Wextra）
-- `make test`：**真實離開碼 0**（unit 16 套件 + test-ata-absent/test-boot/
+## 目前基準（Session 30 結束時）
+- `make clean && make all -j4`：0 warning / 0 error（-Wall -Wextra，實測計數）
+- `make test`：**真實離開碼 0**（unit 21 套件 + test-ata-absent/test-boot/
   test-iso/test-shell）
 - test-shell 結尾的洩漏偵測斷言：`running=0 zombies=0 peak=4`、`blocked=0`、
-  `sleeping=0`、`RAMFS nodes=58`、`spaces=0`
+  `sleeping=0`、`RAMFS nodes=59`、`spaces=0`
 
 ## Phases
 
@@ -341,14 +341,137 @@ Status: complete
   案例後抓到；R6 確認是冗餘防禦（註解自承），誠實記錄不硬殺。
 - 節點數 58、README 程式數 50、逾時 280s。
 
-## 目前結論（Session 25）
-F1–F22 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P1（F7、F10、F11、F20）、
-7 個 P2、5 個 P3、2 個 P4。功能擴充 FEAT1、排程公平性 FAIR1、效能 PERF1/PERF2（已實測）、
-去重 REFACTOR1（已證明 codegen 不變）。測試能力累積到 16 個單元套件 + 4 個 QEMU
-端對端目標。
+## Phase 28: Session 26 — VFS 核心（fs.c）＋ FAT16 長度記帳的殘留缺口
+Status: complete
+- 動機：每個帶路徑的系統呼叫都經過 fs.c 的兩個嚴格解析器，而它們一個單元測試都
+  沒有（只有正規化器有，34 檢查，全專案最薄）。F8 就住在這裡。
+- **CAP14：tests/test_fs.c**（277 檢查）。mock 檔案系統刻意比任何真實後端寬鬆，
+  樹裡放進「名字就叫 `.`／`..`／空字串」與「FS_FILE 卻帶著完整目錄操作」的節點，
+  用來隔離「是哪一層擋下來的」。斷言派送到哪個節點、帶什麼名字，而不只是成敗
+  ——路徑解析器壞掉的樣子是安靜地回答錯的物件。
+- **HARD1**：`resolve_fs` 補上與 `resolve_parent_fs` 相同的「中途組件必須是目錄」
+  檢查。**目前不可觸發**，是縱深防禦而非修掉的 bug，誠實記錄。
+- **F23（P3）**：`fat16_vfs_write` 在 `written == 0` 時仍把長度推到 offset。
+  修：`if (written > 0)` 包住長度更新。端對端 user/fatgrow.c。
+- 突變：fs.c 22/22（4 個一開始存活，逼出 3 個真實缺口 + 1 個被我誤判為等價的）、
+  fat16.c 3/3（各由不同測試抓到）。
+- 節點數 59、README 程式數 51、逾時 285s。
+
+## Phase 29: Session 27 — kb.c（鍵盤驅動：環狀緩衝 / 修飾鍵 / Ctrl+C）
+Status: complete
+- 動機：核心裡唯一一處「中斷處理常式與 task 同碰一個結構」的地方，而 QEMU 那套只走
+  最窄的一條路（緩衝區永不滿、索引永不繞回、沒有按鍵被丟掉）。
+- **CAP15：tests/test_kb.c**（1675 檢查）。`#define IO_H` 換掉 io.h 自備 `inb`，
+  不動任何核心標頭；`setjmp`/`longjmp` 接住 noreturn 的 `task_exit`。
+- **kb.c 本身沒有找到 bug**（誠實記錄）。
+- 突變 18/18，其中 3 個以逾時被抓到（症狀是掛住而非答錯，腳本層加 `timeout 20s`）。
+  **K17 一開始存活**：`count == 0` 的案例被「緩衝區裡剛好有字元」遮蔽，改成對空
+  緩衝區呼叫才有鑑別力——本專案第三次踩到同一形狀。
+- 0xE0 延伸掃描碼「不處理但後果良性」的推導已轉成測試，並用 K18（看似合理的修法）
+  證明右 Ctrl 會因此壞掉。
+
+## Phase 30: Session 28 — procfs（F3 的守衛第一次被執行）
+Status: complete
+- 動機：F3 是 procfs 的緩衝區溢位，而它的修法（/proc/processes 界限檢查）**從來
+  沒有執行過一次**——只有 pid 到十位數或行程名塞滿欄位時才發火，QEMU 執行碰不到。
+- **CAP16：tests/test_procfs.c**（183 檢查）。`gen_buf` 灌毒 0x7F + 「回報長度之後
+  必須全是毒」的結構化不變式，外加 `-fsanitize=bounds` trap 模式第二道網。
+- **procfs.c 沒有找到 bug**（誠實記錄）。產出是 F3 守衛的精確邊界被釘住，以及兩個
+  **完全沒有界限檢查**的產生器最壞情況被算出並守住。
+- 突變 16 個：14 抓到（P1 即 F3 溢位本身，被 sanitizer trap）、**P2/P3 一開始存活**
+  （均勻的 40-byte 行讓 `pos` 只取 40 的倍數，完全碰不到守衛邊界；改成精準落在 473
+  之後被抓到，並從 472 那側夾住）、P4/P12 推導確認為等價突變。
+
+## Phase 31: Session 29 — sys_seek 上界調查、後端契約、VGA、heap 稽核
+Status: complete
+- 先為 Session 26–28 建立 checkpoint commit（未 push）。
+- **SEEK1**：實證調查後**決定不改** `sys_seek` 語義（三個後端已正確、沒有有依據的
+  全域常數、收窄會讓 user/bigseek.c 這個唯一的 F22 端對端證據失效）。完整推導在
+  findings.md。
+- **CONF1**：tests/fs_conformance.h——把「下一個後端要自己重擋」變成三個後端都跑的
+  可執行契約。突變 3/3，其中 **C3 只有契約抓到**（既有 943 檢查全漏），
+  **C1 是既有看門狗抓到的、不是契約**（誠實記錄）。
+- **CAP17**：tests/test_vga.c（4769 檢查），突變 21/21 全由斷言抓到。
+  附帶修正 tests/test.h：失敗訊息逐筆 flush，否則崩潰會吃掉所有失敗訊息。
+- **HEAP1**：heap.c 稽核無缺陷；補四個真實測試缺口（378 → 720 檢查），突變 15/15
+  無等價突變。stub 改為單一 arena 依序配發以貼近真實 PMM。
+
+## Phase 32: Session 30 — ATA PIO 驅動（找到一個 P2）＋ IRQ-driven 可行性評估
+Status: complete
+- 動機：最後一個沒有單元測試的驅動，位於儲存堆疊最底層；QEMU 的模擬 IDE 從不逾時、
+  從不報錯，所以所有失敗路徑都是未執行過的程式碼。
+- **F24（P2）**：逾時的命令讓磁碟停在命令中途，下一個操作因此讀到**上一個 sector**，
+  或**回報寫入成功卻一個位元組都沒寫**。修：`ata_wait_idle()`——等 BSY **並排空滯留的
+  DRQ**，所以是復原而非拒絕。QEMU 裡不可觸發（模擬 IDE 立刻回應），真實硬體會。
+- **CAP18：tests/test_ata.c**（8967 檢查）。有狀態的假 IDE 裝置保留真實握手時序；
+  irq.h 換成計數版本以驗證八條 return path 的 save/restore 配對。
+- 突變 28/28，零等價突變；一開始 8 個存活，其中 A4/A5、A8 暴露的是**測試模型自身**
+  的問題（故障注入太黏、對驅動太寬容）。
+- **ASSESS1**：IRQ-driven ATA 現在不做——阻礙不是測試覆蓋，而是 `diskfs.c` 完全沒有
+  序列化，改成阻塞式需要先替儲存堆疊引入併發模型。
+
+## Phase 33: Session 31 — 描述子表的所有權契約（CAP19）
+Status: complete
+- 動機：Session 30 稽核出的跨檔案不變式——「每個交給新行程的 slot 都必須帶著空的
+  `open_files[]`」——散落在七條釋放路徑上，且一個字都沒寫在程式碼裡。
+- 稽核：七條 `process_release()` 路徑全部正確，**沒有現存缺陷**。
+- **CAP19：tests/test_fdtable.c**（474 檢查）。stub 保有真實參照計數語意，
+  沒有對應 open 的 close 記為 underflow——**只看回傳值的測試對每個突變都會通過**。
+- 突變 25 個：23 抓到、**D14 與 D21 確認為等價突變**（各有推導；D21 的等價性只在
+  全域 cli 模型下成立，模型一改就是真的 UAF）。
+- 一開始 6 個存活，逼出的兩個教訓：對稱狀態讓「搞反」不可觀察；只開兩三個描述子
+  蓋不住迴圈邊界。
+
+## Phase 34: Session 32 — 行程生命週期狀態機（CAP20）
+Status: complete
+- 動機：F1/F7/F17/F19 四個 P0/P1 的發源地，而它們的不變式由多個函式交互維持，
+  沒有直接測試。
+- **CAP20：tests/test_process.c**（351 檢查）。排程器被**模型化**：記錄誰 park、
+  park 在哪個 channel、誰被喚醒、以及「park 了卻沒人叫醒」——後者把「會永遠掛住」
+  變成斷言。teardown 每一步記錄發生順序。
+- **第一優先的隱性相依已釘住**：無 SIGCHLD handler 時 `waitpid` 仍須被喚醒；
+  喚醒須瞄準父行程 task；block 與 broadcast 的 channel 確實不同。
+- 突變 35 個：33 抓到、**P25/P26 為互為備援的等價突變**。P9（一個 thread 看不出
+  差別，要兩個）與 P17（交換順序不改變計數，要記錄序號）是真實缺口。
+- 三個原本只被 timeout 抓到的突變已改為具名斷言。
+- **沒有找到缺陷**。
+- Session 32 follow-up：harness 的 spurious-wake 腳本原本第一輪就讓 child exit，且沒有
+  same-channel decoy，因而無法區分 identity wake 與碰巧的 channel wake；這是**測試模型
+  缺口**，不是核心 defect。修正後 `test_process` 為 369 checks，新增的 lifecycle mutant
+  matrix 為 14/14 killed、`process_release` 不清欄位為等價（下一次 allocate 完整 memset，
+  且 UNUSED slot 不可查）；`test_task` 再以 2/2 mutants 證明 retired kernel stack 不會提前
+  free、也不會漏掉下一個 scheduler safe point 的回收。
+- 驗證完成：production `process.o`／`task.o` 與無 hosted instrumentation 的 baseline
+  位元組相同；`make unit` 24 套件、`make clean && make all -j4`、完整 `make test`
+  （288.1 s，HOST_RC=0）全綠，leak/state counters 回 baseline。
+
+## 目前結論（Session 32）
+F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P1（F7、F10、F11、F20）、
+7 個 P2、6 個 P3、2 個 P4。功能擴充 FEAT1、排程公平性 FAIR1、效能 PERF1/PERF2（已實測）、
+去重 REFACTOR1（已證明 codegen 不變）、強化 HARD1（誠實標示為不可觸發的縱深防禦）。
+測試能力累積到 17 個單元套件 + 4 個 QEMU 端對端目標。
 
 **未完項目與下一輪候選見 `PROJECT_STATE.md` 第 5、6 節**（已知限制 6 項、
 候選工作 A/B/C 三類，附價值與風險評估）。
+
+### Session 33 — CAP21 訊號遞送生命週期
+找到 **F25**（P0，權限提升）：`sys_sigreturn` 把使用者的 EFLAGS 原封不動交給
+`iret`，而 `iret` 在 CPL 0 執行時會**從堆疊映像載入 IOPL**。修法是只放行程式
+自己的算術旗標並強制設回 IF。QEMU 以同一支 `user/sigflags.c` 雙向驗證。
+新增 `tests/test_signal.c`（88 檢查），突變 22/23（S14 為等價突變，附推導）。
+三個原本只被 segfault／timeout 抓到的突變改成具名斷言。
+
+### Session 34 — CAP22 mmap / sbrk 位址空間所有權
+- 審計 `ext_map` reservation 與 demand-paged PTE teardown，新增 `tests/test_vm_lifecycle.c`
+  （36 檢查），並把 fork/exec/slot-reuse metadata 契約擴進 `test_process`（397 檢查）。
+- 一度懷疑 `sys_munmap` 先清 bitmap、再 unmap PTE 的中間會被 sibling 搶到位址；後來
+  發現這是 hosted harness 漏模型化 `int $0x80` interrupt gate 的假競態。現行單核 ABI
+  下 IF 在 syscall 全程為 0，task 只能在 iret 後執行；模型已改為明確驗證該順序，
+  **沒有為正確程式加入冗餘 lock**。
+- 釘住 sbrk 上/下界與 `INT32_MIN`、mmap first-fit/reuse/invalid-free 原子性、fork bitmap
+  複製但 parent/child 隔離、exec 換 image 清 bitmap、以及 syscall-gate 到 iret 的
+  lifecycle 邊界。突變 **7/7 meaningful killed**；「未加 outer lock」在現行 ABI 下
+  為 equivalent/unreachable，誠實排除。
 
 ### 方法論上最值得記住的三件事
 1. **假綠燈**（Phase 5 / M1）：`wsl.exe -- bash -lc "...$?"` 恆回報 0，一整輪的
@@ -373,3 +496,4 @@ F1–F22 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P
 | 突變測試中斷把 mutant 留在工作樹 | 還原改放 `trap ... EXIT`，每輪驗證位元組相同 |
 | 突變 pattern 對不上（CRLF 樹用 `\n`） | Python 字面替換 + LF 正規化後依原行尾寫回 |
 | `bigseek` 誤用 API 導致節點數飄移（Session 25） | `sys_create` 已回傳開啟的 fd；測試改為**斷言**清理成功 |
+| 往返測試沒模型化 handler 的 `ret`，在正確程式上也因錯的理由通過（Session 33） | 突變測試逼出來；補上 `useresp += 4` 才是真的往返 |

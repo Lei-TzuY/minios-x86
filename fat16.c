@@ -421,11 +421,21 @@ static uint32_t fat16_vfs_write(fs_node_t *node, uint32_t offset,
      * so subsequent reads would report a length the cluster chain cannot back.
      * The written bytes are contiguous from `offset`, so offset + written is
      * the true end of file data. When the write fully succeeds this is exactly
-     * `end`, i.e. the normal path is unchanged. */
-    uint32_t written_end = offset + written;
-    if (written_end > rd32((uint32_t)(entry - fs.img) + 28)) {
-        wr32((uint32_t)(entry - fs.img) + 28, written_end);
-        node->length = written_end;
+     * `end`, i.e. the normal path is unchanged.
+     *
+     * That identity only holds when something WAS written. With written == 0 --
+     * a write starting past the last cluster the chain could be extended to --
+     * offset + written is merely the offset the caller asked for, and nothing
+     * marks the end of anything. Recording it grew the file to the seek offset
+     * without storing a byte, so the file then claimed a length its own chain
+     * could not back and reads returned the tail of the last real cluster as
+     * if it were file data. A write that stores nothing must change nothing. */
+    if (written > 0) {
+        uint32_t written_end = offset + written;
+        if (written_end > rd32((uint32_t)(entry - fs.img) + 28)) {
+            wr32((uint32_t)(entry - fs.img) + 28, written_end);
+            node->length = written_end;
+        }
     }
     return written;
 }

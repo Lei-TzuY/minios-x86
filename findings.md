@@ -531,6 +531,60 @@ RUNNING，等它的人永遠阻塞（F17 誠實記錄的殘留限制，本輪根
   `[bigseek refused]` → `[bigseek survived]`，能跑到最後一行就證明核心還活著、
   還在排程它。
 
+### F23 [P3][正確性] FAT16 的寫入即使「一個位元組都沒寫進去」也照樣把檔案長度
+推到 seek 的位置 —— 檔案於是宣稱一段自己的叢集鏈根本背不起來的長度
+- 檔案: fat16.c `fat16_vfs_write`
+- **問題**：F9 的修法是「只記錄真正寫進去的位元組」：
+  ```c
+  uint32_t written_end = offset + written;
+  if (written_end > <目前長度>) { 更新目錄項與 node->length; }
+  ```
+  當時的註解寫著「寫入的位元組從 offset 起連續，所以 offset + written 就是資料
+  的真正結尾」——**這個等式只有在 written > 0 時才成立**。當 `written == 0`
+  （寫入的起點落在叢集鏈根本延伸不到的地方，也就是磁碟空間用盡時），
+  `offset + written` 只是呼叫者要求的那個 offset，它不標示任何東西的結尾；
+  把它記下來等於**憑空把檔案長大到 seek 的位置，卻一個位元組都沒存**。
+- **後果（不誇大）**：檔案之後宣稱一個自己的叢集鏈背不起來的長度。`stat` 報出
+  假的大小；讀取會把最後一個真實叢集裡 EOF 之後的內容當成檔案資料交出去。
+  那些位元組在配置時已被 `fat16_alloc_cluster` 清零過，**所以不會洩漏別的檔案
+  的資料**——這是正確性問題，不是資訊洩漏。
+- **可觸發性**：/fat 這個磁區只有 32 KB，而 `sys_seek` 允許 offset 到
+  0x7FFFFFFF；把磁區寫滿、再對一個既有檔案 seek 過尾端寫入即可，全部都是 ring-3
+  的普通操作。與 F22 是同一種形狀（seek 過尾端再寫入），只是打在另一個檔案系統上。
+- 修法：用 `if (written > 0)` 包住長度更新——什麼都沒寫，就什麼都不改。
+- **為什麼 F9 那輪沒抓到**：F9 的測試（tests/test_fat16.c「write past end of
+  volume」）測的是 `0 < written < size` 的部分成功情形，`written == 0` 這個邊界
+  從來沒被測過。修一個 bug 時只測自己當時想到的那條路徑，隔壁那條就會留下來
+  ——與 CAP13 的 R7（兩段清零互為備援）同型的教訓。
+- 狀態: **已修＋已驗證**。單元測試 tests/test_fat16.c「write that stores
+  nothing」：把磁區寫滿 → 對只有一個叢集的檔案 seek 到 4096 再寫 → 寫入必須回 0、
+  `node->length` 必須還是 4、**重新 finddir 出來的目錄項也必須是 4**（只在 RAM
+  裡修對、沒寫回目錄項的話下次查找就會錯）、讀回必須恰好只有 4 bytes。
+  突變 N1（把 `written > 0` 拿掉，也就是修復前的程式碼）**只被這個新測試殺掉**，
+  N2（退回 F9 的 bug）被舊的「write past end of volume」殺掉，N3（拿掉「只增不減」
+  比較）被「partial overwrite」殺掉——三個各由不同測試抓到，證明新測試補上的是
+  先前確實沒有的鑑別力。端對端 user/fatgrow.c 在 QEMU 中從 ring 3 實際跑完整個
+  序列，並在結束前 unlink 兩個檔案把磁區還原給後面的 FAT 斷言。
+
+### HARD1 [強化] resolve_fs 不檢查「中途的組件必須是目錄」，與姊妹函式
+resolve_parent_fs 不一致
+- 檔案: fs.c `resolve_fs`
+- **觀察**：`resolve_parent_fs` 每往下一層都檢查 `parent->flags != FS_DIRECTORY`，
+  但 `resolve_fs` 沒有。它靠的是「檔案節點的 finddir 是 NULL，所以下一次查找自然
+  回 NULL」——也就是說，**這條正確性變成每個後端的性質，而不是這個解析器自己的
+  性質**。而 procfs 的 `proc_finddir` 完全忽略傳進來的 node 參數（`(void)node`），
+  正是那種「不看自己是誰」的後端。
+- **誠實評估：目前不可觸發**。所有後端的檔案節點 finddir 都是 NULL，這條路徑走不
+  到。這不是一個被修掉的 bug，是縱深防禦。之所以值得補：同一個路徑在兩個進入點會
+  有不同意義（`resolve_fs("/odd/deep")` 找得到，`unlink_fs("/odd/deep")` 被拒），
+  而這種「兩個解析器對同一個字串意見不同」正是 F8 那類錯誤的溫床。
+- 修法：在 resolve_fs 的「還有路徑要走」分支加上與 resolve_parent_fs 完全相同的
+  `node->flags != FS_DIRECTORY` 檢查。
+- 狀態: **已加＋已驗證**。tests/test_fs.c 用一個「flags 是 FS_FILE 卻帶著完整目錄
+  操作」的 mock 節點來隔離這條檢查——真實後端造不出這種節點，所以只有 mock 能證明
+  擋下來的是 fs.c 自己而不是後端。突變 M8（把檢查拿掉）被抓到。`make test` 全綠，
+  procfs / fat16 / diskfs 的巢狀路徑都不受影響。
+
 ## 驗證能力建設（Session 10）
 
 ### CAP1 補上 GRUB/ISO 開機路徑的測試（原本完全沒被驗證過）
@@ -959,6 +1013,506 @@ RUNNING，等它的人永遠阻塞（F17 誠實記錄的殘留限制，本輪根
     （只跨越長度，走重用分支根本不配置）；節點表測試原本斷言絕對節點數，但
     node_count 是 file-static 且前面的測試刻意留下檔案。都已改成測真正的性質。
 
+### CAP14 VFS 核心單元測試（fs.c 的兩個嚴格解析器與六個 dispatch wrapper）
+- 檔案: tests/test_fs.c（277 檢查）、tests/test_fs_path.c（+2 檢查：輸出緩衝區
+  金絲雀）、Makefile
+- **為什麼選它**：每一個帶路徑的系統呼叫都會經過 fs.c 的兩個函式——
+  `resolve_fs()`（找到這個物件）與 `resolve_parent_fs()`（找到擁有這個名字的
+  目錄）。在這之前只有*正規化器* `vfs_resolve_path()` 有單元測試
+  （tests/test_fs_path.c，34 檢查，是所有套件裡最薄的），而**消費它輸出的那兩個
+  嚴格解析器一個測試都沒有**，只被 shell 剛好打出來的路徑順帶掃到。F8 就住在這裡。
+- **三個設計決定**：
+  - **用 mock 檔案系統，不連結 ramfs.c**。連 ramfs 會變成主要在測 ramfs 自己的
+    私有解析器；更糟的是 ramfs 會自己驗證名稱，**後端太嚴格就分不出是哪一層擋
+    下來的**（CAP10 的教訓）。這個 mock 刻意比任何真實後端寬鬆。
+  - **樹裡放進「名字就叫 `.`、`..` 和空字串」的節點**。如果 fs.c 哪天真的把這種
+    組件傳下去，mock 會回答成功、測試就會失敗。沒有這些節點的話，查找是因為
+    「剛好沒東西符合」而回 NULL，少掉一道檢查也看不出來。
+  - **斷言「被派送到哪個節點、帶著什麼名字」，而不只是成功或失敗**。路徑解析器
+    壞掉的樣子不是當機，是**安靜地回答錯的物件**——F8 正是如此。突變 M13
+    （名字切得對、但交給錯的目錄）造成 23 個檢查失敗，就是這個設計買到的東西。
+- **覆蓋**：六個 dispatch wrapper 的 NULL 安全與參數/回傳值原樣轉交；resolve_fs
+  的根/巢狀/相對/缺失/中途非目錄、`.`/`..`/`//`/結尾斜線、長度與組件邊界；
+  resolve_parent_fs 經由 create/unlink/mkdir/rmdir 四個進入點的派送目標與名字、
+  各種拒絕情形、後端缺少操作指標時的乾淨失敗、名字緩衝區的終止（0xAA 毒化偵測）；
+  以及**正規化器與解析器的一致性語料庫**（12 組 (cwd, path) 都指向同一個節點，
+  斷言 vfs_resolve_path 接受的東西解析器也一定接受，且解析到的是呼叫者要的那個
+  節點——這正是 F8 那類「悄悄縮短成祖先目錄」用回傳字串看不出來的部分）。
+- **突變測試 22 個，最終 22/22 全抓到**，其中 4 個一開始存活，逼出 3 個真實缺口
+  與 1 個測試設計不足：
+  - **M6（parse_component 接受空組件）存活**：因為 mock 裡沒有名字是空字串的
+    節點，查找失敗只是「剛好沒符合的」。加進一個名為 `""` 的目錄（底下還有小孩）
+    並改用 `//x` 這個唯一能讓空組件後面還有路徑可走的拼法後才被抓到。
+  - **M9（resolve_parent_fs 不檢查父節點是不是目錄）存活**：我原本的案例是
+    `/a/f/x`，而 `f` 是個 function pointer 全 NULL 的檔案，於是**是 `!parent->create`
+    先擋下來的**，被測的那條檢查根本沒被隔離。加進「FS_FILE 卻帶著完整目錄操作」
+    的 mock 節點後才有鑑別力——與 CAP12 的 E3 同型（被另一條檢查遮蔽）。
+  - **M12（path_push 的界限放寬一個位元組）存活**：因為函式尾端還有第二道長度
+    檢查，**回傳值仍然是 -1**，但那一個位元組**已經寫出去了**。兩道檢查互為備援
+    對核心是好事，對測試是壞事。解法是在輸出緩衝區後面放金絲雀並斷言它沒被動過
+    ——這是真正的契約（`out` 只有 FS_MAX_PATH 個位元組），不是為了殺突變而寫的
+    假測試。
+  - **M10（resolve_parent_fs 少檢查一半的空組件條件）一度被判為等價突變**：推導
+    確實成立——它漏掉的情形後面一定會被 parse_component 的空組件檢查攔下，回傳值
+    完全相同。但**它們的副作用不同**：突變版會多做一次 finddir 才失敗。改成斷言
+    「畸形路徑在哪裡停止走訪」（`/a//b` 是 0 次查找、`/a/b//c` 是 1 次）之後被
+    抓到。這個斷言本身是有意義的性質：在磁碟後端上一次查找就是一次關中斷的
+    ATA PIO，早點拒絕就是便宜地拒絕。
+- **一個我算錯、程式碼是對的案例**：我原以為 `parse_component` 的長度上限會擋掉
+  127 字元的組件，實際上它允許到 127（正好塞滿 `fs_node_t::name` 的 128 bytes）。
+  真正的邊界是：**絕對路徑最多只能承載 126 字元的組件**（再多就超過 FS_MAX_PATH），
+  但**相對路徑可以到 127**——而 exec 解析程式名走的正是相對路徑那條。測試改成
+  釘住這個真實邊界，並誠實記錄 parse_component 自己那道長度守衛因為路徑長度檢查
+  永遠先發而**不可觸發**（縱深防禦，不硬寫測試去假裝它會發生）。
+
+### CAP15 鍵盤驅動單元測試（環狀緩衝、修飾鍵狀態機、Ctrl+C 派送）
+- 檔案: tests/test_kb.c（1675 檢查）、Makefile、.gitignore
+- **為什麼選它**：kb.c 全是純邏輯，而且一個測試都沒有。QEMU 那套只走一條很窄的
+  車道——`send_keys` 打的是短短幾個字、馬上被消費掉，所以**緩衝區從來不會接近滿、
+  寫入索引從來不會繞過 128、也從來沒有任何一個按鍵被丟掉**。有意思的狀態剛好就是
+  shell session 永遠碰不到的那些。
+- **兩個真正值得釘住的性質**：
+  - 環狀緩衝是核心裡**唯一一處中斷處理常式與 task 同時碰同一個結構**的地方。它的
+    「滿」判斷犧牲一格（`next == read` 是滿而不是空），這裡差一格的後果不是當機，
+    是**寫入者套圈讀取者**、把字元以錯誤的順序交出去。
+  - Ctrl+C 要在「可捕捉的 SIGINT」與「強制 kill」之間二選一，而這個決定是在中斷
+    處理常式裡、對著驅動自己記住的那個 pid 做的。**送錯訊號給錯的行程，從 shell
+    看起來完全一樣**（程式都停了），端對端測試分辨不出來。
+- **測試接線的兩個決定**：
+  - 直接 `#include "../kb.c"`（與 test_rtc 相同）以取得 static 的環狀索引與修飾鍵
+    旗標。
+  - **用 `#define IO_H` 把 io.h 整個換掉**，自備 `inb`：HOSTED_TEST 下的 `inb` 永遠
+    回 0，對一個「輸入就是從埠讀進來」的驅動來說等於完全不能測。這樣做**沒有動到
+    任何核心標頭**，所以核心 codegen 不可能受影響——比為了可測性去改 io.h 更保守。
+  - `task_exit` 是 noreturn，用 `setjmp`/`longjmp` 接住，才能真的測到「被 kill 的
+    task 從等待迴圈裡離開」（F19 的性質）而不是假設它會。
+- **結論：kb.c 本身沒有找到 bug**。誠實記錄——這一輪的產出是「把一個沒人檢查過的
+  模組變成有 18 個突變證明過的測試在守」，而不是修好了什麼。
+- **突變測試 18 個，18/18 全抓到**（其中 3 個是以**逾時**被抓到的：未繞回的索引、
+  少了 count 檢查的傳輸迴圈，這些突變的表現是**掛住**而不是答錯，所以突變腳本
+  對每次執行都套上 `timeout 20s`，讓「掛住」被記為 KILLED 而不是把腳本卡死）。
+  - **K17 一開始存活，逼出一個真實缺口**：`if (!buffer || count == 0) return 0;`
+    把 `count == 0` 拿掉之後我的測試還是綠的——因為那個案例**緩衝區裡剛好已經有
+    一個字元**，於是傳輸迴圈自己的 `bytes_read < count` 讓兩邊都回 0，參數檢查看
+    起來是多餘的。改成**對空緩衝區**呼叫才看得出差別：正確的程式立刻回 0，突變版
+    會為了一個它根本不會消費的字元把呼叫者**永遠停住**（`read(fd, buf, 0)` 掛死）。
+    這是本專案第三次踩到同一個形狀——**我的案例被另一個條件先滿足，被測的那條根本
+    沒被隔離**（CAP10 的 stub、CAP12 的 E3、CAP14 的 M9/M12）。
+- **一個「不是 bug、但沒人檢查過」的行為，已轉成有註解的測試**：驅動**完全不處理
+  0xE0 延伸掃描碼前綴**。0xE0 的 bit 7 是 1，所以它掉進「按鍵放開」那條分支，低七
+  位 0x60 不對應任何修飾鍵而被丟棄，**接在後面的那個位元組就被當成沒有前綴一樣
+  處理**。逐一驗過每個後果都是良性的：右 Ctrl（0xE0 0x1D）因為落在與左 Ctrl 相同的
+  索引而**照樣能用**（連放開都對）；方向鍵/Home/End/Delete 對應到表裡的 0 而被安靜
+  丟掉，不會在 shell 正在讀的那一行裡留下雜訊；小鍵盤 Enter 與 `/` 則剛好落在等價
+  主鍵盤鍵的索引上，是正確的字元。**這是意外而不是設計**，所以把它寫成測試並註明
+  推導過程——將來若有人「順手把 0xE0 處理加上去」，右 Ctrl 會立刻壞掉，而突變 K18
+  （正是那個看起來很合理的改法）就是為此加的，實測被抓到。
+- **另一個被釘住的判斷**：Ctrl+C 的比對讀的是**未加 shift 的表**，所以 Ctrl+Shift+C
+  也是中斷。這是正確的讀法（重要的是**哪個實體鍵**跟 Ctrl 一起按，不是它會產生哪個
+  字形），寫成測試以免有人改成比對 shift 表、讓 Ctrl+Shift+C 變成往命令列打一個
+  大寫 C。
+
+### CAP16 procfs 單元測試（F3 的守衛第一次被執行；兩個完全沒有守衛的產生器）
+- 檔案: tests/test_procfs.c（183 檢查）、Makefile、.gitignore
+- **為什麼選它**：**F3 是這裡的緩衝區溢位**，修法是在 /proc/processes 的產生器加一個
+  界限檢查——而**那個檢查從來沒有執行過一次**。它只在每行變長時才會發火，而行要變長
+  需要 pid 到十位數（`next_pid` 永不重置）或行程名塞滿欄位，兩者在「開機、打字、
+  結束」的 QEMU 執行裡都不會發生。**一個唯一的守衛從沒跑過的修復，等於沒有人測過。**
+- **另外兩個產生器根本沒有任何界限檢查**。它們今天安全純粹是因為欄位剛好夠窄
+  （/proc/self/status 最壞算出來是 75 bytes，緩衝區 512）。那是「目前欄位寬度」的
+  事實，不是任何程式碼在維護的性質——把 PROCESS_NAME_MAX 改大，procfs.c 不會有任何
+  意見。**這些測試就是那個會有意見的東西。**
+- **緩衝區不變式用結構化的方式檢查，而不是靠肉眼**：每次產生前把 `gen_buf` 灌毒
+  （0x7F），產生後**從回報長度到緩衝區結尾的每個位元組都必須還是毒**。這證明產生器
+  「剛好寫了它宣稱的那些位元組、一個都不多」——只斷言回傳值會漏掉寫過頭的情況。
+  另外掛上 `-fsanitize=bounds`（trap 模式，沿用 CAP11 的手法）當第二道獨立的網。
+- **突變測試 16 個，14 個抓到，2 個確認為等價突變**：
+  - **P1（把 F3 的守衛整個拿掉，也就是原始的 F3 溢位）被 sanitizer 直接 trap**
+    （rc=132）。這一項本身就是這輪的價值：**F3 若被重新引入，現在會當場爆掉**。
+  - **P2 與 P3 一開始存活，逼出一個真實且我沒想到的缺口**：截斷測試讓每行都剛好
+    40 bytes，於是 `pos` 只會取到 40 的倍數，**守衛的判斷在每個倍數附近的一整段
+    閾值裡都相同**——把界限放寬一個位元組（P2）、或把名稱欄位少預留七個（P3），
+    兩個都是真實溢位，卻**沒有改變任何一條斷言**。解法是刻意讓 `pos` 精準落在
+    邊界上：11 行滿寬（440）＋ 1 行 33 bytes ＝ **473**，而 473 正是守衛必須仍然
+    拒絕的最大值（473 + 40 = 513，比 512 多一）。補上這個案例後兩個突變都被
+    sanitizer 抓到。**教訓：均勻的測試資料看起來覆蓋得很好，卻可能完全碰不到
+    被測的那個邊界。**
+  - 同一個測試也從另一側夾住邊界（第 12 行改成 32 bytes → `pos` = 472 → 第 13 行
+    塞得下、總長剛好 512），這樣「一律拒絕」的錯誤修法不會通過。
+  - **P4（`break` 改成 `continue`）確認為等價突變**：守衛的條件只看 `pos`，而略過
+    一個行程不會改變 `pos`，所以它一旦成立就對其後每一輪都成立——產生的位元組完全
+    相同，差別只有純檢查的迴圈次數（上限 16），沒有可觀察的副作用。誠實記錄。
+  - **P12（`offset >= len` 改成 `offset > len`）確認為等價突變**：`offset == len`
+    時突變版往下走，但 `size > len - offset` 立刻把 size 夾成 0、`memcpy` 0 bytes
+    是 no-op，回傳同樣是 0。原本的提早返回是刻意的縱深防禦（也避免算出越界指標），
+    與 ramfs 的 R6 同型。誠實記錄，不硬寫測試去殺它。
+- **一個我算錯、程式碼是對的案例**（本專案的慣例是把這些記下來）：我第一版把截斷後的
+  長度斷言成 `lines * 33`，實際是 480 = 12 × **40**。每行的最壞寬度就是守衛預留的
+  那 40 bytes（10+1+10+1+1+1+15+1），而 512 / 40 = 12.8 → 12 行。測試改成釘住
+  `lines == 12`、`len == 480` 這兩個精確值，這樣緩衝區大小或預留量一改就會被發現。
+
+### SEEK1 [調查／決定不改] `sys_seek` 的 offset 上界該不該收窄
+- 檔案: syscall.c `sys_seek`（**未改動**）、tests/fs_conformance.h（改採的替代方案）
+- **問題陳述**：F22（P0）與 F23 都是「seek 過檔尾 → 小量寫入」進來的。`sys_seek`
+  接受任何 ≤ 0x7FFFFFFF 的 offset，接下來會發生什麼**完全取決於收到它的那個後端**。
+  PROJECT_STATE 第 6 節 C 類把「把上界收到合理範圍」列為「消除整類問題」的候選，
+  並在兩次命中後標記為應提高優先度。本輪對它做了實證調查。
+- **實測到的三件事**：
+  1. **三個後端目前都正確**。新建的一致性契約（見 CONF1）對 RAMFS/DiskFS/FAT16
+     各打了 0x7FFFFFFF、0x80000000、0xC0000000、0xFFFFFFFE 等 offset 與一個會讓
+     `offset + size` 繞回的組合，全部通過：都回傳 0、都不改長度、都不改內容。
+     **沒有現存的缺陷需要靠 syscall 上界來擋。**
+  2. **沒有一個有依據的常數可放在 syscall 邊界**。各後端真正的上限相差四個數量級：
+     DiskFS 每個檔案 `DISKFS_FILE_SECTORS * 512` = **2048 bytes**；FAT16 受限於
+     32 KB 的磁區；RAMFS 則是經由 `pmm_alloc_blocks` 受限於**實體記憶體**，
+     沒有編譯期常數。`sys_seek` 在它那一層看不出 fd 屬於哪個後端，所以唯一能取的
+     全域上界是「最大的那個」，也就是實體記憶體——一個執行期才知道、而且對 DiskFS
+     來說寬鬆了一千倍的數字。**上限的知識屬於後端，不屬於 syscall。**
+  3. **收窄會讓 user/bigseek.c 失效**。任何低於 2^31 的上界都會讓那支端對端程式
+     無法再從 ring 3 發動 F22 的攻擊——而它目前是**唯一**證明「ring 3 → syscall →
+     ramfs 整條路徑撐得住」的產物（修復前它會讓 QEMU 直接凍結）。用一個活著的、
+     證明過的回歸測試，去換一個對假想中未來後端的預防性守衛，是壞交易。
+- **決定：不改 `sys_seek` 的語義**。理由如上，且現行行為（seek 成功、寫入乾淨失敗）
+  比「seek 就失敗」更貼近 POSIX（允許 seek 過檔尾）。
+- **但殘留風險確實存在**，就是 PROJECT_STATE 寫的那句「下一個後端還是得自己重擋
+  一次」。本輪改用 **CONF1** 處理它：把那句散文變成**可執行的契約**，三個後端都跑，
+  新後端只要接上就自動被檢查。這比一個武斷的常數更直接命中真正的風險。
+- **重新評估的優先度**：C 類此項由「應提高」改為 **已處理（以契約取代上界）**。
+  若將來出現一個 offset 上限已知且統一的設計（例如所有後端共用一個 max file size
+  常數），可再重啟討論。
+
+### CONF1 檔案系統後端一致性契約（把「下一個後端要自己重擋」變成可執行的檢查）
+- 檔案: tests/fs_conformance.h（新增）、tests/test_ramfs.c、tests/test_diskfs.c、
+  tests/test_fat16.c、Makefile
+- **動機**：F22 與 F23 是同一種形狀打在兩個不同後端上。兩個都修好了、也各有單元
+  測試，但**沒有任何地方寫下這個「要求」本身**，所以第三個後端得自己重新發現一次。
+- **契約內容**（給定一個已有內容的檔案，對一個後端不可能觸及的位置寫入必須）：
+  1. **要回來**。系統呼叫全程關中斷（`int 0x80` 是 interrupt gate），不會終止的
+     迴圈不是「慢」，是整台機器停住——這是 F22。由**看門狗**而非斷言來守，因為
+     回歸的症狀是掛住而不是答錯。
+  2. 一個位元組都不存（回傳 0）。
+  3. **檔案完全不變**——長度與內容都是。存了 0 個位元組卻把檔案長到 seek 的位置，
+     就是 F23。
+  4. 用不可能的 offset 讀取要安全地回 EOF。
+- **實測結果：三個後端全部通過**，這也是 SEEK1 判斷的依據。
+- **突變測試 3 個（各還原一個真實的、出貨過的 bug），3/3 抓到——但歸因必須分清楚**：
+  - **C3（把 DiskFS 的界限改寫成會繞回的加法）只有契約抓到**：6 個失敗全部來自
+    契約，既有的 **943 個 diskfs 檢查一個都沒抓到**。這是契約價值最清楚的證明——
+    而且那正是 PROJECT_STATE 第 4 節「界限檢查寫成不會溢位的減法」所警告的形狀。
+    突變版在 offset 0x7FFFFFFF 上**宣稱寫了 4 個位元組**、把長度變成 256。
+  - **C2（還原 F23）由既有測試（4 個失敗）與契約（9 個）雙重抓到**，契約獨立有效。
+  - **C1（還原 F22）是被 test_ramfs 既有的 CAP13 看門狗抓到的，不是契約**：
+    `test_huge_offset_terminates` 先掛住，契約根本沒跑到。**誠實記錄：契約在 RAMFS
+    上未被獨立證明**——它在那裡與既有測試重疊，這本來就是預期的（契約正是從 RAMFS
+    的教訓推導出來的）。
+- **接線上踩到的兩個坑**（都是測試之間共享靜態狀態）：`test_node_table_limit` 會把
+  RAMFS 節點表填滿，之後任何建檔都失敗；`test_out_of_memory_is_clean` 會把配置器
+  stub 留在拒絕狀態。契約改為自己重設配置器上限，並排在填表測試之前。
+
+### CAP17 VGA 文字主控台單元測試（捲動、環繞、退格、十進位格式化）
+- 檔案: tests/test_vga.c（4769 檢查）、tests/test.h（失敗時 flush）、Makefile、
+  .gitignore
+- **為什麼它一直沒被測到**：核心印出的每個字都經過 `terminal_putchar`，而 QEMU 那套
+  的數百條斷言全是對它輸出的 grep——但那些 grep 讀的是 **port 0xE9 的位元組流，而
+  putchar 在做任何游標運算之前就先把字送出去了**。所以捲動、環繞、退格的錯誤對
+  端對端測試**完全不可見**：位元組照樣依序抵達，畫面卻是亂的。
+- **兩個替換，都不動核心標頭**（CAP15 的手法）：`#define IO_H` 換掉 io.h 以捕捉
+  `outb`（順帶讓 port 0xE9 這條 QEMU 套件真正消費的介面有自己的斷言）；
+  `terminal_buffer` 是全域變數，直接指向測試的陣列。唯一無法在 host 執行的是
+  `terminal_initialize()`，因為它的函式主體就是 0xB8000 這個硬體位址的指派。
+- **畫面兩端都放護欄**：只在後面放不夠——捲動會讀它要寫的那一列的**上一列**，所以
+  迴圈早一列開始就是往畫面**前面**讀。畫面放在陣列中間、前後都有護欄之後，那個
+  突變（V6）從「靠 segfault 被發現」變成**由斷言指名道姓**。
+- **`tests/test.h` 的一個真正修正**：失敗訊息現在逐筆 `fflush`。stdout 在管線裡是
+  區塊緩衝的（`make unit` 與所有突變腳本都是這樣跑的），所以**一個先報了失敗、隨後
+  才崩潰的測試會把所有失敗訊息一起丟掉**，只剩下崩潰。那會把「斷言抓到了」變成
+  「不知道哪裡出事」——正是突變測試最需要分清楚的那條界線。加上 flush 之後，V1 與
+  V10 的歸因從「rc=139、0 個失敗」變成「rc=139，但先有 3 / 77 個具名斷言失敗」。
+- **突變測試 21 個，21/21 全抓到，且全部由斷言抓到**（崩潰只是後果，不是偵測手段）。
+  一個 SKIPPED 的（V1 的樣式在 `terminal_putentryat` 與 `terminal_clear` 裡各出現
+  一次）已改成含函式簽名的唯一樣式後補測。
+- **順帶釘住的既有行為**：`'\t'` **沒有**任何特殊處理，被當成普通字元放進畫面並前進
+  一格（鍵盤確實會送出 `\t`，所以這條路徑可達）；`terminal_write_dec_pad` 在數字
+  位數多於欄寬時丟掉高位以維持欄寬（日期格式要的就是這個）。
+
+### HEAP1 heap.c 的合併／碎片化／邊界稽核（沒找到缺陷，但補上四個真實測試缺口）
+- 檔案: tests/test_heap.c（378 → 720 檢查）、heap.h／heap.c（新增
+  `heap_first_block()` 供測試走訪自由串列）
+- **稽核結論：沒有可觸發的缺陷**。逐項推導：分割門檻
+  `> size + sizeof(heap_block_t) + 4` 保證剩餘區塊的 payload > 4；`heap_grow` 的
+  溢位守衛寫成不會繞回的減法；合併迴圈在合併後**停留原地**，所以三個以上相鄰的
+  自由區塊會連鎖合併；分割時把新區塊插在 `best_fit` 之後，維持位址排序。
+  `kmalloc` 對接近 SIZE_MAX 的請求會先被 `heap_grow` 的守衛擋掉，所以分割算式的
+  溢位路徑到不了。
+- **但突變測試找出四個真實的測試缺口**（15 個突變，一開始只殺掉 11）：
+  - **H14（拿掉 4-byte 對齊）存活**：既有測試用的每個大小都已經是 4 的倍數，所以
+    對齊看起來是多餘的。補上 5/6/7 bytes 的請求與 payload 位址對齊的斷言後抓到。
+  - **H4（分割剩餘量少算一個 header）存活**：我原本的「不得越過下一個區塊」檢查在
+    **剩餘區塊剛好是串列最後一個時被跳過**——而那正是它沒有鄰居可撞、宣稱錯誤卻還
+    不致命的情形。改成直接斷言剩餘量的精確算式後抓到。
+  - **H7（合併不檢查實體相鄰）存活兩輪**，逼出兩個更深的問題：
+    第一輪是我的測試裡沒有「在串列中相鄰、在記憶體中不相鄰」的自由區塊對；
+    第二輪是我寫的 `growth_only_by_adjacency()` **本身有缺陷**——連鎖合併時只有
+    吸收方的 header 會更新，被吸收的區塊保留舊的 size，所以只驗第一個鄰居就通過了。
+    改成「成長必須正好等於後續一串實體連續區塊的總和」，並加上一條與狀態無關的
+    直接斷言（stub 記錄它刻意跳過的位址範圍，任何區塊都不得涵蓋它）後抓到。
+  - **H11（`insert_block` 永遠插在頭部）存活**：它不會讓任何配置失敗，只是讓
+    **跨成長邊界的合併失效**，於是每次成長都碎片化一次。要測到它必須先讓 stub 誠實
+    ——見下。
+- **stub 的一個實質改進**：原本用 `posix_memalign`，兩次成長的相對位址由 host 配置器
+  決定，於是**兩個性質變得不可測**：連續的新區域會不會與舊的合併、自由串列有沒有
+  維持位址排序。真實的 `pmm_alloc_blocks` 是**連續配發 frame** 的，所以「新區域緊接
+  在舊區域之後」在核心裡是常態而非例外。改成從單一 arena 依序配發（並保留一個
+  「刻意留洞」的開關給需要不相鄰區域的那個測試），H11 才變得可觀測。
+- **最終 15/15，沒有等價突變**——四個存活的全部是測試缺口，沒有一個是「程式碼本來
+  就等價」。
+
+### F24 [P2][正確性/資料完整性] 逾時的 ATA 命令會把資料交給**下一個**操作 ——
+讀到別的 sector、或回報「寫入成功」但一個位元組都沒寫
+- 檔案: ata.c `ata_read_sector` / `ata_write_sector` / `ata_install`
+- **問題**：輪詢逾時只讓**驅動這一側**放棄，磁碟仍在執行那個命令。硬體在 BSY 期間
+  會**忽略**對 command block 的寫入，所以下一個操作把 task file 寫進去等於寫進虛空，
+  接著 `ata_wait_data()` 看到的是**前一個命令**拉起來的 DRQ —— 這兩者在狀態暫存器上
+  完全無法區分，於是接下來的傳輸搬的是錯的 sector。
+- **實測到的兩個症狀**（單元測試在修復前的實際輸出）：
+  - **讀取**：`ata_read_sector(9, buf)` **回傳 1**，但 buf 裡是 sector 5 的內容
+    （`35` = 5×7+0，應為 `63` = 9×7+0）。
+  - **寫入（更糟）**：`ata_write_sector(7, buf)` **回傳 1**，而裝置端的
+    `last_write_lba` 仍是 sentinel —— **資料一個位元組都沒到磁碟**，同時把前一個命令
+    待傳的 sector 悄悄丟棄。DiskFS 正是用這個回傳值判斷它的 metadata 是否一致。
+- **為什麼 DiskFS 擋不住**：`diskfs_mount` 對 **superblock** 有 magic + checksum
+  驗證（CAP4 的 16 個竄改案例都在測它），但**目錄與檔案資料的 sector 讀取沒有任何
+  校驗**。錯的 sector 會被直接當成目錄內容或檔案內容採用。
+- **可觸發性（誠實界定）**：需要一次輪詢逾時。QEMU 的模擬 IDE 立刻回應，
+  `ATA_POLL_LIMIT` 是 100000 次，所以**在 QEMU 裡不會發生**；真實硬體上的慢碟、
+  重試中的壞軌、或 spin-up 中的磁碟則會。這是「這個驅動被寫成要能跑真硬體」下的
+  真實缺陷，不是理論問題——但也不誇大成 QEMU 裡可觸發。
+- 修法：新增 `ata_wait_idle()`，在**每個命令之前**確保磁碟真的閒置：
+  1. 等 BSY 清除（有界）。
+  2. **只等 BSY 不夠**：一個剛做完「被放棄的讀取」的磁碟，BSY 是清的，但 DRQ 還立著、
+     手上抓著一個 sector 等人來拿。把它**排空**（讀滿 256 words）才算完成握手。
+     這也是為什麼修法是**復原**而不只是拒絕。
+  3. 排空後 DRQ 仍在（data-out 階段，讀取埠不會推進任何東西）就放棄。
+- **兩處呼叫位置不同，理由不同**（程式碼中有註解）：`ata_install` 放在選碟**之後**
+  （狀態暫存器反映的是「當前選定的碟」，探測時還不知道那是不是我們要的）；
+  read/write 放在選碟**之前**（drive 暫存器同時帶著 LBA 的高四位，而它在 BSY 期間的
+  寫入會被忽略，先清場才能讓位址真的寫進去）。
+- 狀態: **已修＋已驗證**。tests/test_ata.c 有三個測試釘住它：
+  「a timed-out command must not answer the next one」（安全性：回傳成功就必須是
+  被要求的那個 sector）、「must not misdirect the next write」、
+  「the driver recovers once the drive responds again」（liveness：下一個請求就要能用，
+  否則一次慢 seek 就讓磁碟永久停用）。突變 A7（修復前的程式碼）、A8（只等 BSY 不排空
+  的半套修法）、A9（只拒絕不復原）、A10（少排空一個 word）全部被抓到。
+
+### CAP18 ATA PIO 驅動單元測試（最後一個沒有測試的驅動；用有狀態的假 IDE 裝置）
+- 檔案: tests/test_ata.c（8967 檢查）、Makefile、.gitignore
+- **為什麼它最需要**：它是儲存堆疊的最底層，DiskFS 在它回傳的位元組上蓋檔案系統，
+  而 QEMU 那套只走「一切順利」那一條路。模擬 IDE 控制器每個命令都立刻回應、從不報錯，
+  所以在三百條 QEMU 斷言裡**沒有一次輪詢逾時、沒有一次看到 ERR、沒有一個命令是下給
+  還在忙的磁碟的**。這個檔案裡每一條失敗路徑都是從未被執行過的程式碼。
+- **假裝置是狀態機，不是查表**。保留真實時序是重點，因為有意思的 bug 在握手而不在資料：
+  - 命令拉起 BSY，並且**只在指定次數的狀態讀取之後**才清除；把那個次數設成大於
+    `ATA_POLL_LIMIT` 就是「慢碟」與「逾時」的模型。
+  - DRQ 在資料就緒時拉起，**恰好 256 words 之後自己落下**。多讀少讀都會讓裝置失步，
+    而裝置會記錄下來。
+  - **BSY 或 DRQ 期間對 command block 的寫入一律被忽略**。規格說那是未定義行為；
+    模型刻意選「忽略」這個保守解釋，理由寫在程式碼裡：**測試模型不該替驅動挑一個
+    剛好方便的解釋，靠硬體寬容才能運作的驅動是靠運氣運作的**。
+  - 讀取失敗時 **ERR 與 DRQ 會同時拉起**（真實磁碟就是這樣）。只模擬 ERR 而不給 DRQ，
+    會讓「完全不看錯誤位元」的驅動因為等不到 DRQ 而逾時失敗——**用錯的理由通過**。
+- **irq.h 也被換掉，用來計數**：這個驅動全程關中斷、有八條 return path，而漏掉一個
+  `restore_irq` **不會讓任何斷言失敗**，只會讓機器從此收不到中斷。測試對每次操作
+  斷言 `disable == restore`、深度歸零、且從未巢狀。突變 A22/A23（拿掉某條路徑的
+  restore）因此被抓到。
+- **突變測試 28 個，最終 28/28、零存活、零等價突變**——但**一開始 8 個存活**，
+  每一個都逼出真實的測試缺口：
+  - **A1/A2（拿掉 status 0 / 0xFF 的判斷）**：被 `ata_wait_data` 自己的檢查、以及
+    「0xFF 本身帶著 BSY 位所以照樣輪詢到逾時」遮蔽。補上「磁碟在寫入途中變啞」
+    （`ata_wait_not_busy` 是唯一防線的那條路徑）與「不存在的通道必須**便宜地**被
+    偵測到」（斷言狀態讀取次數 < 100，而不是燒掉十萬次）之後被抓到。
+  - **A4/A5（不檢查 ERR/DF）一開始存活，而且暴露出我的錯誤注入模型有問題**：
+    我讓 `err_with_drq` 覆蓋**每一次**狀態讀取，於是 `ata_wait_idle` 在命令下出去
+    之前就先拒絕了——**測試在正確程式上也是因為錯的理由通過的**。改成由命令完成
+    觸發的錯誤狀態（PHASE_ERROR）之後才有鑑別力。這是 CAP16「均勻資料碰不到邊界」
+    的近親：**注入的故障如果太黏，被測的檢查根本不會被執行到**。
+  - **A6（不檢查 BSY 就接受 DRQ）**：需要 BSY 與 DRQ 同時成立的狀態，補上模型後抓到。
+  - **A8（只等 BSY、不排空滯留的 DRQ）存活，因為我的 fake 對驅動太寬容**：原本讓
+    「DRQ 期間下命令」中止舊傳輸並接受新命令。規格說那是未定義行為，模型改成保守的
+    「忽略」之後，A8 立刻被抓到——而這也正是 F24 修法需要排空的理由。
+  - **A12/A26**：寫入路徑的 28-bit 上限、以及 ATAPI 簽章只出現在高位元組的情形，
+    純粹是我漏寫的案例。
+
+### ASSESS1 IRQ-driven ATA 的可行性評估（結論：**現在不做**，但阻礙不是測試覆蓋）
+- 背景：PROJECT_STATE 已知限制 1 —— `ata_read_sector`/`ata_write_sector` 全程 cli，
+  磁碟 I/O 期間漏 timer tick。B 類長期候選是改成 IRQ-driven。CAP18 完成後重新評估。
+- **測試安全網已經足夠**：假裝置能編寫任意 BSY/DRQ/ERR/DF/逾時序列，28 個突變證明
+  測試有牙齒，IRQ 配對也有計數斷言。**單就驅動本身而言，重構是有網子的。**
+- **但真正的阻礙在上一層，而且測試蓋不到**：
+  1. `ata_read_sector` / `ata_write_sector` **目前永不阻塞**。它們之上的每一層
+     ——整個 `diskfs.c`，以及經由它的 `fs.c` 與 syscall 層——都建立在「一個檔案系統
+     操作會一路跑完、不會被排程走」這個假設上。那個假設**不是 diskfs 自己宣告的
+     不變式**，是從「`int 0x80` 是 interrupt gate」繼承來的（PROJECT_STATE 第 2 節）。
+  2. IRQ-driven 意味著發出請求的 task 會**阻塞**等待磁碟。它一阻塞，排程器就能跑
+     別的 task，而那個 task 可以再進入 `diskfs` —— 而 **`diskfs.c` 完全沒有任何
+     序列化**（整個檔案 grep 不到 `save_irq_disable`、沒有鎖）。它的
+     `diskfs_entries[]`、`diskfs_open_refs[]`、superblock 快取與節點池全是就地修改的
+     static 變數。
+  3. 所以這個重構不是「改驅動」，是「**替儲存堆疊引入一套併發模型**」。它與已知限制 2
+     （可中斷睡眠 + EINTR）同一性質：改動的是上面每一層都免費依賴的不變式。
+  4. **CAP18 蓋不到這件事**：它驗證的是驅動；「兩個 task 同時進到 diskfs」是驅動
+     **上一層**的性質，不在這套測試的射程內。
+- **結論**：不適合立即重構。前置條件是先為 diskfs 設計序列化（一把 mutex，或明確的
+  「一次只允許一個檔案系統操作」閘門），而那是關於核心併發模型的設計決定。
+  ATA 全程 cli 因此**仍留在已知限制**，但理由從「沒有安全網」更新為
+  「**缺的是上層的併發模型，不是驅動的測試**」。
+
+### CAP19 每行程檔案描述子表的**所有權契約**（把跨檔案的不變式變成可執行檢查）
+- 檔案: tests/test_fdtable.c（474 檢查）、Makefile、.gitignore
+- **要釘住的不變式**（原本一個字都沒寫在程式碼裡）：
+
+  > 每一個交給新行程的 slot，都必須帶著一張空的 `open_files[]`；
+  > 任何 file 或 pipe 的參照都不得跨越 slot 重用而存活。
+
+  `process.c` 配置 slot 時只 `memset(process_t)`，**從不碰 `open_files[]`**；
+  正確性完全靠「每一條釋放 slot 的路徑都先關掉描述子」。稽核過全部**七個**
+  `process_release()` 呼叫點——四個回收已經過 `process_finish_exit` 的 zombie、
+  一個緊接其後、一個在 fork 失敗時明確呼叫 `syscall_close_user_files`、一個發生在
+  任何描述子存在之前——**全部正確，沒有現存缺陷**。但將來新增的第八條若忘記，
+  新行程就會拿到前一個佔用者的檔案參照，那正是 F11 的失敗模式。
+- **測試模型的核心決定：觀察所有權，不是回傳值**。`open_fs`/`close_fs` 與四個
+  pipe 參照函式全部換成**保有真實計數語意**的 stub，而且**沒有對應 open 的 close
+  會被記為 underflow**——那才是「重複釋放」唯一看得見的地方。**只檢查 `sys_close()`
+  回傳值的測試，對本輪設計的每一個突變都會通過。**
+- **覆蓋**：open 取得參照、close 釋放**並清空 entry**、描述子耗盡→關閉→重用、
+  exit 清空整張表、slot 重用看到空表、32 輪 allocate/open/exit 循環不累積、
+  fork 複製表並逐一 bump（含 offset）、fork 失敗回滾、子行程 exit 不影響父行程的
+  描述子、父行程 exit 不影響子行程、pipe 兩端分開計數、pipe 建立失敗與描述子不足的
+  兩條回滾路徑、dup2 的三種語意（表內互換、自我複製、掛上 stdout）、以及
+  NULL process／slot 越界等防禦路徑。
+- **突變測試 25 個，23 個抓到、2 個確認為等價突變**。一開始 6 個存活，5 個是真實缺口：
+  - **D6/D12（exit 或 fork 的迴圈少跑一格）**：其他測試只開兩三個描述子，少跑一格
+    剛好把它們檢查的都涵蓋了。**把整張表填滿**才讓迴圈邊界變得可觀察。
+  - **D11（fork 把 pipe 兩端 bump 反了）**：兩端都開著時，讀寫計數都是 1→2，
+    **對稱所以看不出來**。先關掉寫端讓兩者不對稱之後才抓到。
+  - **D14（`alloc_fd` 不重設 offset）→ 確認為等價突變**：`close_fd_entry` 已經把
+    offset 清零，而**沒有任何路徑能產生「OF_NONE 但 offset 非零」的 entry**
+    （靜態表初始為零、每次釋放都經過 close_fd_entry、fork 整份複製、dup2 只寫入
+    非 NONE 的 entry）。兩處清零互為備援，與 ramfs 的 R6 同型。誠實記錄。
+  - **D21（拿掉 `dup2(fd, fd)` 的自我複製檢查）→ 確認為等價突變，但理由值得記**：
+    突變版會先 `close_fd_entry` 再從先前複製的 `src` 寫回、再 `open_fs`，
+    參照數 1→0→1，最終狀態完全相同。**這只在本核心的全域 cli 模型下成立**——
+    中間那一瞬間參照為 0，而系統呼叫全程關中斷，沒有別的行程能在那個縫隙 unlink
+    並釋放節點（三個後端也都是「開啟中不得 unlink」，參照歸零本身不會釋放）。
+    **若併發模型改變，這就會變成真的 UAF**，所以那個檢查不是死碼。
+  - **D25（描述子完全沒空位時的 pipe 回滾）**：既有測試留了一格空位，只走到第二次
+    配置失敗那條路；填滿整張表才走得到第一次就失敗、必須交還兩個 pipe 端的那條。
+- **沒有找到缺陷**。本輪產出是把一個跨 `syscall.c`／`process.c` 兩個檔案、散落在七條
+  釋放路徑上的口頭假設，變成 23 個突變證明過的可執行契約。
+
+### ASSESS2 行程生命週期狀態機的稽核（沒有缺陷；但找到一條該被測試釘住的隱性相依）
+- 範圍: process.c 的 `process_allocate` / `process_launch` / `process_fork` /
+  `process_task_exit` / `thread_on_exit` / `process_finish_exit` / `process_wait` /
+  `process_waitpid` / `process_detach` / `process_release`，以及它們與 task.c、
+  paging.c 的交界。這是 F1、F7、F17、F19 四個 P0/P1 的發源地。
+- **逐項對照的結果，全部正確**：
+  - **`process_launch` 失敗回滾**：`create_task` 失敗時只 `process_release`，
+    address space 由**呼叫端**銷毀（elf_loader.c 的 `if (pid < 0)
+    paging_destroy_user_address_space(space)`），不是洩漏。
+  - **thread_count 所有權（F1 的修法）**：主 task 先退出時只設 `main_exited`、
+    `task = NULL` 並保留位址空間；真正的 teardown 延到 `thread_on_exit` 看到
+    `thread_count == 0 && main_exited` 才跑。
+  - **teardown ordering 有兩層互不依賴的保護**：`task_exit` 在呼叫 `on_exit`
+    **之前**就 `activate_task(next)` 把 CR3 切到下一個 task；而
+    `paging_destroy_user_address_space` 內部另有 `space == active_space` 的檢查會
+    切回 kernel space。退休 task 的 kernel stack 也是延後到**下一次** `task_exit`
+    的 `reap_retired_task()` 才釋放，不會在自己還站在上面時被回收。
+  - **父行程結束時的 children**：ZOMBIE 直接 release，RUNNING 改
+    `parent_pid = 0` + `auto_reap = 1`。`next_pid` 從 1 單調遞增且沒有行程的 pid 是
+    0，所以孤兒不會被後來的行程「認領」。
+  - **資源只釋放一次**：七條 `process_release()` 路徑在 Session 30/31 已逐一追查
+    （見 CAP19），全部先經過 `process_finish_exit` 或明確關檔。
+- **找到一條值得測試釘住的隱性相依（不是缺陷）**：
+  `process_waitpid` 阻塞在**自己**的 `process_t` 上：
+  ```c
+  task_block_killable(process_get_current());
+  ```
+  但 `process_finish_exit` 只 `task_wake_all(process)` —— 喚醒的是**子行程**的
+  `process_t`，是**不同的 channel**。父行程實際上是被 SIGCHLD 那條路徑的
+  `task_wake_task(parent->task)` 喚醒的，而那條路徑之所以可靠，是因為
+  `process_send_signal` **無條件**喚醒被阻塞的目標 task（不看有無安裝 handler）。
+  相對地，`process_wait` 阻塞在**子行程**的 `process_t` 上，與 `task_wake_all`
+  的 channel 相符——**同一個檔案裡兩個等待函式用了兩種不同的喚醒機制**。
+  把 `process_send_signal` 改成「只在裝了 handler 時才喚醒」是個看起來完全合理的
+  最佳化，而它會讓 `waitpid` **永遠掛住**。這是 CAP20 最該優先釘住的一條斷言。
+- **CAP20 的範圍（下一輪）**：`allocate/launch → running → fork/thread → exit →
+  zombie → wait/reap/detach → slot reuse` 的狀態機，重點是上面那條跨機制的喚醒
+  相依、thread_count 的延後 teardown、以及 auto_reap/reparent 的轉換。
+  harness 需要 stub task.c（含 `task_wake_task` / `task_block_killable` 的可觀察版本）
+  與 paging.c，規模與 CAP18 的假裝置相當。
+
+### CAP20 行程生命週期狀態機（F1/F7/F17/F19 的發源地，首次有直接測試）
+- 檔案: tests/test_process.c（351 檢查）、Makefile、.gitignore
+- **harness 的核心決定：把排程器「模型化」而不是 stub 掉**。這裡值得問的每個問題都
+  是「誰被 block、block 在哪個 channel、誰把他叫醒」，所以：
+  - `task_block_current()` 記下**被 park 的 task 與 channel**，執行測試腳本安排的
+    「這段期間發生的事」（例如子行程退出），然後檢查**有沒有任何喚醒是瞄準這個
+    task 的**。沒有就記為 stuck——**這就是把「這會永遠掛住」變成斷言的方法**。
+  - `task_wake_task()`（依身分）與 `task_wake_all()`（依 channel）分開記錄，因為
+    process.c 裡**兩個等待函式用的是不同機制**，測試必須分得出來。
+  - address space 自己記錄 create/activate/destroy 次數與**「被銷毀時是否仍是
+    active」**，讓 teardown ordering 可檢查而非假設。
+  - teardown 的每一步記錄**發生順序**（序號）而非只有次數：交換兩步不會改變任何
+    計數，只會改變順序。
+- **第一優先釘住的隱性相依（ASSESS2 找到的）**：
+  `process_waitpid` 阻塞在**父行程自己**的 `process_t` 上，而 `process_finish_exit`
+  只 `task_wake_all(child)`——**不同 channel**。父行程實際上是被 SIGCHLD 遞送路徑的
+  `task_wake_task(parent->task)` 依身分喚醒的，而那條路徑可靠的前提是
+  `process_send_signal` **無條件**喚醒被阻塞的目標。測試因此斷言三件事：
+  父行程**沒有安裝 SIGCHLD handler** 時仍被喚醒、喚醒是**瞄準父行程的 task**、
+  以及**block 的 channel 與 broadcast 的 channel 確實不同**。
+  相對地 `process_wait` 阻塞在**子行程**的 `process_t` 上、與 broadcast 相符——
+  兩者分別驗證，不假設相同。
+- **覆蓋**：launch（成功、`create_task` 失敗回滾、address space 所有權留在呼叫端、
+  無 address space、表滿）；exit（zombie 轉換、標準串流恰好釋放一次、teardown
+  不得釋放仍 active 的 address space、teardown 順序）；reap（waitpid/wait/nohang/
+  非子行程/不存在的 pid、slot 歸還、auto_reap 不留 zombie）；parent exit（zombie 子
+  立即回收、running 子 orphan + auto_reap）；threads（main 先退出時延後 teardown、
+  thread 先退出、**兩個 thread 時只有最後一個能完成**、joiner 喚醒、finish_exit
+  只跑一次）；detach（running / zombie / 不存在）；slot 與 pid 重用（不繼承任何舊
+  狀態、pid 單調、24 輪循環不洩漏）；fork（繼承與 rollback、pending signal 不繼承、
+  子行程退出不污染父行程）；signal 作為生命週期參與者。
+- **突變測試 35 個，33 個抓到、2 個確認為等價突變**。一開始 4 個存活，兩個是真實缺口：
+  - **P9（每個 thread 退出都完成 exit，而非只有最後一個）存活**：**一個 thread 時
+    「計數歸零」與「有 thread 離開」是同一件事**，兩種寫法讀起來一樣。補上「main
+    先退出、還有**兩個** thread」的案例後才抓到——而那正是 F1 的形狀：第一個 thread
+    退出就銷毀 address space，而它的手足還在上面跑。
+  - **P17（把 teardown 兩步對調）存活**：交換順序**不改變任何計數**。改成記錄每一步
+    的發生序號、斷言「串流 → 描述子表 → address space」之後才抓到。
+  - **P25／P26 確認為等價突變，而且是互為備援的一對**：`process_allocate` 的 memset
+    與 `process_release` 的 memset 各自都足以清乾淨 slot，拿掉任一個都由另一個
+    掩護。而且**沒有任何讀者會碰 UNUSED slot 的欄位**（`process_find`、
+    `process_get_used_count`、finish_exit 的子行程迴圈都先跳過 UNUSED）。
+    與 CAP19 的 D14、ramfs 的 R6 同型。誠實記錄，不硬寫測試去殺。
+- **三個突變原本只被 timeout 抓到，已改為具名斷言**：`state` 不轉 ZOMBIE、nohang
+  失效、非子行程檢查被拿掉——三者都讓 `waitpid` 永遠 park。harness 現在在連續
+  64 次「park 了卻沒有任何喚醒瞄準自己」之後停下並印出
+  「a wait parked N times with nothing to wake it: this would hang the kernel」。
+  **timeout 只說「某處出事」，不說「斷言起作用了」**，而那正是突變測試要分辨的。
+- **沒有找到缺陷**。產出是把四個 P0/P1 修復後留下的、由多個函式交互維持的不變式，
+  變成 33 個突變證明過的安全網。
+- **Session 32 follow-up（CAP20 test-model repair）**：既有 spurious-wake test 的 callback
+  在第一個 block 就 child exit，實際沒有產生 spurious wake；而 stub 沒有 blocked queue，
+  所以 channel-based wake 無法和 identity wake 區分。改成兩次無關 SIGUSR1 identity wake
+  後才 child exit，並在同一 parent channel 放入較早的 decoy task。這把「SIGCHLD 只有
+  handler 才 wake」與「wake_one(channel)」兩個關鍵 mutant 都變成**具名斷言失敗**，不是
+  timeout。
+- `process_release()` 加入僅 `HOSTED_TEST` 的 release observation hook（production
+  codegen 不變），讓 auto-reap double release 可觀察。新增 matrix：14/14 killed；
+  「不清 release 的欄位」存活屬等價，因為 release 後 slot 不可觀察，重新 allocate 的第一步
+  必完整 memset，且 resources 均已由 `process_finish_exit` 先釋放。
+- `test_task` 補直接執行真實 `task_exit` 的 lifecycle test：callback 前 task kernel stack
+  尚未釋放，下一次 `schedule()` 才依序釋放 stack/task。兩個 task boundary mutants 2/2 killed。
+
 ## 效能改善（已實作）
 
 ### PERF2 ramfs_write 改成幾何成長（攤還 O(1) append，取代原本每次成長 O(n) 複製）
@@ -998,6 +1552,118 @@ RUNNING，等它的人永遠阻塞（F17 誠實記錄的殘留限制，本輪根
     對齊時**才加速；兩者相對未對齊時會退回逐位元組，加速比約 **1.0x（毫無
     改善）**。這是刻意的正確性選擇（不做未對齊的 32-bit 存取），但確實是此改動
     的限制。數據見 tests/BENCHMARKS.md。
+
+### F25 [P0][安全性/權限提升] `sys_sigreturn` 讓 ring 3 自己挑 EFLAGS —— 含 IOPL
+- 檔案: syscall.c `sys_sigreturn()`；觸發路徑 interrupt.s 的 `iret`
+- 類別: 安全性（權限提升）
+- 嚴重度: **P0**
+- **現象**：`sys_sigreturn` 從使用者堆疊上的 `sigcontext_t` 逐欄還原被中斷的
+  情境，其中包含 `regs->eflags = sc->eflags;`。這個 struct 欄位**就是**
+  `interrupt.s` 尾端 `popa; add $8,%esp; sti; iret` 裡 `iret` 會彈出的那一格。
+- **為什麼是提權而不只是「值怪怪的」**：`iret` 在 **CPL 0 執行**時會從堆疊映像
+  **載入 IOPL**（只有在 CPL > 0 執行時 IOPL 才被保護不變）。而 sigreturn 是從
+  ring 0 的系統呼叫處理常式返回 ring 3，所以走的正是「CPL 0 執行 iret」這條。
+  使用者程式只要在堆疊上擺一個 `eflags = 0x3000` 的 sigcontext、呼叫
+  `int $0x80`（eax = 24），返回後就取得 **IOPL=3**——從此可以直接對任何 I/O
+  埠下 `in`/`out`，繞過整個核心的裝置抽象（ATA、PIC、PIT、鍵盤控制器）。
+  同一條路徑還能設 **NT**（下一次 `iret` 會改走 task switch，去讀 TSS 裡的
+  back link）、**VM**（要求進入 virtual-8086 模式）、以及**清掉 IF**（返回後
+  中斷永久關閉，timer tick 停止，整台機器只剩這一個行程在跑）。
+- **不需要任何前置條件**：不必先安裝 handler、不必真的收過訊號。`sys_sigreturn`
+  只檢查 `useresp` 落在使用者堆疊範圍內（F14 加的守衛），沒有檢查「現在真的
+  在訊號處理中」。守衛擋的是**位址**，這個缺陷在**內容**。
+- **修復**：只讓程式自己的算術旗標通過，其餘由核心決定。
+
+```c
+#define EFLAGS_USER_MASK   0x00000CD5u   /* CF PF AF ZF SF DF OF */
+#define EFLAGS_ALWAYS_SET  0x00000202u   /* IF + reserved bit 1 */
+...
+regs->eflags = (sc->eflags & EFLAGS_USER_MASK) | EFLAGS_ALWAYS_SET;
+```
+
+  遮罩**不含 TF**：這個核心沒有 #DB 處理常式，讓使用者設 trap flag 等於送一個
+  無人接手的例外。IF 是**強制設回 1**而不是「保留使用者的值」——ring 3 沒有
+  任何正當理由需要關中斷，而讓它關得掉就等於讓它獨佔 CPU。
+- **與 F22 是同一族**：都是「使用者提供的數字直接餵進核心會信任的欄位」。F22 是
+  長度算術，這次是處理器狀態暫存器。
+- 狀態: **已修＋單元測試（tests/test_signal.c）＋ QEMU 雙向驗證**。
+  `user/sigflags.c` 在 ring 3 手工組出 sigcontext、`int $0x80`，返回後用
+  `pushfl`/`popl` 讀回**真實的** EFLAGS：
+  - **移除修復**後：`[sigflags ESCALATED iopl]`、`[sigflags ESCALATED nt]`。
+  - **修復在位**：`[sigflags iopl clear]`、`[sigflags nt clear]`、
+    `[sigflags if set]`。
+  這是「同一支使用者程式在有／無修復下輸出相反結果」的證據，不是只有單元測試。
+
+### CAP21 訊號遞送生命週期單元測試（F2/F14 的發源地；F25 在這裡被找到）
+- 檔案: tests/test_signal.c（88 檢查）、Makefile、.gitignore、user/sigflags.c
+- **為什麼從這裡下手**：`signal_deliver` 與 `sys_sigreturn` 是核心裡少數
+  「直接把使用者提供的位元組寫進**返回 ring 3 用的暫存器映像**」的程式碼，
+  歷史上已經產出 F2（在核心情境上遞送）與 F14（frame 位址不檢查）兩個缺陷，
+  卻從來沒有直接測試——每次都靠 QEMU 端對端間接碰到。
+- **harness**：用 `--gc-sections` 連結真正的 `syscall.c`，並用
+  `mmap(MAP_FIXED_NOREPLACE)` 在 `USER_STACK_BOTTOM` 真的映射一段使用者堆疊，
+  所以 frame 的建立與讀回**走的是真的指標運算**，不是模型。
+- **釘住的不變式**：
+  - sigreturn 只還原程式自己的算術旗標；IOPL/NT/VM 一律清掉、IF 一律設回
+    （F25 的迴歸測試）。
+  - delivery → handler → sigreturn 的**完整往返**必須把被中斷的情境**逐欄**
+    還原（測試自己要模型化 handler 的 `ret` 會把 esp 推進 4 bytes，否則會
+    在正確的程式上因為錯的理由通過）。
+  - frame 必須完整落在使用者堆疊內：**上下界都測**，而且斷言「核心拒絕並
+    `task_exit`」而不是「發生了某種壞事」。
+  - 一次返回使用者模式只遞送一個訊號；handler 執行中不巢狀；
+    SIGCHLD 的預設動作是忽略（否則沒裝 handler 的父行程會被子行程的退出殺死）；
+    明確忽略（handler == 1）不建立 frame；SIGSTOP park 後必須能被 SIGCONT 釋放。
+- **突變 23 個：22 抓到、1 個等價**。
+  - S1（就是修復前的程式碼）、S2（遮了但不強制 IF）、S3（遮罩仍放 IOPL 過）、
+    S4（仍放 NT 過）、S5（連程式自己的旗標都丟掉）——F25 的修復被**四個方向**
+    夾住，不是只有「有沒有遮」。
+  - **S14 是等價突變**：把 `useresp - USER_STACK_BOTTOM < K` 改寫成
+    `useresp < USER_STACK_BOTTOM + K`。前一個 `||` 子句已經保證
+    `useresp >= USER_STACK_BOTTOM`（減法不會借位），而
+    `USER_STACK_BOTTOM + 60 ≈ 0x3E803C` 離 2³² 極遠（加法不會溢位），
+    兩種寫法在**所有可達輸入**上恆等。減法形式保留，因為它是本專案的慣例
+    （在一般情形下才是安全的那一種）；**誠實記錄，不硬寫假測試去殺它**。
+- **三個突變原本只被「行程死掉」或 timeout 抓到，已改成具名斷言**：
+  - S7/S13 拿掉界限檢查後，frame 落在未映射的位址，host 上是 SIGSEGV
+    （`rc=139`）。**但 `rc=139` 不是斷言**——它只說「某處出事」。加上 SIGSEGV
+    handler + 三值的 `RUN_MAY_EXIT`（0 正常返回／1 `task_exit`／2 碰到映射外
+    記憶體）之後，測試說的是「核心應該拒絕，但它去碰了那個位址」。這在真核心
+    裡的後果更嚴重：那次存取 CS 仍是 0x08，page fault handler 會判定是**核心
+    錯誤而停機**，不是殺掉一個行程——正是 F2 與 F14 的形狀。
+  - S23（SIGCONT 不釋放被 stop 的行程）原本讓測試無限迴圈。改成 park 超過
+    64 次就由 harness 停下並具名報告「停住的行程永遠不會再執行」。
+  - 這條界線是本專案的既有紀律：**timeout 與 crash 證明「有事發生」，不證明
+    「斷言起作用了」**。
+
+## Session 34 — 2026-08-16
+
+### CAP22 mmap / sbrk 位址空間所有權
+- 檔案: `tests/test_vm_lifecycle.c`, `tests/test_process.c`, `process.c`, `syscall.c`
+- 類別: 正確性 / 併發模型 / 所有權
+- 結論: **沒有現存 kernel defect；修正了一個 hosted 測試模型的錯誤假設。**
+- `sys_munmap()` 乍看先清 `ext_map`、再清 PTE，似乎可讓 sibling thread 在中間重用
+  位址而看到舊 mapping。然而 `SYS_MUNMAP` 只能由 `int $0x80` dispatcher 呼叫；該
+  IDT entry 是 interrupt gate（0xEE），CPU 進入時已清 IF，且這個單核核心只會在
+  可中斷點排程。因此 bitmap update 與 PTE teardown 之間沒有可達的 task switch。
+- 初版 hosted stub 錯把 `process_ext_free()` 的 nested restore 當成「重新開中斷」，
+  於是製造假 race。已改為顯式模型化 syscall gate：sibling 只在模擬 iret 後才可執行，
+  並確認它取得重用位址時 PTE 已解除。若日後把 syscall 改成 trap gate 或允許 syscall
+  內 preemption，這個測試會立刻指出 `sys_munmap` 必須取得外層 lock；在目前 ABI 下，
+  額外 lock 是冗餘，故不改 production code。
+- 新的 `test_vm_lifecycle`（36 checks）釘住：sbrk 查詢/增長/縮減、heap 下界與 stack
+  guard 上界、`INT32_MIN`；mmap first-fit/reuse；free 的全範圍驗證與 double-free
+  原子失敗；以及 syscall-gate 下 reservation→PTE→可重用的順序。
+- `test_process` 369 → **397 checks**：fork 複製 mmap reservations 但 child free 不污染
+  parent；slot reuse 清掉 reservation；exec 成功換新 address space 時清 bitmap/heap/signal
+  image，且有 live sibling 時拒絕 exec 並保持舊 image。
+- **突變 7/7 killed，零 survivor**：提前開 IF、漏 unmap PTE、free 不驗證全範圍、fork
+  不複製 bitmap、sbrk 下溢/上溢、exec 不清 bitmap。全數由具名 assertion 失敗，不以
+  crash 或 timeout 判定。最初「缺 outer lock」的 mutant 經 ABI 推導為**等價／不可達**，
+  不納入分數。
+- 最終驗證：25 個 hosted suite 全綠；`make clean && make all -j4` 0 warning / 0 error；
+  `make test` 在 284.4 秒以 **MAKE_TEST_RC=0** 結束，行程／task／timer／user-space
+  counters 均回 baseline。
 
 ## 已知限制（本輪審查有發現、但刻意不修的項目，附理由）
 以下項目屬於真實觀察到的架構/效能取捨，但要嘛需要較大幅度重構、要嘛觸發

@@ -102,6 +102,14 @@ fs_node_t *resolve_fs(const char *path) {
         if (*cursor == '/') {
             cursor++;
             if (*cursor == '\0' || *cursor == '/') return NULL;
+            /* More path to walk, so this node has to be a directory. Relying
+             * on "a file has no finddir, so the next lookup returns NULL"
+             * would make correctness a property of every backend rather than
+             * of this resolver -- and procfs's finddir ignores the node it is
+             * given entirely. resolve_parent_fs() has always checked this;
+             * without it the same path means different things depending on
+             * which entry point the caller used. */
+            if (node->flags != FS_DIRECTORY) return NULL;
         }
     }
     return node;

@@ -332,7 +332,9 @@ void task_exit(int32_t status) {
     task_t *next;
 
     (void)status;
+#ifndef HOSTED_TEST
     __asm__ volatile("cli");
+#endif
 
     if (!task) {
         terminal_writestring("Cannot exit: tasking is not initialized.\n");
