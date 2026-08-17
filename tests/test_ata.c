@@ -129,6 +129,8 @@ static struct {
     int      fail_with_err;              /* raise ERR when the command lands */
     int      fail_with_df;               /* raise DF instead */
     int      fail_flush;                 /* raise ERR only on CACHE FLUSH */
+    uint8_t  fail_after_data_out;        /* ERR/DF after taking 256 words */
+    int      hold_drq_after_data_out;    /* data phase never completes */
     /* A failed read really does raise ERR *together with* DRQ on real
      * drives: the command aborted, and the drive still signals a transfer.
      * Modelling ERR without DRQ would let a driver that never looks at the
@@ -175,6 +177,8 @@ static void fake_reset(void) {
     dev.error_bits = 0;
     dev.error_has_drq = 0;
     dev.fail_with_err = dev.fail_with_df = dev.fail_flush = 0;
+    dev.fail_after_data_out = 0;
+    dev.hold_drq_after_data_out = 0;
     dev.err_with_drq = dev.df_with_drq = 0;
     dev.drq_while_busy = 0;
     dev.die_after_data_out = 0;
@@ -388,7 +392,15 @@ static inline void outw(uint16_t port, uint16_t val) {
         dev.last_write_lba = dev.lba;
         dev.writes_served++;
         dev.index = 0;
-        dev.phase = PHASE_IDLE;
+        if (dev.hold_drq_after_data_out) {
+            dev.phase = PHASE_DATA_OUT;
+        } else if (dev.fail_after_data_out) {
+            dev.error_bits = dev.fail_after_data_out;
+            dev.error_has_drq = 0;
+            dev.phase = PHASE_ERROR;
+        } else {
+            dev.phase = PHASE_IDLE;
+        }
         if (dev.die_after_data_out) dev.status_zero = 1;
     }
 }
@@ -770,6 +782,45 @@ static void test_write_error_bits(void) {
     expect_irq_balanced();
 }
 
+static void test_write_error_after_data(void) {
+    uint8_t out[ATA_SECTOR_SIZE];
+
+    TEST("write: ERR after the data phase is not reported as success");
+    CHECK(install_healthy());
+    for (unsigned i = 0; i < sizeof(out); i++) out[i] = 0x3C;
+
+    dev.fail_after_data_out = S_ERR;
+    CHECK_EQ(ata_write_sector(3, out), 0);
+    CHECK_EQ(dev.writes_served, 1);       /* the drive accepted the data words */
+    CHECK_EQ(dev.flushes, 0);             /* completion error stops the command */
+    CHECK_EQ(ata_get_write_count(), 0);
+    expect_irq_balanced();
+
+    CHECK(install_healthy());
+    dev.fail_after_data_out = S_DF;
+    CHECK_EQ(ata_write_sector(3, out), 0);
+    CHECK_EQ(dev.writes_served, 1);
+    CHECK_EQ(dev.flushes, 0);
+    CHECK_EQ(ata_get_write_count(), 0);
+    expect_irq_balanced();
+}
+
+static void test_write_drq_stuck_after_data(void) {
+    uint8_t out[ATA_SECTOR_SIZE];
+
+    TEST("write: lingering DRQ after the data phase is not success");
+    CHECK(install_healthy());
+    for (unsigned i = 0; i < sizeof(out); i++) out[i] = 0x7A;
+
+    dev.hold_drq_after_data_out = 1;
+    CHECK_EQ(ata_write_sector(4, out), 0);
+    CHECK_EQ(dev.writes_served, 1);
+    CHECK_EQ(dev.commands_refused_drq, 0); /* no flush issued over live DRQ */
+    CHECK_EQ(dev.flushes, 0);
+    CHECK_EQ(ata_get_write_count(), 0);
+    expect_irq_balanced();
+}
+
 /* --- state carried between calls ------------------------------------------ */
 
 static void test_repeated_calls(void) {
@@ -1113,6 +1164,8 @@ int main(void) {
     test_write_timeout_before_data();
     test_write_flush_failure();
     test_write_error_bits();
+    test_write_error_after_data();
+    test_write_drq_stuck_after_data();
 
     test_repeated_calls();
     test_counters_only_count_success();
