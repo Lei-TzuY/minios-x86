@@ -363,18 +363,26 @@ static uint32_t fat16_vfs_write(fs_node_t *node, uint32_t offset,
     uint8_t *entry;
     uint32_t bpc = fs.bytes_per_cluster;
     uint32_t first, end, needed, cluster, count, written = 0;
+    uint32_t first_new = 0, new_parent = 0, new_count = 0;
 
     if (!fs.mounted || !node || !node->ptr || (!buffer && size != 0)) return 0;
     if (size == 0) return 0;
 
+    /* No cluster in this volume can cover the requested first byte. Reject it
+     * before an empty file acquires a chain that can never reach the offset. */
+    if (fs.max_cluster <= 2 || offset / bpc >= fs.max_cluster - 2) return 0;
+    if (size > UINT32_MAX - offset) return 0;
+
     entry = (uint8_t *)node->ptr;
     first = rd16((uint32_t)(entry - fs.img) + 26);
     end = offset + size;
-    needed = (end + bpc - 1) / bpc;        /* clusters from the start */
+    needed = end / bpc + (end % bpc != 0); /* clusters from the start */
 
     if (first == 0) {
         first = fat16_alloc_cluster();
         if (!first) return 0;
+        first_new = first;
+        new_count = 1;
         wr16((uint32_t)(entry - fs.img) + 26, (uint16_t)first);
         node->impl = first;
     }
@@ -387,6 +395,11 @@ static uint32_t fat16_vfs_write(fs_node_t *node, uint32_t offset,
         if (next < 2 || next >= FAT16_EOC) {
             next = fat16_alloc_cluster();
             if (!next) break;
+            if (!first_new) {
+                first_new = next;
+                new_parent = cluster;
+            }
+            new_count++;
             fat16_set_cluster(cluster, (uint16_t)next);
         }
         cluster = next;
@@ -430,7 +443,30 @@ static uint32_t fat16_vfs_write(fs_node_t *node, uint32_t offset,
      * without storing a byte, so the file then claimed a length its own chain
      * could not back and reads returned the tail of the last real cluster as
      * if it were file data. A write that stores nothing must change nothing. */
-    if (written > 0) {
+    if (written == 0) {
+        /* Extending toward an unreachable offset may have consumed every free
+         * cluster before allocation failed. A zero-byte write is a no-op, so
+         * detach and free exactly the clusters allocated by this call. */
+        if (first_new) {
+            if (new_parent) {
+                fat16_set_cluster(new_parent, FAT16_EOC_MARK);
+            } else {
+                wr16((uint32_t)(entry - fs.img) + 26, 0);
+                node->impl = 0;
+            }
+            cluster = first_new;
+            for (uint32_t i = 0;
+                 i < new_count && cluster >= 2 && cluster < fs.max_cluster;
+                 i++) {
+                uint32_t next = fat16_next_cluster(cluster);
+                fat16_set_cluster(cluster, 0);
+                cluster = next;
+            }
+        }
+        return 0;
+    }
+
+    {
         uint32_t written_end = offset + written;
         if (written_end > rd32((uint32_t)(entry - fs.img) + 28)) {
             wr32((uint32_t)(entry - fs.img) + 28, written_end);

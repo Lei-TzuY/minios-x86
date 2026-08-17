@@ -269,6 +269,66 @@ static void test_write_stores_nothing(void) {
     CHECK_EQ(probe[4], 0xCC);              /* untouched past the real end */
 }
 
+static void test_zero_byte_write_keeps_clusters_free(void) {
+    static unsigned char huge[40000];
+    uint8_t payload[4] = { 0x5A, 0xA5, 0x3C, 0xC3 };
+    uint32_t bpc =
+        (uint32_t)fat16_image_data[13] *
+        ((uint32_t)fat16_image_data[11] |
+         ((uint32_t)fat16_image_data[12] << 8));
+    fs_node_t *root, *target, *filler, *reserve, *probe, *again;
+    uint32_t filled;
+
+    TEST("zero-byte writes do not retain provisional clusters");
+
+    /* An offset beyond the volume's theoretical capacity must be rejected
+     * before the empty file acquires even its first cluster. */
+    root = remount();
+    target = make_file(root, "target.txt");
+    CHECK(target != NULL);
+    if (!target) return;
+    CHECK_EQ(write_fs(target, 0x7FFFFFFFu, sizeof(payload), payload), 0);
+    CHECK_EQ(target->length, 0);
+    CHECK_EQ(target->impl, 0);
+    again = finddir_fs(root, "target.txt");
+    CHECK(again != NULL);
+    if (again) CHECK_EQ(again->impl, 0);
+
+    probe = make_file(root, "probe.txt");
+    CHECK(probe != NULL);
+    if (probe) CHECK_EQ(write_fs(probe, 0, 1, payload), 1);
+
+    /* Now leave exactly two clusters free and target the fourth cluster of a
+     * second empty file. The driver may discover the shortage while extending
+     * the chain, but a zero-byte result still has to roll that extension back. */
+    root = remount();
+    target = make_file(root, "target.txt");
+    filler = make_file(root, "fill2.txt");
+    CHECK(target != NULL);
+    CHECK(filler != NULL);
+    if (!target || !filler) return;
+
+    filled = write_fs(filler, 0, sizeof(huge), huge);
+    CHECK(filled > 2 * bpc);
+    CHECK_EQ(root->unlink(root, "fill2.txt"), 0);
+
+    reserve = make_file(root, "hold.txt");
+    CHECK(reserve != NULL);
+    if (!reserve || filled <= 2 * bpc) return;
+    CHECK_EQ(write_fs(reserve, 0, filled - 2 * bpc, huge), filled - 2 * bpc);
+
+    CHECK_EQ(write_fs(target, 3 * bpc, 1, payload), 0);
+    CHECK_EQ(target->length, 0);
+    CHECK_EQ(target->impl, 0);
+    again = finddir_fs(root, "target.txt");
+    CHECK(again != NULL);
+    if (again) CHECK_EQ(again->impl, 0);
+
+    probe = make_file(root, "probe.txt");
+    CHECK(probe != NULL);
+    if (probe) CHECK_EQ(write_fs(probe, 0, 1, payload), 1);
+}
+
 static void test_create_unlink(void) {
     fs_node_t *root = remount();
     fs_node_t *f;
@@ -358,6 +418,7 @@ int main(void) {
     test_multi_cluster_roundtrip();
     test_write_out_of_space();
     test_write_stores_nothing();
+    test_zero_byte_write_keeps_clusters_free();
     test_create_unlink();
     test_open_blocks_unlink();
     test_name_encoding();
