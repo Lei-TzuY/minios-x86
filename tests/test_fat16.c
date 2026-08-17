@@ -269,6 +269,86 @@ static void test_write_stores_nothing(void) {
     CHECK_EQ(probe[4], 0xCC);              /* untouched past the real end */
 }
 
+static void test_unlink_rejects_invalid_cluster_chain(void) {
+    uint8_t *image = malloc(fat16_image_size);
+    uint32_t bps, reserved, fats, sectors_per_fat;
+    uint32_t fat_off, root_off, docs_off, bad_cluster;
+    fs_node_t *root;
+
+    TEST("unlink rejects an out-of-volume cluster chain");
+    CHECK(image != NULL);
+    if (!image) return;
+    for (uint32_t i = 0; i < fat16_image_size; i++)
+        image[i] = fat16_image_data[i];
+
+    bps = (uint32_t)image[11] | ((uint32_t)image[12] << 8);
+    reserved = (uint32_t)image[14] | ((uint32_t)image[15] << 8);
+    fats = image[16];
+    sectors_per_fat = (uint32_t)image[22] | ((uint32_t)image[23] << 8);
+    fat_off = reserved * bps;
+    root_off = (reserved + fats * sectors_per_fat) * bps;
+    docs_off = root_off + 2 * 32;
+
+    /* Point HELLO at a cluster whose FAT-entry offset aliases the first two
+     * bytes of the unrelated DOCS directory entry. It is below FAT16_EOC but
+     * well beyond this volume's usable cluster range. */
+    bad_cluster = (docs_off - fat_off) / 2;
+    CHECK(bad_cluster < 0xFFF8u);
+    image[root_off + 26] = (uint8_t)bad_cluster;
+    image[root_off + 27] = (uint8_t)(bad_cluster >> 8);
+
+    fat16_install(image, fat16_image_size);
+    free(image);
+    root = fat16_get_root_node();
+    CHECK(root != NULL);
+    if (!root) return;
+    CHECK(finddir_fs(root, "hello.txt") != NULL);
+    CHECK(finddir_fs(root, "docs") != NULL);
+
+    CHECK_EQ(root->unlink(root, "hello.txt"), -1);
+    CHECK(finddir_fs(root, "hello.txt") != NULL);
+    CHECK(finddir_fs(root, "docs") != NULL);
+
+    TEST("unlink rejects a cyclic cluster chain");
+    image = malloc(fat16_image_size);
+    CHECK(image != NULL);
+    if (!image) return;
+    for (uint32_t i = 0; i < fat16_image_size; i++)
+        image[i] = fat16_image_data[i];
+
+    /* Turn the two single-cluster HELLO/README chains into 2 -> 3 -> 2. */
+    image[fat_off + 2 * 2] = 3;
+    image[fat_off + 2 * 2 + 1] = 0;
+    image[fat_off + 3 * 2] = 2;
+    image[fat_off + 3 * 2 + 1] = 0;
+    fat16_install(image, fat16_image_size);
+    free(image);
+
+    root = fat16_get_root_node();
+    CHECK(root != NULL);
+    if (!root) return;
+    CHECK_EQ(root->unlink(root, "hello.txt"), -1);
+    CHECK(finddir_fs(root, "hello.txt") != NULL);
+
+    TEST("unlink rejects a FAT16 bad-cluster marker");
+    image = malloc(fat16_image_size);
+    CHECK(image != NULL);
+    if (!image) return;
+    for (uint32_t i = 0; i < fat16_image_size; i++)
+        image[i] = fat16_image_data[i];
+
+    image[fat_off + 2 * 2] = 0xF7;
+    image[fat_off + 2 * 2 + 1] = 0xFF;
+    fat16_install(image, fat16_image_size);
+    free(image);
+
+    root = fat16_get_root_node();
+    CHECK(root != NULL);
+    if (!root) return;
+    CHECK_EQ(root->unlink(root, "hello.txt"), -1);
+    CHECK(finddir_fs(root, "hello.txt") != NULL);
+}
+
 static void test_create_unlink(void) {
     fs_node_t *root = remount();
     fs_node_t *f;
@@ -358,6 +438,7 @@ int main(void) {
     test_multi_cluster_roundtrip();
     test_write_out_of_space();
     test_write_stores_nothing();
+    test_unlink_rejects_invalid_cluster_chain();
     test_create_unlink();
     test_open_blocks_unlink();
     test_name_encoding();

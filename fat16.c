@@ -14,6 +14,7 @@
 #define FAT16_DIR_ATTR_VOLUME 0x08
 #define FAT16_DIR_ATTR_DIR    0x10
 #define FAT16_DIR_ATTR_FILE   0x20
+#define FAT16_RESERVED_START  0xFFF0u
 #define FAT16_EOC             0xFFF8u   /* >= this means end of chain */
 #define FAT16_EOC_MARK        0xFFFFu
 #define FAT16_MAX_DIR_SLOTS   8192      /* guard against corrupt cyclic chains */
@@ -85,6 +86,31 @@ static uint32_t fat16_next_cluster(uint32_t cluster) {
 
 static void fat16_set_cluster(uint32_t cluster, uint16_t value) {
     wr16(fat16_fat_off(cluster), value);
+}
+
+static int fat16_cluster_valid(uint32_t cluster) {
+    return cluster >= 2 && cluster < fs.max_cluster &&
+           cluster < FAT16_RESERVED_START;
+}
+
+/* Validate a complete chain before a destructive traversal. Limiting the
+ * walk to the number of usable clusters rejects cycles without extra memory. */
+static int fat16_chain_valid(uint32_t first) {
+    uint32_t cluster = first;
+    uint32_t end = fs.max_cluster < FAT16_RESERVED_START ?
+                   fs.max_cluster : FAT16_RESERVED_START;
+    uint32_t limit = end > 2 ? end - 2 : 0;
+
+    if (cluster == 0) return 1;           /* empty file */
+    for (uint32_t steps = 0; steps < limit; steps++) {
+        uint32_t next;
+
+        if (!fat16_cluster_valid(cluster)) return 0;
+        next = fat16_next_cluster(cluster);
+        if (next >= FAT16_EOC) return 1;
+        cluster = next;
+    }
+    return 0;                              /* longer than the volume: a cycle */
 }
 
 static uint32_t fat16_cluster_lba(uint32_t cluster) {
@@ -466,9 +492,11 @@ static int fat16_vfs_unlink(fs_node_t *node, const char *name) {
 
     /* Free the cluster chain, then mark the entry deleted. */
     uint32_t cluster = rd16((uint32_t)(e - fs.img) + 26);
-    while (cluster >= 2 && cluster < FAT16_EOC) {
+    if (!fat16_chain_valid(cluster)) return -1;
+    while (fat16_cluster_valid(cluster)) {
         uint32_t next = fat16_next_cluster(cluster);
         fat16_set_cluster(cluster, 0);
+        if (next >= FAT16_EOC) break;
         cluster = next;
     }
     e[0] = 0xE5;
