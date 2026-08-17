@@ -1,6 +1,8 @@
 #include "test.h"
 #include "../pipe.h"
+#include "../task.h"
 
+#include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,10 +26,24 @@ static pipe_t *g_pipe;                       /* pipe under test, for the escape 
 static void  (*g_block_hook)(const void *);  /* scripted peer action */
 static int     g_block_count;
 static int     g_kfrees;
+static int     g_inside_block_hook;
+static int     g_defer_free;
+static int     g_free_during_block;
+static void   *g_deferred_free;
+static int     g_kill_pending;
+static int     g_expect_exit;
+static int32_t g_exit_status;
+static jmp_buf g_exit_jmp;
+static int     g_peer_write_result;
 
 void task_block_current(const void *chan) {
     g_block_count++;
-    if (g_block_hook) { g_block_hook(chan); return; }
+    if (g_block_hook) {
+        g_inside_block_hook = 1;
+        g_block_hook(chan);
+        g_inside_block_hook = 0;
+        return;
+    }
     /* Unexpected block: force every pipe loop to terminate so the test fails
      * cleanly instead of spinning. */
     if (g_pipe) { g_pipe->readers = 0; g_pipe->writers = 0; g_pipe->count = 0; }
@@ -35,21 +51,40 @@ void task_block_current(const void *chan) {
 void task_wake_one(const void *chan) { (void)chan; }
 void task_wake_all(const void *chan) { (void)chan; }
 
-/* task_block_killable() consults these on both sides of every block. Nothing
- * in this harness issues a kill request, so the pipe must never exit. */
-int task_kill_pending(void) { return 0; }
+int task_kill_pending(void) { return g_kill_pending; }
 void task_exit(int32_t status) {
+    if (g_expect_exit) {
+        g_exit_status = status;
+        longjmp(g_exit_jmp, 1);
+    }
     printf("  FAIL unexpected task_exit(%d)\n", status);
     exit(1);
 }
 
 void *kmalloc(size_t n) { return malloc(n ? n : 1); }
-void kfree(void *p) { g_kfrees++; free(p); }
+void kfree(void *p) {
+    g_kfrees++;
+    if (g_inside_block_hook) g_free_during_block++;
+    if (g_defer_free) {
+        g_deferred_free = p;
+        return;
+    }
+    free(p);
+}
 
 static void reset_hooks(pipe_t *p) {
     g_pipe = p;
     g_block_hook = NULL;
     g_block_count = 0;
+    g_inside_block_hook = 0;
+    g_free_during_block = 0;
+    g_kill_pending = 0;
+}
+
+static void release_deferred_free(void) {
+    free(g_deferred_free);
+    g_deferred_free = NULL;
+    g_defer_free = 0;
 }
 
 /* --- non-blocking behaviour ----------------------------------------------- */
@@ -211,6 +246,30 @@ static void hook_reader_drains(const void *chan) {
     g_pipe->read_pos = g_pipe->write_pos;
 }
 
+/* Peer action: another thread closes the process's last descriptors while the
+ * current syscall is asleep. The operation itself must keep the pipe alive
+ * until it resumes and stops touching the object. */
+static void hook_closer_drops_both_ends(const void *chan) {
+    (void)chan;
+    pipe_close_read(g_pipe);
+    pipe_close_write(g_pipe);
+}
+
+static void hook_closer_kills_and_drops_both_ends(const void *chan) {
+    hook_closer_drops_both_ends(chan);
+    g_kill_pending = 1;
+}
+
+/* Closing the descriptor must not make an already-blocked read disappear as a
+ * reader. A live writer should still be able to satisfy that syscall. */
+static void hook_reader_fd_closes_then_writer_sends(const void *chan) {
+    (void)chan;
+    pipe_close_read(g_pipe);
+    g_peer_write_result = (int)pipe_write(
+        g_pipe, (const uint8_t *)"Q", 1);
+    if (g_peer_write_result == 0) pipe_close_write(g_pipe);
+}
+
 static void test_read_blocks_then_data(void) {
     pipe_t *p = pipe_create();
     uint8_t buf[16];
@@ -273,6 +332,98 @@ static void test_write_blocks_then_space(void) {
     pipe_close_write(p);
 }
 
+static void test_blocked_operations_hold_lifetime(void) {
+    pipe_t *p = pipe_create();
+    uint8_t byte;
+    static uint8_t full[PIPE_BUF_SIZE];
+
+    TEST("blocked read survives concurrent last close");
+    CHECK(p != NULL);
+    if (!p) return;
+    reset_hooks(p);
+    g_kfrees = 0;
+    g_defer_free = 1;
+    g_deferred_free = NULL;
+    g_block_hook = hook_closer_drops_both_ends;
+
+    CHECK_EQ(pipe_read(p, &byte, 1), 0);
+    CHECK_EQ(g_block_count, 1);
+    CHECK_EQ(g_free_during_block, 0);
+    CHECK_EQ(g_kfrees, 1);
+    release_deferred_free();
+
+    TEST("blocked write survives concurrent last close");
+    p = pipe_create();
+    CHECK(p != NULL);
+    if (!p) return;
+    reset_hooks(p);
+    memset(full, 'X', sizeof(full));
+    CHECK_EQ(pipe_write(p, full, sizeof(full)), sizeof(full));
+    g_kfrees = 0;
+    g_defer_free = 1;
+    g_deferred_free = NULL;
+    g_block_hook = hook_closer_drops_both_ends;
+
+    CHECK_EQ(pipe_write(p, (const uint8_t *)"!", 1), 0);
+    CHECK_EQ(g_block_count, 1);
+    CHECK_EQ(g_free_during_block, 0);
+    CHECK_EQ(g_kfrees, 1);
+    release_deferred_free();
+}
+
+static void test_killed_operation_releases_lifetime(void) {
+    pipe_t *p = pipe_create();
+    uint8_t byte;
+
+    TEST("killed blocked read releases its operation lifetime");
+    CHECK(p != NULL);
+    if (!p) return;
+    reset_hooks(p);
+    g_kfrees = 0;
+    g_defer_free = 1;
+    g_deferred_free = NULL;
+    g_block_hook = hook_closer_kills_and_drops_both_ends;
+    g_expect_exit = 1;
+
+    if (setjmp(g_exit_jmp) == 0) {
+        (void)pipe_read(p, &byte, 1);
+        CHECK(0);  /* a pending kill must not return to the caller */
+    } else {
+        CHECK_EQ(g_exit_status, TASK_KILL_STATUS);
+        CHECK_EQ(g_free_during_block, 0);
+        CHECK_EQ(g_kfrees, 1);
+    }
+
+    g_expect_exit = 0;
+    release_deferred_free();
+}
+
+static void test_blocked_read_remains_a_reader(void) {
+    pipe_t *p = pipe_create();
+    uint8_t byte = 0;
+
+    TEST("in-flight read remains live after descriptor close");
+    CHECK(p != NULL);
+    if (!p) return;
+    reset_hooks(p);
+    g_kfrees = 0;
+    g_defer_free = 1;
+    g_deferred_free = NULL;
+    g_peer_write_result = -1;
+    g_block_hook = hook_reader_fd_closes_then_writer_sends;
+
+    CHECK_EQ(pipe_read(p, &byte, 1), 1);
+    CHECK_EQ(g_peer_write_result, 1);
+    CHECK_EQ(byte, 'Q');
+    CHECK_EQ(g_block_count, 1);
+
+    /* The hook closed the descriptor's read reference. Only the real write
+     * descriptor remains after pipe_read drops its in-flight reference. */
+    if (g_peer_write_result == 1) pipe_close_write(p);
+    CHECK_EQ(g_kfrees, 1);
+    release_deferred_free();
+}
+
 int main(void) {
     test_basic();
     test_ring_wraparound();
@@ -282,5 +433,8 @@ int main(void) {
     test_read_blocks_then_data();
     test_read_blocks_then_eof();
     test_write_blocks_then_space();
+    test_blocked_operations_hold_lifetime();
+    test_killed_operation_releases_lifetime();
+    test_blocked_read_remains_a_reader();
     TEST_REPORT("pipe");
 }
