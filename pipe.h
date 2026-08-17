@@ -21,8 +21,8 @@ typedef struct pipe {
     uint32_t read_pos;
     uint32_t write_pos;
     uint32_t count;     /* bytes currently buffered */
-    int      readers;   /* live read ends */
-    int      writers;   /* live write ends */
+    int      readers;   /* live read ends, including in-flight reads */
+    int      writers;   /* live write ends, including in-flight writes */
 } pipe_t;
 
 /* Allocate a pipe with one read end and one write end open (NULL on failure). */

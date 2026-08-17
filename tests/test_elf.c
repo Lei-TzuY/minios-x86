@@ -101,6 +101,11 @@ fs_node_t *resolve_fs(const char *path) {
  * program header is corrupted just before the SECOND time it is read, i.e.
  * after validate_segments() has approved it and before load_segments() uses it.
  * See test_rejects_a_header_rewritten_mid_load. */
+enum {
+    REWRITE_NONE,
+    REWRITE_OUT_OF_RANGE,
+    REWRITE_ENTRY_UNMAPPED,
+};
 static int g_rewrite_phdr;
 static int g_phdr_reads;
 
@@ -110,8 +115,11 @@ uint32_t read_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffe
     (void)node;
 
     if (offset == EHDR_SZ && size == PHDR_SZ) {
-        if (++g_phdr_reads == 2 && g_rewrite_phdr) {
-            phdr(0)->p_vaddr = 0x1000;      /* now far outside the user window */
+        if (++g_phdr_reads == 2) {
+            if (g_rewrite_phdr == REWRITE_OUT_OF_RANGE)
+                phdr(0)->p_vaddr = 0x1000;  /* far outside the user window */
+            if (g_rewrite_phdr == REWRITE_ENTRY_UNMAPPED)
+                phdr(0)->p_vaddr = SEG_VADDR + 0x2000U; /* valid, but moved */
         }
     }
 
@@ -492,9 +500,9 @@ static void test_rejects_a_header_rewritten_mid_load(void) {
      * read has to be re-checked. Otherwise a p_vaddr that was in range when
      * validated reaches paging_map_user_page(), which range-checks nothing. */
     build_valid(1);
-    g_rewrite_phdr = 1;
+    g_rewrite_phdr = REWRITE_OUT_OF_RANGE;
     CHECK(load() == NULL);
-    g_rewrite_phdr = 0;
+    g_rewrite_phdr = REWRITE_NONE;
 
     /* And the address space built before the corruption was noticed is freed. */
     CHECK_EQ(g_created, 1);
@@ -505,6 +513,26 @@ static void test_rejects_a_header_rewritten_mid_load(void) {
     /* Guards against the rewrite hook itself being what fails the load. */
     build_valid(1);
     CHECK(load() != NULL);
+
+    TEST("a valid rewrite may not leave the entry point unmapped");
+    /* Moving the segment to another valid user page still passes the second
+     * range check. The second-read segment set must also cover e_entry, or the
+     * loader returns an address space that faults on its first instruction. */
+    build_valid(1);
+    g_rewrite_phdr = REWRITE_ENTRY_UNMAPPED;
+    CHECK(load() == NULL);
+    g_rewrite_phdr = REWRITE_NONE;
+    CHECK_EQ(g_created, 1);
+    CHECK_EQ(g_destroyed, 1);
+    CHECK_EQ(g_closes, 1);
+
+    TEST("entry coverage may come from another second-read segment");
+    build_valid(2);
+    g_rewrite_phdr = REWRITE_ENTRY_UNMAPPED; /* only header 0 is rewritten */
+    CHECK(load() != NULL);                   /* header 1 still covers e_entry */
+    g_rewrite_phdr = REWRITE_NONE;
+    CHECK_EQ(g_created, 1);
+    CHECK_EQ(g_destroyed, 0);
 }
 
 int main(void) {

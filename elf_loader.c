@@ -50,6 +50,10 @@ static int phdr_in_user_range(const Elf32_Phdr *phdr, uint32_t file_length) {
            phdr->p_filesz <= file_length - phdr->p_offset;
 }
 
+static int phdr_maps_entry(const Elf32_Phdr *phdr, uint32_t entry) {
+    return entry >= phdr->p_vaddr && entry - phdr->p_vaddr < phdr->p_memsz;
+}
+
 static int validate_segments(fs_node_t *file, const Elf32_Ehdr *ehdr) {
     int entry_mapped = 0;
 
@@ -67,10 +71,7 @@ static int validate_segments(fs_node_t *file, const Elf32_Ehdr *ehdr) {
             return 0;
         }
 
-        if (ehdr->e_entry >= phdr.p_vaddr &&
-            ehdr->e_entry < phdr.p_vaddr + phdr.p_memsz) {
-            entry_mapped = 1;
-        }
+        if (phdr_maps_entry(&phdr, ehdr->e_entry)) entry_mapped = 1;
     }
 
     if (!entry_mapped) {
@@ -84,6 +85,7 @@ static int load_segments(address_space_t *space, fs_node_t *file,
                          const Elf32_Ehdr *ehdr, uint32_t *heap_base_out) {
     uint8_t buffer[256];
     uint32_t heap_base = USER_LOAD_BASE;
+    int entry_mapped = 0;
 
     for (uint32_t i = 0; i < ehdr->e_phnum; i++) {
         Elf32_Phdr phdr;
@@ -98,6 +100,7 @@ static int load_segments(address_space_t *space, fs_node_t *file,
             terminal_writestring("exec: segment out of user range\n");
             return 0;
         }
+        if (phdr_maps_entry(&phdr, ehdr->e_entry)) entry_mapped = 1;
 
         if (phdr.p_vaddr + phdr.p_memsz > heap_base)
             heap_base = phdr.p_vaddr + phdr.p_memsz;
@@ -125,6 +128,11 @@ static int load_segments(address_space_t *space, fs_node_t *file,
             }
             copied += chunk;
         }
+    }
+
+    if (!entry_mapped) {
+        terminal_writestring("exec: entry point is not mapped\n");
+        return 0;
     }
 
     /* Heap starts on the first page above the highest loaded segment. */

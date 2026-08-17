@@ -389,18 +389,26 @@ static uint32_t fat16_vfs_write(fs_node_t *node, uint32_t offset,
     uint8_t *entry;
     uint32_t bpc = fs.bytes_per_cluster;
     uint32_t first, end, needed, cluster, count, written = 0;
+    uint32_t first_new = 0, new_parent = 0, new_count = 0;
 
     if (!fs.mounted || !node || !node->ptr || (!buffer && size != 0)) return 0;
     if (size == 0) return 0;
 
+    /* No cluster in this volume can cover the requested first byte. Reject it
+     * before an empty file acquires a chain that can never reach the offset. */
+    if (fs.max_cluster <= 2 || offset / bpc >= fs.max_cluster - 2) return 0;
+    if (size > UINT32_MAX - offset) return 0;
+
     entry = (uint8_t *)node->ptr;
     first = rd16((uint32_t)(entry - fs.img) + 26);
     end = offset + size;
-    needed = (end + bpc - 1) / bpc;        /* clusters from the start */
+    needed = end / bpc + (end % bpc != 0); /* clusters from the start */
 
     if (first == 0) {
         first = fat16_alloc_cluster();
         if (!first) return 0;
+        first_new = first;
+        new_count = 1;
         wr16((uint32_t)(entry - fs.img) + 26, (uint16_t)first);
         node->impl = first;
     }
@@ -413,6 +421,11 @@ static uint32_t fat16_vfs_write(fs_node_t *node, uint32_t offset,
         if (next < 2 || next >= FAT16_EOC) {
             next = fat16_alloc_cluster();
             if (!next) break;
+            if (!first_new) {
+                first_new = next;
+                new_parent = cluster;
+            }
+            new_count++;
             fat16_set_cluster(cluster, (uint16_t)next);
         }
         cluster = next;
@@ -456,7 +469,30 @@ static uint32_t fat16_vfs_write(fs_node_t *node, uint32_t offset,
      * without storing a byte, so the file then claimed a length its own chain
      * could not back and reads returned the tail of the last real cluster as
      * if it were file data. A write that stores nothing must change nothing. */
-    if (written > 0) {
+    if (written == 0) {
+        /* Extending toward an unreachable offset may have consumed every free
+         * cluster before allocation failed. A zero-byte write is a no-op, so
+         * detach and free exactly the clusters allocated by this call. */
+        if (first_new) {
+            if (new_parent) {
+                fat16_set_cluster(new_parent, FAT16_EOC_MARK);
+            } else {
+                wr16((uint32_t)(entry - fs.img) + 26, 0);
+                node->impl = 0;
+            }
+            cluster = first_new;
+            for (uint32_t i = 0;
+                 i < new_count && cluster >= 2 && cluster < fs.max_cluster;
+                 i++) {
+                uint32_t next = fat16_next_cluster(cluster);
+                fat16_set_cluster(cluster, 0);
+                cluster = next;
+            }
+        }
+        return 0;
+    }
+
+    {
         uint32_t written_end = offset + written;
         if (written_end > rd32((uint32_t)(entry - fs.img) + 28)) {
             wr32((uint32_t)(entry - fs.img) + 28, written_end);
@@ -535,18 +571,27 @@ static uint32_t fat16_vfs_read(fs_node_t *node, uint32_t offset,
     return copied;
 }
 
-void fat16_install(const uint8_t *image, uint32_t size) {
-    uint32_t root_dir_sectors, blocks;
-    uint8_t *copy;
+static void fat16_release_image(void) {
+    uint8_t *image = fs.img;
+    uint32_t blocks = fs.img_size / PMM_BLOCK_SIZE +
+        (fs.img_size % PMM_BLOCK_SIZE != 0);
 
     memset(&fs, 0, sizeof(fs));
+    if (image) pmm_free_blocks(image, blocks);
+}
+
+void fat16_install(const uint8_t *image, uint32_t size) {
+    uint32_t root_dir_sectors, blocks, data_offset;
+    uint8_t *copy;
+
+    fat16_release_image();
     memset(fat16_node_pool, 0, sizeof(fat16_node_pool));
     memset(fat16_node_refs, 0, sizeof(fat16_node_refs));
     fat16_node_next = 0;
     if (!image || size < 512) return;
 
     /* Work on a writable RAM copy so the filesystem can be modified. */
-    blocks = (size + PMM_BLOCK_SIZE - 1) / PMM_BLOCK_SIZE;
+    blocks = size / PMM_BLOCK_SIZE + (size % PMM_BLOCK_SIZE != 0);
     copy = (uint8_t *)pmm_alloc_blocks(blocks);
     if (!copy) return;
     memcpy(copy, image, size);
@@ -563,7 +608,7 @@ void fat16_install(const uint8_t *image, uint32_t size) {
     if (fs.bytes_per_sector != 512 || fs.sectors_per_cluster == 0 ||
         fs.num_fats == 0 || fs.root_entries == 0 || fs.sectors_per_fat == 0 ||
         copy[510] != 0x55 || copy[511] != 0xAA) {
-        return;
+        goto reject;
     }
 
     fs.fat_lba = fs.reserved_sectors;
@@ -573,12 +618,16 @@ void fat16_install(const uint8_t *image, uint32_t size) {
     fs.data_lba = fs.root_dir_lba + root_dir_sectors;
     fs.bytes_per_cluster = fs.sectors_per_cluster * fs.bytes_per_sector;
 
-    if (fs.data_lba * fs.bytes_per_sector > fs.img_size) return;
+    /* Compare in sectors before multiplying. A malformed BPB can place the
+     * data region at or above 8,388,608 sectors, where a 512-byte offset
+     * wraps uint32_t and otherwise appears to lie inside a small image. */
+    if (fs.data_lba > fs.img_size / fs.bytes_per_sector) goto reject;
+    data_offset = fs.data_lba * fs.bytes_per_sector;
 
     /* Usable clusters are bounded by both the FAT size and the image size. */
     uint32_t fat_clusters = fs.sectors_per_fat * fs.bytes_per_sector / 2;
     uint32_t data_clusters =
-        2 + (fs.img_size - fs.data_lba * fs.bytes_per_sector) / fs.bytes_per_cluster;
+        2 + (fs.img_size - data_offset) / fs.bytes_per_cluster;
     fs.max_cluster = fat_clusters < data_clusters ? fat_clusters : data_clusters;
 
     memset(&fat16_root_node, 0, sizeof(fat16_root_node));
@@ -591,6 +640,10 @@ void fat16_install(const uint8_t *image, uint32_t size) {
     fat16_root_node.unlink = fat16_vfs_unlink;
 
     fs.mounted = 1;
+    return;
+
+reject:
+    fat16_release_image();
 }
 
 int fat16_is_mounted(void) {

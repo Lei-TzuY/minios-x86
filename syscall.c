@@ -16,6 +16,8 @@
 #define FIRST_USER_FD  3
 #define MAX_USER_STRING 128
 #define MAX_SPAWN_ARGS  MAX_ARGS   /* from elf_loader.h */
+#define USER_SHM_BASE 0x3F0000U
+#define USER_SHM_TOP  (USER_SHM_BASE + 0x1000U)
 
 /* A user file descriptor (index FIRST_USER_FD + slot) is either a file or one
  * end of a pipe. (fd 0/1 are handled by the process stdin/stdout fields.) */
@@ -75,12 +77,27 @@ static int32_t open_user_file(fs_node_t *node) {
     return fd;
 }
 
+/* Return the exclusive end of the user-owned region containing `start`.
+ * User memory is split between the low image/heap/stack window, the dedicated
+ * shared page, and the extended mmap window; ranges may not bridge the gaps. */
+static uint32_t user_region_top(uint32_t start) {
+    if (start >= USER_LOAD_BASE && start < USER_STACK_TOP)
+        return USER_STACK_TOP;
+    if (start >= USER_SHM_BASE && start < USER_SHM_TOP)
+        return USER_SHM_TOP;
+    if (start >= USER_EXT_BASE && start < USER_EXT_TOP)
+        return USER_EXT_TOP;
+    return 0;
+}
+
 static int user_buffer_valid(const void *buffer, size_t count) {
     uint32_t start = (uint32_t)buffer;
+    uint32_t top;
 
     if (count == 0) return 1;
-    if (start < USER_LOAD_BASE || start >= USER_STACK_TOP) return 0;
-    return count <= USER_STACK_TOP - start &&
+    top = user_region_top(start);
+    if (top == 0) return 0;
+    return count <= top - start &&
            paging_user_range_mapped(start, count);
 }
 
@@ -96,10 +113,11 @@ static int resolve_user_path(const char *path, char *out) {
 static int user_string_valid(const char *string) {
     uint32_t start = (uint32_t)string;
     uint32_t limit;
+    uint32_t top = user_region_top(start);
 
-    if (start < USER_LOAD_BASE || start >= USER_STACK_TOP) return 0;
+    if (top == 0) return 0;
 
-    limit = USER_STACK_TOP - start;
+    limit = top - start;
     if (limit > MAX_USER_STRING) limit = MAX_USER_STRING;
 
     for (uint32_t i = 0; i < limit; i++) {
@@ -404,6 +422,7 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
     src = files[oidx];
 
     if (newfd == 1) {                       /* stdout <- pipe write end or file */
+        if (src.kind != OF_PIPE_W && src.kind != OF_FILE) return -1;
         if (process->stdout_pipe) {
             pipe_close_write(process->stdout_pipe);
             process->stdout_pipe = NULL;
@@ -423,12 +442,11 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
             process->stdout_node = src.node;
             if (src.node) open_fs(src.node);
             process->stdout_offset = src.offset;
-        } else {
-            return -1;
         }
         return newfd;
     }
     if (newfd == 0) {                       /* stdin <- pipe read end or file */
+        if (src.kind != OF_PIPE_R && src.kind != OF_FILE) return -1;
         if (process->stdin_pipe) {
             pipe_close_read(process->stdin_pipe);
             process->stdin_pipe = NULL;
@@ -443,8 +461,6 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
             process->stdin_node = src.node;
             if (src.node) open_fs(src.node);
             process->stdin_offset = src.offset;
-        } else {
-            return -1;
         }
         return newfd;
     }
@@ -627,11 +643,21 @@ static int32_t sys_alarm(uint32_t ticks) {
     uint32_t remaining = 0;
 
     if (!process) return 0;
-    if (process->alarm_tick != 0 &&
+    /* Signed modular deadline comparisons are unambiguous only within half of
+     * the uint32_t range. Match timer_sleep's bound and preserve any old alarm
+     * when a replacement is rejected. */
+    if (ticks > 0x7FFFFFFFU) return -1;
+    if (process->alarm_active &&
         (int32_t)(process->alarm_tick - now) > 0) {
         remaining = process->alarm_tick - now;
     }
-    process->alarm_tick = (ticks == 0) ? 0 : (now + ticks);
+    if (ticks == 0) {
+        process->alarm_active = 0;
+        process->alarm_tick = 0;
+    } else {
+        process->alarm_tick = now + ticks;
+        process->alarm_active = 1;
+    }
     return (int32_t)remaining;
 }
 
@@ -664,7 +690,6 @@ static int32_t sys_cputime(void) {
 /* Map (once) a page of shared memory that survives fork as a writable shared
  * mapping. Returns its fixed user address, or 0 on failure. Allocate it before
  * forking so the child inherits the same physical frame. */
-#define USER_SHM_BASE 0x3F0000U
 static int32_t sys_shm(void) {
     if (!paging_share_page(USER_SHM_BASE)) return 0;
     return (int32_t)USER_SHM_BASE;
@@ -768,6 +793,27 @@ static int32_t sys_signal(int signum, uint32_t handler, uint32_t trampoline) {
     return 0;
 }
 
+/* Signal frames normally live in the fixed low user stack, but every thread
+ * created by SYS_THREAD_CREATE uses a stack allocated from SYS_MMAP. Accept an
+ * extended-stack range only while every page remains reserved by this process;
+ * the page-fault handler can demand-map those pages while the kernel builds the
+ * frame. */
+static int signal_stack_range_valid(const process_t *process, uint32_t start,
+                                    uint32_t size) {
+    uint32_t end;
+
+    if (!process || size == 0 || size > UINT32_MAX - start) return 0;
+    end = start + size;
+
+    if (start >= USER_STACK_BOTTOM && end <= USER_STACK_TOP) return 1;
+    if (start < USER_EXT_BASE || end > USER_EXT_TOP) return 0;
+
+    for (uint32_t page = start & ~0xFFFU; page < end; page += 0x1000U) {
+        if (!process_ext_reserved(process, page)) return 0;
+    }
+    return 1;
+}
+
 /* Restore the pre-signal context from the user stack (called by the trampoline
  * via SYS_SIGRETURN). regs->useresp points just below the saved context. */
 static void sys_sigreturn(registers_t *regs) {
@@ -786,9 +832,8 @@ static void sys_sigreturn(registers_t *regs) {
      * to touch. A frame that fails this check means the context is unusable, so
      * terminate just this process (mirrors the write-side check in
      * signal_deliver). */
-    if (regs->useresp < USER_STACK_BOTTOM ||
-        regs->useresp > USER_STACK_TOP ||
-        USER_STACK_TOP - regs->useresp < 4 + sizeof(sigcontext_t)) {
+    if (!signal_stack_range_valid(process, regs->useresp,
+                                  4 + sizeof(sigcontext_t))) {
         task_exit(-1);
     }
 
@@ -877,9 +922,10 @@ void signal_deliver(registers_t *regs) {
          * since that fault happens from kernel code (CS still 0x08 at the
          * point of the write) it would be treated as a kernel fault and halt
          * the whole system instead of just this process. */
-        if (regs->useresp < USER_STACK_BOTTOM ||
-            regs->useresp > USER_STACK_TOP ||
-            regs->useresp - USER_STACK_BOTTOM < sizeof(sigcontext_t) + 8) {
+        if (regs->useresp < sizeof(sigcontext_t) + 8 ||
+            !signal_stack_range_valid(process,
+                                      regs->useresp - sizeof(sigcontext_t) - 8,
+                                      sizeof(sigcontext_t) + 8)) {
             task_exit(-128 - sig);
         }
 

@@ -30,6 +30,7 @@
  * loop below is bounded by -- applies without a redefinition warning. */
 #undef NSIG
 
+#include "../elf_loader.h"
 #include "../process.h"
 
 /* --- the current process --------------------------------------------------- */
@@ -42,6 +43,14 @@ process_t *process_get_current(void) { return g_current; }
 int paging_user_range_mapped(uint32_t vaddr, uint32_t size) {
     (void)vaddr; (void)size;
     return 1;
+}
+
+int process_ext_reserved(const process_t *proc, uint32_t vaddr) {
+    uint32_t index;
+
+    if (!proc || vaddr < USER_EXT_BASE || vaddr >= USER_EXT_TOP) return 0;
+    index = (vaddr - USER_EXT_BASE) >> 12;
+    return (proc->ext_map[index >> 5] >> (index & 31)) & 1U;
 }
 
 /* --- the scheduler, only as far as these paths reach it -------------------- */
@@ -113,6 +122,9 @@ void task_wake_one(const void *channel) { (void)channel; g_wake_calls++; }
 void task_wake_task(task_t *task) { (void)task; g_wake_calls++; }
 task_t *task_get_current(void) { return NULL; }
 
+static uint32_t g_timer_ticks;
+uint32_t timer_get_ticks(void) { return g_timer_ticks; }
+
 #include "../syscall.c"
 
 /* test.h after syscall.c: syscall.h's SEEK_* enum must precede <stdio.h>. */
@@ -132,6 +144,17 @@ static int map_user_stack(void) {
 
     return got == want;
 }
+
+static int map_mmap_stack(void) {
+    void *want = (void *)(uintptr_t)USER_EXT_BASE;
+    size_t len = 4 * 0x1000U;
+    void *got = mmap(want, len, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+
+    return got == want;
+}
+
+static int g_mmap_stack_available;
 
 #define EFL_CF   0x00000001u
 #define EFL_BIT1 0x00000002u
@@ -168,6 +191,11 @@ static void reset_world(void) {
     g_kill_pending = 0;
     g_wake_calls = 0;
     g_deliver_sigcont_on_block = 0;
+    g_timer_ticks = 0;
+}
+
+static void reserve_mmap_stack(void) {
+    g_proc.ext_map[0] = 0xFU;   /* the four pages mapped by map_mmap_stack() */
 }
 
 /* Returns 0 (returned normally), 1 (task_exit) or 2 (faulted); see above. */
@@ -306,6 +334,37 @@ static void test_sigreturn_bounds(void) {
     g_current = &g_proc;
 }
 
+static void test_sigreturn_from_mmap_thread_stack(void) {
+    sigcontext_t *sc;
+    uint32_t sp;
+    int outcome;
+
+    if (!g_mmap_stack_available) {
+        TEST("sigreturn mmap-stack test skipped (mapping unavailable)");
+        CHECK(1);
+        return;
+    }
+
+    TEST("sigreturn restores a context from a reserved mmap thread stack");
+    reset_world();
+    reserve_mmap_stack();
+    sp = USER_EXT_BASE + 4 * 0x1000U - 0x200U;
+    sc = (sigcontext_t *)(sp + 4);
+    memset(sc, 0, sizeof(*sc));
+    sc->eip = 0x00300400;
+    sc->eflags = EFL_IF;
+    sc->useresp = USER_EXT_BASE + 4 * 0x1000U - 0x80U;
+    g_regs.useresp = sp;
+    g_proc.in_signal = 1;
+
+    outcome = RUN_MAY_EXIT(sys_sigreturn(&g_regs));
+    CHECK_EQ(outcome, 0);
+    if (outcome != 0) return;
+    CHECK_EQ(g_regs.eip, 0x00300400);
+    CHECK_EQ(g_regs.useresp, USER_EXT_BASE + 4 * 0x1000U - 0x80U);
+    CHECK_EQ(g_proc.in_signal, 0);
+}
+
 /* --- delivery -------------------------------------------------------------- */
 
 static void test_deliver_builds_a_frame(void) {
@@ -341,6 +400,32 @@ static void test_deliver_builds_a_frame(void) {
     CHECK_EQ(sc->ebx, 0x22222222);
     CHECK_EQ(sc->ebp, 0x33333333);
     CHECK_EQ(sc->useresp, original_esp);
+}
+
+static void test_deliver_on_mmap_thread_stack(void) {
+    uint32_t original_esp;
+    int outcome;
+
+    if (!g_mmap_stack_available) {
+        TEST("signal mmap-stack delivery test skipped (mapping unavailable)");
+        CHECK(1);
+        return;
+    }
+
+    TEST("delivery builds a frame on a reserved mmap thread stack");
+    reset_world();
+    reserve_mmap_stack();
+    original_esp = USER_EXT_BASE + 4 * 0x1000U - 0x100U;
+    g_regs.useresp = original_esp;
+    g_proc.sig_handler[SIGUSR1] = 0x00300500;
+    g_proc.sig_pending = (1u << SIGUSR1);
+
+    outcome = RUN_MAY_EXIT(signal_deliver(&g_regs));
+    CHECK_EQ(outcome, 0);
+    if (outcome != 0) return;
+    CHECK_EQ(g_regs.eip, 0x00300500);
+    CHECK_EQ(g_regs.useresp, original_esp - sizeof(sigcontext_t) - 8);
+    CHECK_EQ(*(uint32_t *)g_regs.useresp, g_proc.sig_trampoline);
 }
 
 static void test_deliver_round_trip(void) {
@@ -495,6 +580,15 @@ static void test_deliver_bounds(void) {
     CHECK_EQ(RUN_MAY_EXIT(signal_deliver(&g_regs)), 0);
     CHECK_EQ(g_regs.eip, 0x00300500);
     CHECK_EQ(g_regs.useresp, USER_STACK_BOTTOM);
+
+    /* An address in the mmap window is not a stack until the process has
+     * actually reserved every page that would hold the frame. */
+    reset_world();
+    g_proc.sig_handler[SIGUSR1] = 0x00300500;
+    g_proc.sig_pending = (1u << SIGUSR1);
+    g_regs.useresp = USER_EXT_BASE + 0x1000U;
+    CHECK_EQ(RUN_MAY_EXIT(signal_deliver(&g_regs)), 1);
+    CHECK_EQ(g_faults_seen, 0);
 }
 
 static void test_job_control(void) {
@@ -524,25 +618,47 @@ static void test_job_control(void) {
     CHECK_EQ(g_task_exit_calls, 0);
 }
 
+static void test_alarm_wrap_boundaries(void) {
+    TEST("alarm deadline may wrap exactly to tick zero");
+    reset_world();
+    g_timer_ticks = UINT32_MAX;
+    CHECK_EQ(sys_alarm(1), 0);
+    /* Cancelling immediately must report the full tick still remaining. A zero
+     * deadline is valid here, not an inactive-alarm sentinel. */
+    CHECK_EQ(sys_alarm(0), 1);
+
+    TEST("alarm rejects delays outside signed modular range");
+    reset_world();
+    g_timer_ticks = 100;
+    CHECK_EQ(sys_alarm(10), 0);
+    CHECK_EQ(sys_alarm(0x80000000U), -1);
+    /* A rejected replacement must leave the existing alarm intact. */
+    CHECK_EQ(sys_alarm(0), 10);
+}
+
 int main(void) {
     if (!map_user_stack()) {
         printf("SKIP signal: could not map the user stack region\n");
         return 0;
     }
+    g_mmap_stack_available = map_mmap_stack();
     signal(SIGSEGV, on_sigsegv);
     signal(SIGBUS, on_sigsegv);
 
     test_sigreturn_sanitises_eflags();
     test_sigreturn_cannot_clear_if();
     test_sigreturn_bounds();
+    test_sigreturn_from_mmap_thread_stack();
 
     test_deliver_builds_a_frame();
+    test_deliver_on_mmap_thread_stack();
     test_deliver_round_trip();
     test_deliver_only_to_user_mode();
     test_deliver_one_signal_per_return();
     test_default_actions();
     test_deliver_bounds();
     test_job_control();
+    test_alarm_wrap_boundaries();
 
     TEST_REPORT("signal");
 }
