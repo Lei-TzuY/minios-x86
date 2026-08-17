@@ -793,6 +793,27 @@ static int32_t sys_signal(int signum, uint32_t handler, uint32_t trampoline) {
     return 0;
 }
 
+/* Signal frames normally live in the fixed low user stack, but every thread
+ * created by SYS_THREAD_CREATE uses a stack allocated from SYS_MMAP. Accept an
+ * extended-stack range only while every page remains reserved by this process;
+ * the page-fault handler can demand-map those pages while the kernel builds the
+ * frame. */
+static int signal_stack_range_valid(const process_t *process, uint32_t start,
+                                    uint32_t size) {
+    uint32_t end;
+
+    if (!process || size == 0 || size > UINT32_MAX - start) return 0;
+    end = start + size;
+
+    if (start >= USER_STACK_BOTTOM && end <= USER_STACK_TOP) return 1;
+    if (start < USER_EXT_BASE || end > USER_EXT_TOP) return 0;
+
+    for (uint32_t page = start & ~0xFFFU; page < end; page += 0x1000U) {
+        if (!process_ext_reserved(process, page)) return 0;
+    }
+    return 1;
+}
+
 /* Restore the pre-signal context from the user stack (called by the trampoline
  * via SYS_SIGRETURN). regs->useresp points just below the saved context. */
 static void sys_sigreturn(registers_t *regs) {
@@ -811,9 +832,8 @@ static void sys_sigreturn(registers_t *regs) {
      * to touch. A frame that fails this check means the context is unusable, so
      * terminate just this process (mirrors the write-side check in
      * signal_deliver). */
-    if (regs->useresp < USER_STACK_BOTTOM ||
-        regs->useresp > USER_STACK_TOP ||
-        USER_STACK_TOP - regs->useresp < 4 + sizeof(sigcontext_t)) {
+    if (!signal_stack_range_valid(process, regs->useresp,
+                                  4 + sizeof(sigcontext_t))) {
         task_exit(-1);
     }
 
@@ -902,9 +922,10 @@ void signal_deliver(registers_t *regs) {
          * since that fault happens from kernel code (CS still 0x08 at the
          * point of the write) it would be treated as a kernel fault and halt
          * the whole system instead of just this process. */
-        if (regs->useresp < USER_STACK_BOTTOM ||
-            regs->useresp > USER_STACK_TOP ||
-            regs->useresp - USER_STACK_BOTTOM < sizeof(sigcontext_t) + 8) {
+        if (regs->useresp < sizeof(sigcontext_t) + 8 ||
+            !signal_stack_range_valid(process,
+                                      regs->useresp - sizeof(sigcontext_t) - 8,
+                                      sizeof(sigcontext_t) + 8)) {
             task_exit(-128 - sig);
         }
 
