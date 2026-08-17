@@ -60,6 +60,21 @@ static void test_buffer_range(void) {
     CHECK_EQ(user_buffer_valid((void *)(USER_STACK_TOP + 0x1000), 4), 0);
 }
 
+static void test_buffer_mmap_range(void) {
+    map_yes();
+    TEST("buffer: mapped mmap pages are valid user memory");
+    CHECK_EQ(user_buffer_valid((void *)USER_EXT_BASE, 4), 1);
+    CHECK_EQ(user_buffer_valid((void *)(USER_EXT_TOP - 4), 4), 1);
+    CHECK_EQ(user_buffer_valid((void *)(USER_EXT_TOP - 4), 8), 0);
+    CHECK_EQ(user_buffer_valid((void *)USER_EXT_TOP, 4), 0);
+    CHECK_EQ(user_buffer_valid((void *)(USER_STACK_TOP + 0x1000), 4), 0);
+
+    TEST("buffer: the mapped shared page is valid user memory");
+    CHECK_EQ(user_buffer_valid((void *)USER_SHM_BASE, 4), 1);
+    CHECK_EQ(user_buffer_valid((void *)(USER_SHM_TOP - 4), 4), 1);
+    CHECK_EQ(user_buffer_valid((void *)(USER_SHM_TOP - 4), 8), 0);
+}
+
 static void test_buffer_overflow(void) {
     /* Force the mapping oracle to say "mapped" so ONLY the bound arithmetic
      * decides -- otherwise the oracle rejecting a huge range would mask an
@@ -120,6 +135,7 @@ static void test_alloc_fd(void) {
 
 /* --- user_string_valid: needs real memory at the user addresses ----------- */
 static volatile char *g_user;     /* mapped view of [USER_LOAD_BASE, TOP) */
+static volatile char *g_ext;      /* mapped view of [USER_EXT_BASE, EXT_TOP) */
 
 static void test_string(void) {
     uint32_t region = USER_STACK_TOP - USER_LOAD_BASE;
@@ -166,6 +182,24 @@ static void test_string(void) {
     }
 }
 
+static void test_string_mmap_range(void) {
+    uint32_t i;
+
+    if (!g_ext) {
+        TEST("mmap string tests skipped (could not map the extended region)");
+        CHECK(1);
+        return;
+    }
+
+    g_lo = USER_EXT_BASE;
+    g_hi = USER_EXT_TOP;
+    for (i = 0; i < 6; i++) g_ext[0x1000 + i] = "hello"[i];
+
+    TEST("string: mapped mmap memory is a valid source");
+    CHECK_EQ(user_string_valid((char *)(USER_EXT_BASE + 0x1000)), 1);
+    CHECK_EQ(user_string_valid((char *)USER_EXT_TOP), 0);
+}
+
 int main(void) {
     /* Try to place real memory at the fixed user addresses for the string
      * tests; the buffer/alloc tests do not need it. */
@@ -173,12 +207,20 @@ int main(void) {
     size_t len = USER_STACK_TOP - USER_LOAD_BASE;
     void *got = mmap(want, len, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    void *ext_want = (void *)(uintptr_t)USER_EXT_BASE;
+    size_t ext_len = USER_EXT_TOP - USER_EXT_BASE;
+    void *ext_got = mmap(ext_want, ext_len, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                         -1, 0);
     g_user = (got == want) ? (volatile char *)got : NULL;
+    g_ext = (ext_got == ext_want) ? (volatile char *)ext_got : NULL;
 
     test_buffer_range();
+    test_buffer_mmap_range();
     test_buffer_overflow();
     test_buffer_mapping();
     test_alloc_fd();
     test_string();
+    test_string_mmap_range();
     TEST_REPORT("syscall-valid");
 }

@@ -16,6 +16,8 @@
 #define FIRST_USER_FD  3
 #define MAX_USER_STRING 128
 #define MAX_SPAWN_ARGS  MAX_ARGS   /* from elf_loader.h */
+#define USER_SHM_BASE 0x3F0000U
+#define USER_SHM_TOP  (USER_SHM_BASE + 0x1000U)
 
 /* A user file descriptor (index FIRST_USER_FD + slot) is either a file or one
  * end of a pipe. (fd 0/1 are handled by the process stdin/stdout fields.) */
@@ -75,12 +77,27 @@ static int32_t open_user_file(fs_node_t *node) {
     return fd;
 }
 
+/* Return the exclusive end of the user-owned region containing `start`.
+ * User memory is split between the low image/heap/stack window, the dedicated
+ * shared page, and the extended mmap window; ranges may not bridge the gaps. */
+static uint32_t user_region_top(uint32_t start) {
+    if (start >= USER_LOAD_BASE && start < USER_STACK_TOP)
+        return USER_STACK_TOP;
+    if (start >= USER_SHM_BASE && start < USER_SHM_TOP)
+        return USER_SHM_TOP;
+    if (start >= USER_EXT_BASE && start < USER_EXT_TOP)
+        return USER_EXT_TOP;
+    return 0;
+}
+
 static int user_buffer_valid(const void *buffer, size_t count) {
     uint32_t start = (uint32_t)buffer;
+    uint32_t top;
 
     if (count == 0) return 1;
-    if (start < USER_LOAD_BASE || start >= USER_STACK_TOP) return 0;
-    return count <= USER_STACK_TOP - start &&
+    top = user_region_top(start);
+    if (top == 0) return 0;
+    return count <= top - start &&
            paging_user_range_mapped(start, count);
 }
 
@@ -96,10 +113,11 @@ static int resolve_user_path(const char *path, char *out) {
 static int user_string_valid(const char *string) {
     uint32_t start = (uint32_t)string;
     uint32_t limit;
+    uint32_t top = user_region_top(start);
 
-    if (start < USER_LOAD_BASE || start >= USER_STACK_TOP) return 0;
+    if (top == 0) return 0;
 
-    limit = USER_STACK_TOP - start;
+    limit = top - start;
     if (limit > MAX_USER_STRING) limit = MAX_USER_STRING;
 
     for (uint32_t i = 0; i < limit; i++) {
@@ -664,7 +682,6 @@ static int32_t sys_cputime(void) {
 /* Map (once) a page of shared memory that survives fork as a writable shared
  * mapping. Returns its fixed user address, or 0 on failure. Allocate it before
  * forking so the child inherits the same physical frame. */
-#define USER_SHM_BASE 0x3F0000U
 static int32_t sys_shm(void) {
     if (!paging_share_page(USER_SHM_BASE)) return 0;
     return (int32_t)USER_SHM_BASE;
