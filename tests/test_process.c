@@ -1213,6 +1213,29 @@ static void test_pids_are_monotonic(void) {
     CHECK(find_by_pid(seen[0]) == NULL);
 }
 
+static void test_pid_counter_wraps_to_an_unused_positive_pid(void) {
+    process_t *first;
+    int32_t max_pid, wrapped_pid;
+
+    TEST("pid allocation wraps without overflow or a live-pid collision");
+    reset_world();
+
+    first = launch("first", 0);             /* keeps pid 1 live */
+    CHECK(first != NULL);
+    if (!first) return;
+    CHECK_EQ(first->pid, 1);
+
+    next_pid = INT32_MAX;
+    max_pid = process_launch(0x1000, 0x2000, &g_spaces[1], "max", 0x3000);
+    wrapped_pid = process_launch(0x1000, 0x2000, &g_spaces[2], "wrap", 0x3000);
+
+    CHECK_EQ(max_pid, INT32_MAX);
+    CHECK_EQ(wrapped_pid, 2);                /* pid 1 is still occupied */
+    CHECK(find_by_pid(max_pid) != NULL);
+    CHECK(find_by_pid(wrapped_pid) != NULL);
+    CHECK_EQ(used_slots(), 3);
+}
+
 static void test_repeated_lifecycles(void) {
     TEST("many allocate/exit/reap cycles leak nothing");
     reset_world();
@@ -1671,6 +1694,7 @@ int main(void) {
     test_detach();
     test_slot_reuse_carries_nothing_over();
     test_pids_are_monotonic();
+    test_pid_counter_wraps_to_an_unused_positive_pid();
     test_repeated_lifecycles();
 
     test_fork_success();
