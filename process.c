@@ -737,8 +737,9 @@ void process_check_alarms(uint32_t current_tick) {
     for (int i = 0; i < MAX_PROCESSES; i++) {
         process_t *process = &processes[i];
 
-        if (process->state == PROCESS_RUNNING && process->alarm_tick != 0 &&
+        if (process->state == PROCESS_RUNNING && process->alarm_active &&
             (int32_t)(current_tick - process->alarm_tick) >= 0) {
+            process->alarm_active = 0;
             process->alarm_tick = 0;
             process_send_signal(process->pid, SIGALRM);
         }

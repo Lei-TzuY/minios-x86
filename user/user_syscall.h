@@ -548,7 +548,8 @@ static inline int sys_exec_argv(int argc, const char **argv) {
 #define SIGSTOP 19
 
 /* Schedule SIGALRM after `ticks` timer ticks (100/sec; 0 cancels). Returns the
- * ticks left on any previous alarm (SYS_ALARM = 33). */
+ * ticks left on any previous alarm, or -1 if ticks exceeds INT32_MAX
+ * (SYS_ALARM = 33). */
 static inline int sys_alarm(unsigned int ticks) {
     int ret;
     __asm__ volatile(
