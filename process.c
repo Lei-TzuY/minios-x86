@@ -13,7 +13,6 @@ extern void enter_user_mode_iret(const fork_frame_t *frame);
 static process_t processes[MAX_PROCESSES];
 static int32_t next_pid = 1;
 static uint32_t peak_process_count;
-static volatile int32_t kill_request_pid = -1;
 
 static uint32_t process_get_used_count(void) {
     uint32_t count = 0;
@@ -714,7 +713,6 @@ int process_has_sighandler(int32_t pid, int signum) {
 
 void process_request_kill(int32_t pid) {
     process_t *proc;
-    kill_request_pid = pid;
     /* Mark and wake every task of the process, not just proc->task. Two
      * reasons: a process may own several tasks (SYS_THREAD_CREATE), and a
      * blocked task cannot be killed by the per-tick check below -- it only
@@ -748,33 +746,9 @@ void process_check_alarms(uint32_t current_tick) {
 }
 
 void process_check_kill(void) {
-    task_t *t;
-    process_t *proc;
-
-    if (kill_request_pid < 0) return;
-
-    /* Stale request: target already exited or was released. */
-    proc = process_find(kill_request_pid);
-    if (!proc || proc->state != PROCESS_RUNNING) {
-        kill_request_pid = -1;
-        return;
-    }
-
-    t = task_get_current();
-    if (!t || !t->process) return;
-    if (t->process->pid == kill_request_pid) {
-        /* Deliberately leave the request pending: a process may own several
-         * tasks (SYS_THREAD_CREATE), and this only terminates the one that
-         * happens to be current. Clearing here would let the remaining threads
-         * survive the kill, leaving the process RUNNING forever -- and anything
-         * waiting on it blocked forever. Each sibling is killed as it becomes
-         * current instead; the staleness check above drops the request once the
-         * last one has gone and the process is no longer RUNNING.
-         *
-         * This path only reaches tasks that are actually running. A task parked
-         * inside a `while (cond) block;` wait never becomes current and is
-         * instead flagged and woken by task_kill_blocked(), called from
-         * process_request_kill(); it then exits from task_block_killable(). */
+    /* task_kill_blocked() marks every task of every requested process. Using
+     * the current task's flag instead of one global target keeps simultaneous
+     * requests independent and naturally covers every thread in a process. */
+    if (task_kill_pending())
         task_exit(TASK_KILL_STATUS);  /* EOI was already sent by irq_handler */
-    }
 }

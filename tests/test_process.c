@@ -168,7 +168,6 @@ static const void  *g_last_block_channel;
 static task_t      *g_last_block_task;
 static int          g_stuck_blocks;        /* parked with nothing to wake us */
 static int          g_woke_me;             /* set by a wake aimed at us */
-static int          g_kill_pending;
 
 /* A real scheduler has a blocked list. Keeping one in the stub matters: a
  * channel wake has to choose an actual waiter, so the harness can distinguish
@@ -264,7 +263,9 @@ task_t *create_task(void (*entry)(void), task_exit_callback_t on_exit,
 
 task_t *task_get_current(void) { return g_current_task; }
 
-int task_kill_pending(void) { return g_kill_pending; }
+int task_kill_pending(void) {
+    return g_current_task && g_current_task->kill_pending;
+}
 
 void task_exit(int32_t status) {
     g_task_exit_calls++;
@@ -332,8 +333,11 @@ void task_wake_one(const void *channel) {
 }
 
 uint32_t task_kill_blocked(struct process *process) {
-    (void)process;
     g_kill_blocked_calls++;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (g_task_used[i] && g_tasks[i].process == process)
+            g_tasks[i].kill_pending = 1;
+    }
     return 0;
 }
 
@@ -386,7 +390,6 @@ static void reset_world(void) {
     g_last_block_task = NULL;
     g_stuck_blocks = 0;
     g_woke_me = 0;
-    g_kill_pending = 0;
     g_blocked_count = 0;
     g_wake_task_calls = 0;
     g_last_wake_task = NULL;
@@ -404,7 +407,6 @@ static void reset_world(void) {
     for (int i = 0; i < MAX_PROCESSES; i++) memset(&processes[i], 0, sizeof(processes[i]));
     next_pid = 1;
     peak_process_count = 0;
-    kill_request_pid = -1;
 }
 
 /* Run a process's exit the way the scheduler does: the task's on_exit hook. */
@@ -1560,6 +1562,45 @@ static void test_two_threads_only_the_last_finishes(void) {
     expect_no_underflow();
 }
 
+static void test_multiple_kill_requests_are_independent(void) {
+    process_t *first, *second;
+    int escaped;
+
+    TEST("multiple kill requests retain each target");
+    reset_world();
+    first = launch("first", 0);
+    second = launch("second", 1);
+    CHECK(first && second);
+    if (!first || !second) return;
+
+    process_request_kill(first->pid);
+    process_request_kill(second->pid);
+    CHECK(first->task->kill_pending);
+    CHECK(second->task->kill_pending);
+
+    /* The second request must not overwrite the first. Each marked runnable
+     * task should leave when the timer checks that task. */
+    g_current_task = first->task;
+    escaped = setjmp(g_exit_jmp);
+    if (escaped == 0) {
+        process_check_kill();
+        CHECK(0);  /* a marked current task must not return */
+    } else {
+        CHECK_EQ(escaped, 1);
+        CHECK_EQ(g_task_exit_status, TASK_KILL_STATUS);
+    }
+
+    g_current_task = second->task;
+    escaped = setjmp(g_exit_jmp);
+    if (escaped == 0) {
+        process_check_kill();
+        CHECK(0);
+    } else {
+        CHECK_EQ(escaped, 1);
+        CHECK_EQ(g_task_exit_status, TASK_KILL_STATUS);
+    }
+}
+
 int main(void) {
     int escaped = setjmp(g_exit_jmp);
 
@@ -1613,6 +1654,9 @@ int main(void) {
 
     test_send_signal_wakes_a_blocked_target();
     test_exit_signals_the_parent();
+
+    /* Uses g_exit_jmp for expected task exits, so keep it last. */
+    test_multiple_kill_requests_are_independent();
 
     TEST_REPORT("process");
 }

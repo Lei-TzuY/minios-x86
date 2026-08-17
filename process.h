@@ -187,10 +187,10 @@ int process_getenv(const char *key, char *buf, uint32_t size);
 /* True if the process has a real (catchable) handler installed for `signum`. */
 int  process_has_sighandler(int32_t pid, int signum);
 
-/* Request that a running process be killed on its next timer tick (signal -130).
- * Safe to call from interrupt context. */
+/* Mark every task of a process for termination and wake its blocked tasks.
+ * Runnable tasks leave on their next timer tick. Safe from interrupt context. */
 void process_request_kill(int32_t pid);
-/* Called from timer_callback: kill current task if it is the kill-request target. */
+/* Called from timer_callback: kill the current task if it has been marked. */
 void process_check_kill(void);
 /* Called each timer tick: raise SIGALRM on processes whose alarm has expired. */
 void process_check_alarms(uint32_t current_tick);
