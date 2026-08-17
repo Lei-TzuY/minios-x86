@@ -13,7 +13,8 @@
 int sem_init(int id, int value);
 /* P: block until the count is positive, then decrement. Returns 0, or -1. */
 int sem_wait(int id);
-/* V: increment the count and wake one waiter. Returns 0, or -1. */
+/* V: increment the count and wake one waiter. Returns 0, or -1 on error
+ * (including a count already at INT32_MAX). */
 int sem_post(int id);
 
 #endif

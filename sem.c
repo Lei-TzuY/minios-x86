@@ -49,6 +49,10 @@ int sem_post(int id) {
 
     flags = save_irq_disable();
     if (!semaphores[id].used) { restore_irq(flags); return -1; }
+    if (semaphores[id].value == INT32_MAX) {
+        restore_irq(flags);
+        return -1;
+    }
     semaphores[id].value++;
     task_wake_one(&semaphores[id]);
     restore_irq(flags);

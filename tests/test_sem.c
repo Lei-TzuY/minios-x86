@@ -1,6 +1,7 @@
 #include "test.h"
 #include "../sem.h"
 
+#include <limits.h>
 #include <stdlib.h>
 
 /*
@@ -114,11 +115,32 @@ static void test_reinit_resets_value(void) {
     CHECK_EQ(g_block_count, 1);
 }
 
+static void test_post_rejects_count_overflow(void) {
+    int rc;
+
+    TEST("post rejects count overflow");
+    CHECK_EQ(sem_init(4, INT_MAX), 0);
+    rc = sem_post(4);
+    CHECK_EQ(rc, -1);
+
+    /* On a correct rejection the count is still usable and still at INT_MAX.
+     * Skip this path on the broken implementation, whose wrapped-negative
+     * value would make sem_wait block for billions of posts. */
+    if (rc == -1) {
+        g_block_count = 0;
+        CHECK_EQ(sem_wait(4), 0);
+        CHECK_EQ(g_block_count, 0);
+        CHECK_EQ(sem_post(4), 0);
+        CHECK_EQ(sem_post(4), -1);
+    }
+}
+
 int main(void) {
     test_id_validation();
     test_uninitialised();
     test_counting();
     test_wait_blocks_then_posted();
     test_reinit_resets_value();
+    test_post_rejects_count_overflow();
     TEST_REPORT("sem");
 }
