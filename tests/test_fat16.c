@@ -89,6 +89,7 @@ static void test_reject_wrapped_layout(void) {
     fat16_install(image, sizeof(image));
     CHECK(!fat16_is_mounted());
     CHECK(fat16_get_root_node() == NULL);
+    fat16_install(NULL, 0);               /* isolate the following mount tests */
 }
 
 static void test_install_ownership(void) {
