@@ -43,13 +43,30 @@ static process_t *process_find(int32_t pid) {
     return NULL;
 }
 
+/* Return the next positive pid without overflowing int32_t or colliding with
+ * a process that is still live after the counter wraps. Because allocation
+ * only reaches this helper when a process-table slot is free, at most
+ * MAX_PROCESSES - 1 candidates can be occupied. */
+static int32_t process_allocate_pid(void) {
+    for (int attempts = 0; attempts < MAX_PROCESSES; attempts++) {
+        int32_t candidate = next_pid;
+
+        next_pid = (next_pid == INT32_MAX) ? 1 : next_pid + 1;
+        if (!process_find(candidate)) return candidate;
+    }
+    return -1;
+}
+
 static process_t *process_allocate(void) {
     for (int i = 0; i < MAX_PROCESSES; i++) {
         if (processes[i].state == PROCESS_UNUSED) {
             process_t *process = &processes[i];
+            int32_t pid = process_allocate_pid();
+
+            if (pid < 1) return NULL;
             memset(process, 0, sizeof(*process));
             process->slot = i;
-            process->pid = next_pid++;
+            process->pid = pid;
             process->parent_pid = process_get_current_pid();
             process->state = PROCESS_RUNNING;
             process->cwd[0] = '/';
