@@ -1,101 +1,180 @@
 # miniOS
 
-A small but feature-rich hobby operating system for 32-bit x86 (i386), written
-from scratch in C and assembly. It boots via Multiboot/GRUB, runs user programs
-in ring 3 through a system-call interface, and ships with two interactive
-shells and an automated test suite.
+A small but feature-rich hobby operating system for 32-bit x86 (i386), written from scratch in C and assembly. It boots via Multiboot/GRUB, runs user programs in ring 3 through a system-call interface, and includes automated native and QEMU-based testing.
 
-> **Status:** educational / hobby project. It is meant for learning and
-> experimentation, not production use.
+> **Status:** educational / hobby project. Built for systems learning, debugging, and experimentation — not production use.
+
+## Why this project is interesting
+
+miniOS is not just a bootable kernel demo. It implements and tests several interacting OS subsystems end to end:
+
+- protected mode, GDT/IDT, PIC/IRQ, timer and keyboard input
+- physical memory management, paging, copy-on-write `fork`, demand paging, `mmap`/`munmap`, shared memory
+- preemptive round-robin scheduling, processes, threads, signals, job control, semaphores and pipes
+- VFS with RAMFS, ATA-backed DiskFS, read/write FAT16 and a synthetic `/proc`
+- ELF loading and ring-3 user programs
+- a user shell with pipes, redirection, background jobs and shell variables
+
+The project is developed with an audit-driven testing loop: bugs and invariants are turned into native tests, mutation checks, and end-to-end regressions instead of being left as informal assumptions.
+
+## Verification at a glance
+
+Recent project checkpoints include:
+
+- **51 system calls** and **52 user programs / demos**
+- native host-side unit suites for kernel logic
+- QEMU end-to-end tests, including the real GRUB/ISO boot path
+- mutation testing used to validate whether tests actually detect injected faults
+- regression tests for issues involving ELF loading, integer overflow, user-pointer validation, process lifecycle, descriptor ownership, filesystems, ATA behavior and signal handling
+
+Build and run the complete validation path with:
+
+```sh
+make clean
+make all
+make test
+```
+
+## Architecture
+
+```text
++-----------------------------+
+|        User programs        |
+| shell / tools / demos       |
++-------------+---------------+
+              | syscalls
++-------------v---------------+
+| Process / signal / IPC      |
+| scheduler / fork / exec     |
++-------------+---------------+
+              |
++-------------v---------------+
+| VFS + filesystems           |
+| RAMFS / DiskFS / FAT16      |
++-------------+---------------+
+              |
++-------------v---------------+
+| Memory + CPU core           |
+| PMM / paging / COW / IRQ    |
++-------------+---------------+
+              |
++-------------v---------------+
+| x86 hardware / QEMU         |
++-----------------------------+
+```
 
 ## Features
 
-- **Boot & CPU:** Multiboot kernel, 32-bit protected mode, GDT/IDT, PIC/IRQ.
-- **Memory:** physical memory manager, paging with **copy-on-write fork** and
-  **demand paging**, an **mmap/munmap** region with page-granular address
-  reuse, a kernel heap, and **shared memory** between processes.
-- **Processes & scheduling:** preemptive round-robin scheduler;
-  `fork` / `execv` / `wait` / `waitpid` / `exit`; per-process CPU-time accounting.
-- **Signals & job control:** SIGINT/KILL/USR1/ALRM/TERM/CHLD, `pause`, `alarm`,
-  `kill`, plus **SIGSTOP/SIGCONT job control**.
-- **IPC:** pipes, signals, shared memory, and **counting semaphores**.
-- **Filesystems:** a unified VFS over three backends — **RAMFS**, an ATA-backed
-  **DiskFS**, and a read/write **FAT16** image — plus a synthetic **`/proc`**
-  (`/proc/count`, `/proc/uptime`, `/proc/processes`, `/proc/self/status`).
-- **Environment:** per-process environment variables inherited across
-  `fork`/`execv`.
-- **Time:** CMOS RTC wall clock (`date`), monotonic uptime, CPU accounting.
-- **User land:** 51 system calls, 52 user programs/demos, a kernel-space shell
-  and a **ring-3 user shell (`ush`)** with pipes, redirection, background jobs,
-  and shell variables. Programs are loaded through the VFS, so an executable
-  can be run from **any mounted filesystem** (e.g. `cp hello fat/hello` then
-  `fat/hello`), not just the built-in RAMFS.
-- **Quality:** two layers of testing. Native unit tests compile the pure-logic
-  modules for the host and run in under a second; an end-to-end suite then
-  drives the shell through the QEMU monitor, including a boot of the real
-  GRUB/ISO path. `make test` runs all of it.
+### Boot & CPU
+- Multiboot kernel
+- 32-bit protected mode
+- GDT / IDT
+- PIC / IRQ handling
+
+### Memory
+- physical memory manager
+- paging with **copy-on-write fork**
+- **demand paging**
+- `mmap` / `munmap` region with page-granular reuse
+- kernel heap
+- inter-process **shared memory**
+
+### Processes & scheduling
+- preemptive round-robin scheduler
+- `fork` / `execv` / `wait` / `waitpid` / `exit`
+- per-process CPU-time accounting
+- threads and lifecycle handling
+
+### Signals & IPC
+- SIGINT / KILL / USR1 / ALRM / TERM / CHLD
+- SIGSTOP / SIGCONT job control
+- pipes
+- shared memory
+- counting semaphores
+
+### Filesystems
+A unified VFS over:
+
+- RAMFS
+- ATA-backed DiskFS
+- read/write FAT16
+- synthetic `/proc`
+
+Programs can be executed from mounted filesystems rather than only from the built-in RAMFS.
+
+### User land
+- 51 system calls
+- 52 user programs / demos
+- kernel shell
+- ring-3 user shell (`ush`)
+- pipes, redirection, background jobs and shell variables
+
+## Testing strategy
+
+miniOS uses two complementary layers.
+
+**Native unit tests** compile pure-logic kernel modules for the host so failures surface quickly without waiting for emulation.
+
+**QEMU end-to-end tests** exercise the integrated kernel, user programs, shell behavior and boot path.
+
+Mutation testing is used selectively to answer a harder question than line coverage: *would the suite actually fail if this logic were wrong?*
+
+This has been especially useful around boundary conditions, overflow checks, ownership/refcount invariants, blocking behavior and hardware-driver state machines.
 
 ## Requirements
 
-A Linux toolchain (native or **WSL** on Windows):
+Linux toolchain, or WSL on Windows:
 
 ```sh
 sudo apt install -y build-essential gcc-multilib qemu-system-x86 python3
-# Only needed for the bootable ISO target:
+```
+
+For the bootable ISO target:
+
+```sh
 sudo apt install -y grub-pc-bin grub-common xorriso mtools
 ```
 
-## Build & run
+## Build and run
 
 ```sh
 make              # build kernel.bin
 make run          # run in QEMU with a test disk attached
-make unit         # native unit tests only (sub-second)
-make test         # everything: unit tests, then the QEMU/ISO suite
-```
-
-`make unit` compiles the pure-logic kernel modules (`utils`, `fs` path
-resolution, `pmm`, `heap`) for the host and exercises them directly, so a logic
-regression surfaces immediately instead of after the multi-minute emulation
-run. `make test` runs those first, then boots the kernel in QEMU — including
-once through the real GRUB/ISO path, which is skipped with a notice if the ISO
-tooling is not installed.
-
-Build a GRUB-bootable ISO (for VirtualBox/VMware/real hardware):
-
-```sh
-make iso          # produces miniOS.iso
+make unit         # native unit tests only
+make test         # native + QEMU / ISO validation
+make iso          # produce miniOS.iso
 make run-iso      # boot the ISO through GRUB in QEMU
 ```
 
-The resulting `miniOS.iso` can be attached as a boot CD to a VM, or written to
-a USB stick. Use a **BIOS (legacy, non-UEFI)** VM with ~32 MB of RAM. To
-exercise the disk-backed filesystems, attach a virtual hard disk as the primary
-IDE/ATA device; without one, the kernel still boots straight to the shell and
-RAMFS/FAT16/`/proc` remain available.
+On Windows, prefix commands with `wsl`.
 
-> On Windows, prefix commands with `wsl`, e.g. `wsl make test`.
+## Try it
 
-## Trying it out
-
-At the `>` prompt, type `help`. A few things to try:
+At the kernel prompt:
 
 ```sh
-ls /proc            # browse the synthetic process filesystem
-cat /proc/processes # list running processes
-uptime              # time since boot
-date                # wall-clock time (CMOS RTC)
-ush                 # drop into the ring-3 user shell
+ls /proc
+cat /proc/processes
+uptime
+date
+ush
 ```
 
 ## Project layout
 
-- Kernel C/ASM sources live at the top level (`kernel.c`, `paging.c`,
-  `process.c`, `syscall.c`, filesystem and driver modules, `boot.s`, …).
-- `user/` — ring-3 programs and the user shell, plus their syscall wrappers.
-- `tests/` — native (host-compiled) unit tests for the pure-logic modules.
-- `gen_*.py` — helpers that embed user ELFs and build the disk/FAT images.
-- `Makefile` — build, `run`, `iso`, `unit`, and the `test*` targets.
+```text
+kernel / drivers / MM / VFS   top-level C and assembly sources
+user/                         ring-3 programs and syscall wrappers
+tests/                        native unit tests
+gen_*.py                      image / ELF generation helpers
+Makefile                      build, run, ISO and test targets
+```
+
+## Scope and limitations
+
+This is intentionally an educational OS, not a Linux replacement. The project favors understandable implementations, executable invariants, and reproducible bug investigations over production compatibility or performance.
+
+Known limitations and design tradeoffs are documented in the repository rather than hidden behind feature claims.
 
 ## License
 
@@ -105,19 +184,6 @@ MIT — see [LICENSE](LICENSE).
 
 ## 中文簡介
 
-miniOS 是一個從零開始、用 C 與組合語言寫的 32 位元 x86 業餘作業系統,透過
-Multiboot/GRUB 開機,並以系統呼叫介面在 ring 3 執行使用者程式。
+miniOS 是一個從零開始、以 C 與組合語言實作的 32 位元 x86 教學型作業系統。除了可開機核心之外，也包含 ring 3 使用者程式、行程與排程、COW fork、需求分頁、mmap、IPC、VFS、多種檔案系統、ATA、signals、shell，以及 native + QEMU 兩層測試。
 
-**主要功能**:保護模式 + GDT/IDT;分頁(寫時複製 fork、需求分頁)、行程間
-**共享記憶體**;搶佔式排程與 `fork`/`execv`/`wait`/`exit`;完整信號模型與
-**job control(SIGSTOP/SIGCONT)**;IPC(pipe、信號、共享記憶體、**計數號誌**);
-三個檔案系統(RAMFS、ATA 的 DiskFS、可讀寫 FAT16)整合在 VFS 之下,外加合成的
-**`/proc`**;per-process 環境變數;RTC 牆鐘時間與 CPU 時間計量;51 個系統呼叫、
-52 支使用者程式、核心 shell 與 **ring-3 使用者 shell(`ush`)**;以及一套
-兩層測試:原生單元測試(`make unit`,不到一秒)加上透過 QEMU monitor 驅動的
-端對端測試(含真實 GRUB/ISO 開機路徑),`make test` 會全部跑過。
-
-**這是教學/業餘性質的專案**,適合學習與實驗,非生產用途。
-
-建置與執行見上方英文說明(`make` / `make run` / `make test` / `make iso`);
-Windows 上請在指令前加 `wsl`。
+這個專案特別重視「可驗證性」：除了功能實作，也會把實際找到的 bug、邊界條件與系統 invariant 轉成 regression test，並利用 mutation testing 檢查測試是否真的能抓到錯誤。
