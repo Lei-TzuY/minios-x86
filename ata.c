@@ -207,6 +207,20 @@ int ata_write_sector(uint32_t lba, const uint8_t *buffer) {
         return 0;
     }
 
+    /* The drive may accept all 256 data words and only then report that the
+     * WRITE command failed. ata_wait_not_busy() establishes completion but
+     * deliberately ignores ERR/DF so it can also be used when recovering an
+     * old command; this call site must inspect the completed command before a
+     * CACHE FLUSH can replace its status. */
+    {
+        uint8_t status = inb(ATA_STATUS);
+        if (status == 0 || status == 0xFF ||
+            (status & (ATA_STATUS_ERR | ATA_STATUS_DF | ATA_STATUS_DRQ))) {
+            restore_irq(flags);
+            return 0;
+        }
+    }
+
     outb(ATA_COMMAND, ATA_CMD_CACHE_FLUSH);
     if (!ata_wait_not_busy() ||
         (inb(ATA_STATUS) & (ATA_STATUS_ERR | ATA_STATUS_DF))) {
