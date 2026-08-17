@@ -27,6 +27,24 @@ static void pipe_free_if_done(pipe_t *p) {
     }
 }
 
+/* task_block_killable() cannot be used while an operation owns a lifetime
+ * reference: its kill path never returns. Release that reference first so a
+ * killed blocked task cannot leak a pipe whose descriptors have all closed. */
+static void pipe_block_killable(pipe_t *p, const void *wait_channel,
+                                int reading) {
+    if (task_kill_pending()) {
+        if (reading) pipe_close_read(p);
+        else         pipe_close_write(p);
+        task_exit(TASK_KILL_STATUS);
+    }
+    task_block_current(wait_channel);
+    if (task_kill_pending()) {
+        if (reading) pipe_close_read(p);
+        else         pipe_close_write(p);
+        task_exit(TASK_KILL_STATUS);
+    }
+}
+
 uint32_t pipe_read(pipe_t *p, uint8_t *buffer, uint32_t len) {
     uint32_t flags = save_irq_disable();
     uint32_t got = 0;
@@ -35,10 +53,13 @@ uint32_t pipe_read(pipe_t *p, uint8_t *buffer, uint32_t len) {
         restore_irq(flags);
         return 0;
     }
+    /* Keep the read end alive across a block. Another thread may close the
+     * shared descriptor, but a syscall already using it remains a reader. */
+    p->readers++;
 
     /* Block until there is data, or every writer has closed (EOF). */
     while (p->count == 0 && p->writers > 0) {
-        task_block_killable(&p->count);
+        pipe_block_killable(p, &p->count, 1);
     }
 
     while (got < len && p->count > 0) {
@@ -49,6 +70,7 @@ uint32_t pipe_read(pipe_t *p, uint8_t *buffer, uint32_t len) {
 
     if (got > 0) task_wake_all(&p->read_pos);  /* writers: space freed */
 
+    pipe_close_read(p);
     restore_irq(flags);
     return got;  /* 0 means EOF */
 }
@@ -61,13 +83,16 @@ uint32_t pipe_write(pipe_t *p, const uint8_t *buffer, uint32_t len) {
         restore_irq(flags);
         return 0;
     }
+    /* Symmetric with reads: an in-flight write remains a live writer even if
+     * another thread closes the descriptor while this task is blocked. */
+    p->writers++;
 
     while (put < len) {
         if (p->readers == 0) break;           /* broken pipe: nobody reading */
 
         if (p->count == PIPE_BUF_SIZE) {       /* full: let readers drain */
             task_wake_all(&p->count);
-            task_block_killable(&p->read_pos);
+            pipe_block_killable(p, &p->read_pos, 0);
             continue;
         }
 
@@ -79,6 +104,7 @@ uint32_t pipe_write(pipe_t *p, const uint8_t *buffer, uint32_t len) {
         task_wake_all(&p->count);              /* readers: data available */
     }
 
+    pipe_close_write(p);
     restore_irq(flags);
     return put;
 }
