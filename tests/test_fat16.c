@@ -26,12 +26,30 @@
 extern const uint8_t  fat16_image_data[];
 extern const uint32_t fat16_image_size;
 
+static uint32_t pmm_outstanding_blocks;
+static uint32_t pmm_alloc_calls;
+static uint32_t pmm_free_calls;
+static int      pmm_bad_free;
+
 void *pmm_alloc_blocks(uint32_t count) {
     void *p = NULL;
     if (count == 0) return NULL;
     if (posix_memalign(&p, PMM_BLOCK_SIZE, (size_t)count * PMM_BLOCK_SIZE) != 0)
         return NULL;
+    pmm_outstanding_blocks += count;
+    pmm_alloc_calls++;
     return p;
+}
+
+void pmm_free_blocks(void *p, uint32_t count) {
+    if (!p || count == 0) return;
+    if (count > pmm_outstanding_blocks) {
+        pmm_bad_free = 1;
+    } else {
+        pmm_outstanding_blocks -= count;
+    }
+    pmm_free_calls++;
+    free(p);
 }
 
 #define HELLO      "Hello from FAT16!\n"
@@ -49,6 +67,45 @@ static fs_node_t *make_file(fs_node_t *dir, const char *name) {
 static fs_node_t *remount(void) {
     fat16_install(fat16_image_data, fat16_image_size);
     return fat16_get_root_node();
+}
+
+static void test_install_ownership(void) {
+    uint8_t bad_image[512] = { 0 };
+    uint32_t image_blocks = fat16_image_size / PMM_BLOCK_SIZE +
+        (fat16_image_size % PMM_BLOCK_SIZE != 0);
+    uint32_t alloc_before, free_before;
+
+    TEST("install releases rejected and replaced images");
+    CHECK_EQ(pmm_outstanding_blocks, 0);
+
+    /* Even a rejected image was copied before its BPB was validated. The
+     * rejected copy must not remain allocated. */
+    alloc_before = pmm_alloc_calls;
+    free_before = pmm_free_calls;
+    fat16_install(bad_image, sizeof(bad_image));
+    CHECK(!fat16_is_mounted());
+    CHECK(fat16_get_root_node() == NULL);
+    CHECK_EQ(pmm_alloc_calls, alloc_before + 1);
+    CHECK_EQ(pmm_free_calls, free_before + 1);
+    CHECK_EQ(pmm_outstanding_blocks, 0);
+
+    /* Reinstalling replaces the writable image rather than retaining every
+     * prior copy. This also exercises the exact block count passed to PMM. */
+    CHECK(remount() != NULL);
+    CHECK_EQ(pmm_outstanding_blocks, image_blocks);
+    free_before = pmm_free_calls;
+    CHECK(remount() != NULL);
+    CHECK_EQ(pmm_free_calls, free_before + 1);
+    CHECK_EQ(pmm_outstanding_blocks, image_blocks);
+
+    /* A failed replacement releases both the old valid mount and the newly
+     * rejected copy, leaving the driver unmounted with no retained storage. */
+    free_before = pmm_free_calls;
+    fat16_install(bad_image, sizeof(bad_image));
+    CHECK(!fat16_is_mounted());
+    CHECK_EQ(pmm_free_calls, free_before + 2);
+    CHECK_EQ(pmm_outstanding_blocks, 0);
+    CHECK_EQ(pmm_bad_free, 0);
 }
 
 static void test_mount(void) {
@@ -351,6 +408,7 @@ static void test_backend_conformance(void) {
 
 int main(void) {
     fs_conformance_arm_watchdog(30);
+    test_install_ownership();
     test_mount();
     test_readdir_root();
     test_read_file();
@@ -362,5 +420,12 @@ int main(void) {
     test_open_blocks_unlink();
     test_name_encoding();
     test_backend_conformance();
+
+    /* The production caller mounts once for the lifetime of the kernel. The
+     * hosted test remounts repeatedly, so release its final copy as well. */
+    TEST("install releases final hosted-test mount");
+    fat16_install(NULL, 0);
+    CHECK_EQ(pmm_outstanding_blocks, 0);
+    CHECK_EQ(pmm_bad_free, 0);
     TEST_REPORT("fat16");
 }

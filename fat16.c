@@ -507,18 +507,27 @@ static uint32_t fat16_vfs_read(fs_node_t *node, uint32_t offset,
     return copied;
 }
 
+static void fat16_release_image(void) {
+    uint8_t *image = fs.img;
+    uint32_t blocks = fs.img_size / PMM_BLOCK_SIZE +
+        (fs.img_size % PMM_BLOCK_SIZE != 0);
+
+    memset(&fs, 0, sizeof(fs));
+    if (image) pmm_free_blocks(image, blocks);
+}
+
 void fat16_install(const uint8_t *image, uint32_t size) {
     uint32_t root_dir_sectors, blocks;
     uint8_t *copy;
 
-    memset(&fs, 0, sizeof(fs));
+    fat16_release_image();
     memset(fat16_node_pool, 0, sizeof(fat16_node_pool));
     memset(fat16_node_refs, 0, sizeof(fat16_node_refs));
     fat16_node_next = 0;
     if (!image || size < 512) return;
 
     /* Work on a writable RAM copy so the filesystem can be modified. */
-    blocks = (size + PMM_BLOCK_SIZE - 1) / PMM_BLOCK_SIZE;
+    blocks = size / PMM_BLOCK_SIZE + (size % PMM_BLOCK_SIZE != 0);
     copy = (uint8_t *)pmm_alloc_blocks(blocks);
     if (!copy) return;
     memcpy(copy, image, size);
@@ -535,7 +544,7 @@ void fat16_install(const uint8_t *image, uint32_t size) {
     if (fs.bytes_per_sector != 512 || fs.sectors_per_cluster == 0 ||
         fs.num_fats == 0 || fs.root_entries == 0 || fs.sectors_per_fat == 0 ||
         copy[510] != 0x55 || copy[511] != 0xAA) {
-        return;
+        goto reject;
     }
 
     fs.fat_lba = fs.reserved_sectors;
@@ -545,7 +554,7 @@ void fat16_install(const uint8_t *image, uint32_t size) {
     fs.data_lba = fs.root_dir_lba + root_dir_sectors;
     fs.bytes_per_cluster = fs.sectors_per_cluster * fs.bytes_per_sector;
 
-    if (fs.data_lba * fs.bytes_per_sector > fs.img_size) return;
+    if (fs.data_lba * fs.bytes_per_sector > fs.img_size) goto reject;
 
     /* Usable clusters are bounded by both the FAT size and the image size. */
     uint32_t fat_clusters = fs.sectors_per_fat * fs.bytes_per_sector / 2;
@@ -563,6 +572,10 @@ void fat16_install(const uint8_t *image, uint32_t size) {
     fat16_root_node.unlink = fat16_vfs_unlink;
 
     fs.mounted = 1;
+    return;
+
+reject:
+    fat16_release_image();
 }
 
 int fat16_is_mounted(void) {
