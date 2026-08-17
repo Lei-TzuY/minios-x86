@@ -69,6 +69,29 @@ static fs_node_t *remount(void) {
     return fat16_get_root_node();
 }
 
+static void test_reject_wrapped_layout(void) {
+    uint8_t image[512] = { 0 };
+
+    TEST("mount rejects a BPB whose sector offset wraps");
+
+    image[11] = 0x00; image[12] = 0x02; /* 512-byte sectors */
+    image[13] = 1;                      /* sectors per cluster */
+    image[14] = 127; image[15] = 0;     /* reserved sectors */
+    image[16] = 128;                    /* FAT copies */
+    image[17] = 16; image[18] = 0;      /* one root-directory sector */
+    image[22] = 0xFF; image[23] = 0xFF; /* sectors per FAT */
+    image[510] = 0x55; image[511] = 0xAA;
+
+    /* root_dir_lba is 8,388,607 and data_lba is 8,388,608. Multiplying
+     * data_lba by 512 in uint32_t wraps to zero even though the supplied
+     * image contains only one sector. The image must be rejected rather than
+     * exposed as a mounted filesystem with nonsensical offsets. */
+    fat16_install(image, sizeof(image));
+    CHECK(!fat16_is_mounted());
+    CHECK(fat16_get_root_node() == NULL);
+    fat16_install(NULL, 0);               /* isolate the following mount tests */
+}
+
 static void test_install_ownership(void) {
     uint8_t bad_image[512] = { 0 };
     uint32_t image_blocks = fat16_image_size / PMM_BLOCK_SIZE +
@@ -408,6 +431,7 @@ static void test_backend_conformance(void) {
 
 int main(void) {
     fs_conformance_arm_watchdog(30);
+    test_reject_wrapped_layout();
     test_install_ownership();
     test_mount();
     test_readdir_root();
