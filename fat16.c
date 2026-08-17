@@ -517,7 +517,7 @@ static void fat16_release_image(void) {
 }
 
 void fat16_install(const uint8_t *image, uint32_t size) {
-    uint32_t root_dir_sectors, blocks;
+    uint32_t root_dir_sectors, blocks, data_offset;
     uint8_t *copy;
 
     fat16_release_image();
@@ -554,12 +554,16 @@ void fat16_install(const uint8_t *image, uint32_t size) {
     fs.data_lba = fs.root_dir_lba + root_dir_sectors;
     fs.bytes_per_cluster = fs.sectors_per_cluster * fs.bytes_per_sector;
 
-    if (fs.data_lba * fs.bytes_per_sector > fs.img_size) goto reject;
+    /* Compare in sectors before multiplying. A malformed BPB can place the
+     * data region at or above 8,388,608 sectors, where a 512-byte offset
+     * wraps uint32_t and otherwise appears to lie inside a small image. */
+    if (fs.data_lba > fs.img_size / fs.bytes_per_sector) goto reject;
+    data_offset = fs.data_lba * fs.bytes_per_sector;
 
     /* Usable clusters are bounded by both the FAT size and the image size. */
     uint32_t fat_clusters = fs.sectors_per_fat * fs.bytes_per_sector / 2;
     uint32_t data_clusters =
-        2 + (fs.img_size - fs.data_lba * fs.bytes_per_sector) / fs.bytes_per_cluster;
+        2 + (fs.img_size - data_offset) / fs.bytes_per_cluster;
     fs.max_cluster = fat_clusters < data_clusters ? fat_clusters : data_clusters;
 
     memset(&fat16_root_node, 0, sizeof(fat16_root_node));
