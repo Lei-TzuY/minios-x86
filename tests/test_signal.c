@@ -113,6 +113,9 @@ void task_wake_one(const void *channel) { (void)channel; g_wake_calls++; }
 void task_wake_task(task_t *task) { (void)task; g_wake_calls++; }
 task_t *task_get_current(void) { return NULL; }
 
+static uint32_t g_timer_ticks;
+uint32_t timer_get_ticks(void) { return g_timer_ticks; }
+
 #include "../syscall.c"
 
 /* test.h after syscall.c: syscall.h's SEEK_* enum must precede <stdio.h>. */
@@ -168,6 +171,7 @@ static void reset_world(void) {
     g_kill_pending = 0;
     g_wake_calls = 0;
     g_deliver_sigcont_on_block = 0;
+    g_timer_ticks = 0;
 }
 
 /* Returns 0 (returned normally), 1 (task_exit) or 2 (faulted); see above. */
@@ -524,6 +528,24 @@ static void test_job_control(void) {
     CHECK_EQ(g_task_exit_calls, 0);
 }
 
+static void test_alarm_wrap_boundaries(void) {
+    TEST("alarm deadline may wrap exactly to tick zero");
+    reset_world();
+    g_timer_ticks = UINT32_MAX;
+    CHECK_EQ(sys_alarm(1), 0);
+    /* Cancelling immediately must report the full tick still remaining. A zero
+     * deadline is valid here, not an inactive-alarm sentinel. */
+    CHECK_EQ(sys_alarm(0), 1);
+
+    TEST("alarm rejects delays outside signed modular range");
+    reset_world();
+    g_timer_ticks = 100;
+    CHECK_EQ(sys_alarm(10), 0);
+    CHECK_EQ(sys_alarm(0x80000000U), -1);
+    /* A rejected replacement must leave the existing alarm intact. */
+    CHECK_EQ(sys_alarm(0), 10);
+}
+
 int main(void) {
     if (!map_user_stack()) {
         printf("SKIP signal: could not map the user stack region\n");
@@ -543,6 +565,7 @@ int main(void) {
     test_default_actions();
     test_deliver_bounds();
     test_job_control();
+    test_alarm_wrap_boundaries();
 
     TEST_REPORT("signal");
 }

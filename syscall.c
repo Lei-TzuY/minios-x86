@@ -627,11 +627,21 @@ static int32_t sys_alarm(uint32_t ticks) {
     uint32_t remaining = 0;
 
     if (!process) return 0;
-    if (process->alarm_tick != 0 &&
+    /* Signed modular deadline comparisons are unambiguous only within half of
+     * the uint32_t range. Match timer_sleep's bound and preserve any old alarm
+     * when a replacement is rejected. */
+    if (ticks > 0x7FFFFFFFU) return -1;
+    if (process->alarm_active &&
         (int32_t)(process->alarm_tick - now) > 0) {
         remaining = process->alarm_tick - now;
     }
-    process->alarm_tick = (ticks == 0) ? 0 : (now + ticks);
+    if (ticks == 0) {
+        process->alarm_active = 0;
+        process->alarm_tick = 0;
+    } else {
+        process->alarm_tick = now + ticks;
+        process->alarm_active = 1;
+    }
     return (int32_t)remaining;
 }
 

@@ -1148,6 +1148,7 @@ static void test_slot_reuse_carries_nothing_over(void) {
     first->sig_handler[SIGCHLD] = 0xDEAD;
     first->auto_reap = 1;
     first->stopped = 1;
+    first->alarm_active = 1;
     first->alarm_tick = 12345;
     first->env_count = 4;
     first->heap_break = 0x9000;
@@ -1170,6 +1171,7 @@ static void test_slot_reuse_carries_nothing_over(void) {
     CHECK_EQ(second->sig_handler[SIGCHLD], 0);
     CHECK_EQ(second->auto_reap, 0);
     CHECK_EQ(second->stopped, 0);
+    CHECK_EQ(second->alarm_active, 0);
     CHECK_EQ(second->alarm_tick, 0);
     CHECK_EQ(second->env_count, 0);
     CHECK_EQ(second->exit_status, 0);
@@ -1454,6 +1456,31 @@ static void test_send_signal_wakes_a_blocked_target(void) {
     CHECK_EQ(process_send_signal(p->pid, NSIG), -1);
 }
 
+static void test_alarm_deadline_at_zero_fires(void) {
+    process_t *p;
+
+    TEST("an active alarm may have deadline tick zero");
+    reset_world();
+    p = launch("alarm", 0);
+    CHECK(p != NULL);
+    if (!p) return;
+    p->alarm_active = 1;
+    p->alarm_tick = 0;
+
+    process_check_alarms(UINT32_MAX);      /* one tick before the deadline */
+    CHECK_EQ(p->sig_pending & (1u << SIGALRM), 0);
+    CHECK_EQ(p->alarm_active, 1);
+
+    process_check_alarms(0);               /* deadline reached across wrap */
+    CHECK(p->sig_pending & (1u << SIGALRM));
+    CHECK_EQ(p->alarm_active, 0);
+    CHECK_EQ(p->alarm_tick, 0);
+
+    p->sig_pending = 0;
+    process_check_alarms(0);               /* inactive zero is not re-fired */
+    CHECK_EQ(p->sig_pending, 0);
+}
+
 static void test_exit_signals_the_parent(void) {
     process_t *parent, *child;
 
@@ -1612,6 +1639,7 @@ int main(void) {
     test_child_exit_does_not_disturb_the_parent();
 
     test_send_signal_wakes_a_blocked_target();
+    test_alarm_deadline_at_zero_fires();
     test_exit_signals_the_parent();
 
     TEST_REPORT("process");

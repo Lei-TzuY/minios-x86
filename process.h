@@ -83,7 +83,8 @@ typedef struct process {
      * this, exiting while a sibling thread is still scheduled would destroy
      * the address space out from under it. */
     uint8_t         main_exited;
-    uint32_t        alarm_tick;      /* timer tick to raise SIGALRM (0 = none) */
+    uint8_t         alarm_active;    /* alarm_tick is meaningful even when zero */
+    uint32_t        alarm_tick;      /* timer tick to raise SIGALRM */
     uint32_t        cpu_ticks;       /* timer ticks spent running this process */
     fork_frame_t    fork_frame;      /* user context a forked child resumes */
     /* Environment variables: inherited across fork, preserved across exec. */
