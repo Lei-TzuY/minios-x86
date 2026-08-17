@@ -729,6 +729,37 @@ static void test_dup2_onto_stdout(void) {
     expect_no_underflow();
 }
 
+static void test_dup2_rejected_pipe_end_preserves_target(void) {
+    process_t *p;
+    int32_t *fds = g_user_fds;
+
+    TEST("dup2 rejection leaves stdin and stdout unchanged");
+    reset_world();
+    p = take_slot(0, 10);
+    g_current = p;
+
+    CHECK_EQ(sys_pipe(fds), 0);
+    CHECK_EQ(sys_dup2(fds[1], 1), 1);
+    CHECK(p->stdout_pipe == &g_pipes[0]);
+    CHECK_EQ(g_pipe_write_refs[0], 2);
+
+    /* A read end cannot become stdout.  Rejecting it must not close the
+     * descriptor already installed there. */
+    CHECK_EQ(sys_dup2(fds[0], 1), -1);
+    CHECK(p->stdout_pipe == &g_pipes[0]);
+    CHECK_EQ(g_pipe_write_refs[0], 2);
+
+    CHECK_EQ(sys_dup2(fds[0], 0), 0);
+    CHECK(p->stdin_pipe == &g_pipes[0]);
+    CHECK_EQ(g_pipe_read_refs[0], 2);
+
+    /* The inverse mismatch has the same replace-on-success requirement. */
+    CHECK_EQ(sys_dup2(fds[1], 0), -1);
+    CHECK(p->stdin_pipe == &g_pipes[0]);
+    CHECK_EQ(g_pipe_read_refs[0], 2);
+    expect_no_underflow();
+}
+
 static void test_dup2_defensive(void) {
     process_t *p;
 
@@ -1020,6 +1051,8 @@ int main(void) {
     test_dup2_between_table_slots();
     test_dup2_onto_itself();
     test_dup2_onto_stdout();
+    if (have_user_page)
+        test_dup2_rejected_pipe_end_preserves_target();
     test_dup2_defensive();
 
     if (have_user_page) {

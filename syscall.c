@@ -404,6 +404,7 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
     src = files[oidx];
 
     if (newfd == 1) {                       /* stdout <- pipe write end or file */
+        if (src.kind != OF_PIPE_W && src.kind != OF_FILE) return -1;
         if (process->stdout_pipe) {
             pipe_close_write(process->stdout_pipe);
             process->stdout_pipe = NULL;
@@ -423,12 +424,11 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
             process->stdout_node = src.node;
             if (src.node) open_fs(src.node);
             process->stdout_offset = src.offset;
-        } else {
-            return -1;
         }
         return newfd;
     }
     if (newfd == 0) {                       /* stdin <- pipe read end or file */
+        if (src.kind != OF_PIPE_R && src.kind != OF_FILE) return -1;
         if (process->stdin_pipe) {
             pipe_close_read(process->stdin_pipe);
             process->stdin_pipe = NULL;
@@ -443,8 +443,6 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
             process->stdin_node = src.node;
             if (src.node) open_fs(src.node);
             process->stdin_offset = src.offset;
-        } else {
-            return -1;
         }
         return newfd;
     }
