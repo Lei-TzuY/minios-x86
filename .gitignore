@@ -16,6 +16,8 @@ isodir/
 
 # Scratch / editor / OS cruft
 runlog.sh
+tests/*.log
+__pycache__/
 *.swp
 *~
 .DS_Store

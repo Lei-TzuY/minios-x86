@@ -14,9 +14,11 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
        cat_embed.o fault_embed.o badptr_embed.o worker_embed.o spawner_embed.o \
        orphan_embed.o sleeptest_embed.o fstest_embed.o echo_embed.o \
        malloctest_embed.o wc_embed.o grep_embed.o \
-       head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o fatgrow_embed.o forkredir_embed.o sigretguard_embed.o sigflags_embed.o killthread_embed.o killwait_embed.o bigseek_embed.o ush_embed.o
+       head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o fatgrow_embed.o forkredir_embed.o sigretguard_embed.o sigflags_embed.o killthread_embed.o killwait_embed.o bigseek_embed.o stress_embed.o ush_embed.o
 
-.PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot test-iso test-shell unit bench
+.PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot \
+        test-iso test-shell test-stress test-stress-mutants unit sanitize \
+        static-analysis bench
 
 # --- Native unit tests -------------------------------------------------------
 # Kernel modules that are pure logic are compiled for the host and called
@@ -218,6 +220,16 @@ unit: $(UNIT_BINS)
 	if [ $$fail -ne 0 ]; then echo "unit tests FAILED"; exit 1; fi; \
 	echo "unit tests passed"
 
+# Hosted kernel components get a second build under ASan+UBSan.  Fixed-address
+# and intentional-fault harnesses remain on their existing trap sanitizer path;
+# see the script for the explicit, documented selection.
+sanitize: tests/run_host_sanitizers.sh
+	bash tests/run_host_sanitizers.sh
+
+# Static analysis is a required CI gate, not an informational report.
+static-analysis: tests/run_static_analysis.sh tests/apply_mutation.py
+	bash tests/run_static_analysis.sh
+
 # --- Performance measurement -------------------------------------------------
 # Informational, not a pass/fail gate: timing is noisy and machine-dependent,
 # so `bench` is kept out of `make test`. It exists to back the two performance
@@ -415,6 +427,9 @@ user/killwait.elf: user/killwait.c user/user_syscall.h user/crt0.s user/Makefile
 
 user/bigseek.elf: user/bigseek.c user/user_syscall.h user/crt0.s user/Makefile
 	$(MAKE) -C user bigseek.elf
+
+user/stress.elf: user/stress.c user/user_syscall.h user/umalloc.h user/crt0.s user/Makefile
+	$(MAKE) -C user stress.elf
 
 user/ush.elf: user/ush.c user/user_syscall.h user/crt0.s user/Makefile
 	$(MAKE) -C user ush.elf
@@ -725,6 +740,12 @@ bigseek_embed.c: user/bigseek.elf gen_embed.py
 bigseek_embed.o: bigseek_embed.c
 	$(CC) -c $< -o $@ $(CFLAGS)
 
+stress_embed.c: user/stress.elf gen_embed.py
+	python3 gen_embed.py user/stress.elf stress_elf > $@
+
+stress_embed.o: stress_embed.c
+	$(CC) -c $< -o $@ $(CFLAGS)
+
 ush_embed.c: user/ush.elf gen_embed.py
 	python3 gen_embed.py user/ush.elf ush_elf > $@
 
@@ -750,7 +771,7 @@ $(ATA_IMAGE): gen_ata_image.py
 
 # Utility targets
 clean:
-	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c fatgrow_embed.c forkredir_embed.c sigretguard_embed.c sigflags_embed.c killthread_embed.c killwait_embed.c bigseek_embed.c ush_embed.c fat16.img fat16_image_embed.c
+	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c fatgrow_embed.c forkredir_embed.c sigretguard_embed.c sigflags_embed.c killthread_embed.c killwait_embed.c bigseek_embed.c stress_embed.c ush_embed.c fat16.img fat16_image_embed.c
 	rm -rf isodir miniOS.iso
 	rm -f $(UNIT_BINS) $(BENCH_BINS)
 	$(MAKE) -C user clean
@@ -781,7 +802,7 @@ run-headless: kernel.bin $(ATA_IMAGE)
 	timeout 5s $(QEMU) $(ATA_DRIVE) -display none -serial none -debugcon stdio \
 	    -no-reboot -no-shutdown -kernel kernel.bin || test $$? -eq 124
 
-test: unit test-ata-absent test-boot test-iso test-shell
+test: unit test-ata-absent test-boot test-iso test-stress test-shell
 
 # Boot the real GRUB/ISO path, the one used on VMs and hardware. The other
 # targets all use QEMU's -kernel multiboot loader, which bypasses the
@@ -832,6 +853,19 @@ test-boot: kernel.bin $(ATA_IMAGE)
 	grep -q "miniOS shell" $$log; result=$$?; \
 	rm -f $$log; \
 	test $$result -eq 0 && test $$status -eq 124
+
+# Drive the shell through QEMU's monitor socket instead of fixed sleeps.  The
+# ring-3 stress binary covers integrated failure modes (faults, preemption,
+# exhaustion and teardown), then the harness runs it a second time and requires
+# the post-run resource snapshots to be byte-for-byte stable.
+test-stress: kernel.bin $(ATA_IMAGE) tests/run_qemu_stress.py
+	python3 tests/run_qemu_stress.py --qemu "$(QEMU)" \
+	    --kernel kernel.bin --disk $(ATA_IMAGE) --log tests/qemu-stress.log
+
+# Optional mutation proof for the new QEMU suite.  Each mutation is restored in
+# an EXIT trap and must fail through its named stress assertion, not a timeout.
+test-stress-mutants: tests/run_qemu_stress_mutants.sh tests/apply_mutation.py
+	bash tests/run_qemu_stress_mutants.sh
 
 test-shell: kernel.bin $(ATA_IMAGE)
 	@log=$$(mktemp); \
@@ -1026,6 +1060,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "^killwait$$" $$log && \
 	grep -q "^bigseek$$" $$log && \
 	grep -q "^fatgrow$$" $$log && \
+	grep -q "^stress$$" $$log && \
 	grep -q "^ush$$" $$log && \
 	grep -q "^readme.txt$$" $$log && \
 	grep -q "^disk$$" $$log && \
@@ -1215,7 +1250,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "Processes: running=0 zombies=0 peak=4" $$log && \
 	grep -q "Tasks: blocked=0" $$log && \
 	grep -q "Timers: sleeping=0" $$log && \
-	grep -q "RAMFS nodes=60" $$log && \
+	grep -q "RAMFS nodes=61" $$log && \
 	test $$(grep -c "\[heap test passed\]" $$log) -eq 2 && \
 	grep -q "\[pmm high-memory test passed\]" $$log && \
 	grep -q "\[ata pio read/write test passed\]" $$log && \

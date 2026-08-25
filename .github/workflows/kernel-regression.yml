@@ -1,0 +1,75 @@
+name: Kernel regression
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install 32-bit and QEMU toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gcc-multilib qemu-system-x86 \
+            grub-pc-bin grub-common xorriso mtools cppcheck
+
+      - name: Clean build
+        run: |
+          make clean
+          make all -j4
+
+      - name: Native and QEMU regression suites
+        run: make test
+
+      - name: Host ASan and UBSan suites
+        run: make sanitize
+
+      - name: Static analysis
+        run: make static-analysis
+
+      - name: Preserve QEMU stress log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-stress-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tests/qemu-stress.log
+          if-no-files-found: warn
+
+  mutation:
+    needs: regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install 32-bit and QEMU toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-multilib qemu-system-x86
+
+      - name: Prove stress assertions kill kernel mutants
+        run: make test-stress-mutants
+
+      - name: Preserve mutant QEMU log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-stress-mutant-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tests/qemu-stress.log
+          if-no-files-found: warn
