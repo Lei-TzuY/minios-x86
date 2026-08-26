@@ -232,7 +232,10 @@ def validate(log: str) -> None:
         raise HarnessError(
             f"blocked task/timer leak: task={first['task']} timer={first['timer']}"
         )
-    if first["ramfs"] != (61,):
+    # A fresh boot has the root, three mount points, 53 user programs and
+    # readme.txt.  test-shell ends at 61 because its earlier scenarios leave
+    # three intentional fixtures; this isolated boot must return to 58.
+    if first["ramfs"] != (58,):
         raise HarnessError(f"RAMFS node leak: {first['ramfs']}")
 
 
