@@ -160,7 +160,7 @@ class QemuHarness:
 
 SNAPSHOT_PATTERNS = {
     "pmm": re.compile(r"PMM blocks: total=(\d+) used=(\d+) free=(\d+)"),
-    "heap": re.compile(r"Heap free bytes=(\d+)"),
+    "heap": re.compile(r"Kernel heap: pages=(\d+) free-bytes=(\d+)"),
     "user": re.compile(r"User pages: accessible=(\d+) spaces=(\d+)"),
     "process": re.compile(r"Processes: running=(\d+) zombies=(\d+) peak=(\d+)"),
     "task": re.compile(r"Tasks: blocked=(\d+)"),
