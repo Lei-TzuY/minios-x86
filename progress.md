@@ -1079,3 +1079,28 @@
   完整 `make test` 在 **284.4 s、MAKE_TEST_RC=0** 完成。末段資源計數為
   `User pages: accessible=0 spaces=0`、`Processes: running=0 zombies=0 peak=4`、
   `Tasks: blocked=0`、`Timers: sleeping=0`。
+
+## Session 35 — 2026-08-26
+
+- **CAP23：整合式 QEMU kernel stress**。新增 `user/stress.c`，不是用 hosted stub 模擬，
+  而是在真實 ring 3 依序跑 invalid pointers、heap fragmentation + demand paging、整個
+  4 MiB mmap window 的 reservation/實體 fault-in、fd/pipe/node/process table exhaustion、
+  RAMFS/DiskFS/FAT16 create/write/read/seek/stat/unlink、PIT alarm/preemption、threads +
+  semaphore + context switches、48 輪 fork/COW/wait 與 8 輪 exec lifecycle。
+- **自動 QEMU harness**：`tests/run_qemu_stress.py` 用 Unix HMP monitor 注入命令、輪詢
+  debugcon marker；同次開機跑兩輪並比較完整 teardown 快照。第一輪 GitHub Actions 已
+  證明八階段兩次皆到 `[stress PASS]`，且兩輪精確相同：PMM used/free `714/7478`、
+  kernel heap `9 pages/25168 free-bytes`、user pages/spaces `0/0`、processes `0/0/16`、
+  blocked/sleeping `0/0`、RAMFS nodes `58`。
+- **先紅後查，不把紅燈改成可接受**：第一版 parser 使用不存在的 `Heap free bytes=`
+  格式，且把獨立 stress boot 的 58 nodes 誤當成 test-shell baseline；完整 QEMU log
+  證明 workload 正確後才修 parser。下一輪的 stress 已全綠，卻讓既有 test-shell 暴露
+  真失敗：多一個內嵌程式吃掉最後 transient node，`mv b.txt c.txt` 因無槽可建立 `c.txt`
+  而失敗、留下 `b.txt`，結尾變 62。排序斷言完成後立即刪除不再使用的 `names.txt`，
+  讓 `mv` 的 `copydata` 斷言重新通過；最終只保留 `out.txt`／`rf.txt`，精確 baseline 60。
+- **host 品質 gate**：`make sanitize` 對 21 個適用的 hosted suite 以 ASan+UBSan 重建；
+  `make static-analysis` 檢查 Python bytecode 並對 hosted-capable kernel modules 跑
+  cppcheck；兩者加入獨立 `Kernel regression` workflow。
+- **mutation proof**：`make test-stress-mutants` 將 fd 上限 8→7、process allocator
+  少掃一格，分別必須由 `[stress fd exhaustion fill FAIL]` 與
+  `[stress process exhaustion fill FAIL]` 具名擊殺；每輪 EXIT trap 還原並驗 SHA-256。

@@ -21,7 +21,7 @@ The project is developed with an audit-driven testing loop: bugs and invariants 
 
 Recent project checkpoints include:
 
-- **51 system calls** and **52 user programs / demos**
+- **51 system calls** and **53 user programs / demos**
 - native host-side unit suites for kernel logic
 - QEMU end-to-end tests, including the real GRUB/ISO boot path
 - mutation testing used to validate whether tests actually detect injected faults
@@ -104,7 +104,7 @@ Programs can be executed from mounted filesystems rather than only from the buil
 
 ### User land
 - 51 system calls
-- 52 user programs / demos
+- 53 user programs / demos
 - kernel shell
 - ring-3 user shell (`ush`)
 - pipes, redirection, background jobs and shell variables
@@ -115,7 +115,12 @@ miniOS uses two complementary layers.
 
 **Native unit tests** compile pure-logic kernel modules for the host so failures surface quickly without waiting for emulation.
 
-**QEMU end-to-end tests** exercise the integrated kernel, user programs, shell behavior and boot path.
+**QEMU end-to-end tests** exercise the integrated kernel, user programs, shell
+behavior and boot path. The dedicated stress regression drives memory allocation
+and paging, timer interrupts and preemption, context switching, syscalls, all
+writable filesystems, process/thread teardown, invalid user pointers and exact
+resource-exhaustion boundaries. It runs twice in one boot and requires the
+post-run resource snapshots to match exactly.
 
 Mutation testing is used selectively to answer a harder question than line coverage: *would the suite actually fail if this logic were wrong?*
 
@@ -126,7 +131,7 @@ This has been especially useful around boundary conditions, overflow checks, own
 Linux toolchain, or WSL on Windows:
 
 ```sh
-sudo apt install -y build-essential gcc-multilib qemu-system-x86 python3
+sudo apt install -y build-essential gcc-multilib qemu-system-x86 python3 cppcheck
 ```
 
 For the bootable ISO target:
@@ -142,6 +147,10 @@ make              # build kernel.bin
 make run          # run in QEMU with a test disk attached
 make unit         # native unit tests only
 make test         # native + QEMU / ISO validation
+make test-stress  # focused ring-3 stress run, twice in one QEMU boot
+make sanitize     # hosted suites under AddressSanitizer + UBSan
+make static-analysis       # Python syntax checks + cppcheck
+make test-stress-mutants   # prove two exact exhaustion assertions fire
 make iso          # produce miniOS.iso
 make run-iso      # boot the ISO through GRUB in QEMU
 ```

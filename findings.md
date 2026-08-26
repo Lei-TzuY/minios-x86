@@ -1665,6 +1665,53 @@ regs->eflags = (sc->eflags & EFLAGS_USER_MASK) | EFLAGS_ALWAYS_SET;
   `make test` 在 284.4 秒以 **MAKE_TEST_RC=0** 結束，行程／task／timer／user-space
   counters 均回 baseline。
 
+## Session 35 — 2026-08-26
+
+### CAP23 跨子系統 QEMU 壓力、資源穩態與 host 品質 gate
+- 檔案: `user/stress.c`, `tests/run_qemu_stress.py`,
+  `tests/run_qemu_stress_mutants.sh`, `tests/run_host_sanitizers.sh`,
+  `tests/run_static_analysis.sh`, `Makefile`, `.github/workflows/kernel-regression.yml`
+- 類別: 整合正確性 / 資源生命週期 / 測試基礎建設
+- 結論: **壓力 workload 未找到現存 kernel defect；修正 snapshot parser，並解開新增
+  內嵌程式後 test-shell 的 64-node fixture 壓力衝突。**
+- **為什麼要做整合測試**：既有 25 套 hosted tests 能把單一模組的邊界壓得很深，
+  但不能真的執行 page fault、PIT IRQ、`switch_s.s`、`iret` 或多個 subsystem 串接後的
+  teardown。這正是 PROJECT_STATE 原列「pipe/semaphore/timer 與 process teardown」的缺口。
+- **同一支 ring-3 workload 的覆蓋面**：
+  - 24 輪 user heap fragmentation/coalesce、256 KiB sbrk demand paging、32 輪 mmap
+    fault/unmap/reuse、1024 頁 reservation exhaustion，再將整個 4 MiB window 實際 fault-in；
+  - 越界／跨上界 user buffers、bad strings、bad structs、unknown syscall，拒絕後還要以
+    正常 `stat` 證明 process/kernel 繼續可用；
+  - 精確填滿 8 個 file slots、4 個 pipe、16 個 process slots、64-node RAMFS 與
+    16-entry DiskFS，逐項清理後再配置一次證明可恢復；
+  - RAMFS/DiskFS/FAT16 的反覆 create/write/seek/read/fstat/close/unlink，以及 RAMFS／
+    DiskFS directory create/remove；
+  - SIGALRM 驗證 timer interrupt delivery；parent 刻意不 yield/sleep，三個 child 只能靠
+    PIT preemption 取得 CPU；10 輪雙 thread + semaphore + 128 次 yield 驗證 context switch；
+  - 48 輪 fork/COW/wait、8 輪 spawn/load/wait、process table exhaustion/reap/recovery。
+- **完成條件不是「QEMU 沒掛」**：每個區段都有具名 `[stress ... ok]`／`FAIL` marker；
+  harness 在同一次開機跑兩輪，各 marker 必須恰好出現兩次。每輪退出後呼叫 `mem`，
+  PMM、kernel heap、user address spaces、process/task/timer、RAMFS 七組資料必須逐欄相同，
+  且 `user=0/0`、`process=0/0/16`、`blocked=0`、`sleeping=0`、isolated RAMFS=58。
+- **真實 QEMU 證據**：首輪 CI log 的兩次 workload 都完成八個階段與 `[stress PASS]`；
+  兩次 snapshot 均為 PMM `used=714 free=7478`、heap `pages=9 free-bytes=25168`、
+  user `0/0`、process `running=0 zombies=0 peak=16`、task/timer `0/0`、RAMFS `58`。
+- **harness 假紅與一個真整合失敗**：第一版 heap regex 沒對齊核心實際的
+  `Kernel heap: pages=N free-bytes=N`，獨立 stress boot 的 RAMFS baseline 也應是 58；
+  兩者由完整 log 定位後修正，沒有放寬資源一致性條件。修正後 stress 全綠，但完整
+  `test-shell` 真正失敗：新增內嵌程式後，`sub`／`tf.txt`／`a.txt`／`b.txt` 的測試階段
+  恰好填滿 64-node table，`mv` 無法 transient create `c.txt`，輸出 `mv: failed` 並留下
+  `b.txt`。在 sort/head/tail 斷言完成後刪除已無用途的 `names.txt`，保留一格給 rename
+  的 copy-then-unlink 實作；`copydata` 仍是成功 gate，結尾只留 `out.txt`／`rf.txt`，
+  test-shell 精確 baseline 為 60。這是修測試 fixture lifetime，不是掩蓋 62。
+- **host 分析**：21 個不依賴固定低位址或刻意 SIGSEGV 的 hosted suite 以
+  `-fsanitize=address,undefined -fno-sanitize-recover=all` 重建；Python harness 做 bytecode
+  檢查，hosted-capable kernel modules 另跑 unix32 cppcheck warning/performance/portability。
+- **mutation 不是 timeout 證明**：`MAX_OPEN_FILES 8→7` 必須落在
+  `[stress fd exhaustion fill FAIL]`；process allocator 少掃最後一格必須落在
+  `[stress process exhaustion fill FAIL]`。腳本只接受這兩個具名 marker，並在 EXIT trap
+  以 SHA-256 證明 source 位元組完整還原。
+
 ## 已知限制（本輪審查有發現、但刻意不修的項目，附理由）
 以下項目屬於真實觀察到的架構/效能取捨，但要嘛需要較大幅度重構、要嘛觸發
 門檻在這個專案的實際使用場景下極難達到，依照「保守、相容現有設計」的原則

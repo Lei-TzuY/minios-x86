@@ -897,6 +897,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	    send_keys e c h o spc b r a v o spc shift-dot shift-dot spc n a m e s dot t x t ret; sleep 0.5; \
 	    send_keys s o r t spc shift-comma spc n a m e s dot t x t spc shift-backslash spc h e a d spc 1 ret; sleep 1.3; \
 	    send_keys s o r t spc shift-comma spc n a m e s dot t x t spc shift-backslash spc t a i l spc 1 ret; sleep 1.3; \
+	    send_keys r m spc n a m e s dot t x t ret; sleep 0.4; \
 	    send_keys c d spc d i s k ret; sleep 0.4; \
 	    send_keys p w d ret; sleep 0.4; \
 	    send_keys e c h o spc i n d i s k spc shift-dot spc l o c a l dot t x t ret; sleep 0.5; \
@@ -1250,7 +1251,7 @@ test-shell: kernel.bin $(ATA_IMAGE)
 	grep -q "Processes: running=0 zombies=0 peak=4" $$log && \
 	grep -q "Tasks: blocked=0" $$log && \
 	grep -q "Timers: sleeping=0" $$log && \
-	grep -q "RAMFS nodes=61" $$log && \
+	grep -q "RAMFS nodes=60" $$log && \
 	test $$(grep -c "\[heap test passed\]" $$log) -eq 2 && \
 	grep -q "\[pmm high-memory test passed\]" $$log && \
 	grep -q "\[ata pio read/write test passed\]" $$log && \
