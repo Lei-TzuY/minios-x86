@@ -35,7 +35,6 @@ int paging_user_range_mapped(uint32_t vaddr, uint32_t size) {
 
 #include "../syscall.c"
 
-/* test.h after syscall.c so syscall.h's SEEK_* enum precedes <stdio.h>. */
 #include "test.h"
 
 #ifndef MAP_FIXED_NOREPLACE

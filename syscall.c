@@ -327,13 +327,13 @@ int32_t sys_seek(int32_t fd, int32_t offset, int32_t whence) {
     if (!files || files[index].kind != OF_FILE) return -1;
 
     switch (whence) {
-        case SEEK_SET:
+        case SYS_SEEK_SET:
             base = 0;
             break;
-        case SEEK_CUR:
+        case SYS_SEEK_CUR:
             base = files[index].offset;
             break;
-        case SEEK_END:
+        case SYS_SEEK_END:
             base = files[index].node->length;
             break;
         default:
