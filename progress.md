@@ -1126,3 +1126,25 @@
 - **健康核心仍回到完全相同 baseline**：兩輪均為 PMM `used/free=714/7478`、kernel heap
   `9 pages/25168 free-bytes`、user pages/spaces `0/0`、process `0/0/16`、blocked/sleeping
   `0/0`、RAMFS `58`；host ASan+UBSan 亦通過。
+
+## Session 37 — 2026-08-27
+
+- **補上 abnormal fault teardown 缺口**：既有 `fault` 原本只在 `test-shell` 單次證明
+  ring-3 page fault 不會拖垮核心，沒有進入兩輪壓力與資源快照。現在它先 fault-in
+  16 頁 sbrk heap、32 頁 mmap，打開 `/readme.txt` 並建立 pipe，接著帶著所有資源直接
+  讀 supervisor-only `0x200000`；沒有任何 user-space cleanup 可替核心掩護。
+- **每輪 24 次、兩輪精確 48 次**：parent 對每個 child 都要求 `waitpid` 回到同一 PID
+  且 status 為 `-1`。harness 將宣告的 iteration 數與 `[fault resources armed]`、
+  `USER PAGE FAULT at address 2097152`、`Terminating user program.` 三組實際 log 逐項對帳，
+  額外或缺少一次 fault 都失敗；新增第十個 `[stress fault isolation ok]` stage。
+- **健康核心沒有持續洩漏**：兩輪快照皆為 PMM `used/free=716/7476`、heap
+  `11 pages/33348 free-bytes`、user `0/0`、process `0/0/16`、task/timer `0/0`、RAMFS `58`。
+  相較 Session 36 多出的兩個 heap pages 是第一輪反覆 ELF/resource teardown 讓 arena
+  達到的新高水位；第二輪沒有再增長，且約 8 KiB 全回到 heap free bytes。
+- **mutation matrix 3→5**：把 user page fault 的 `task_exit(-1)` 改成 `-2`，第一個 child
+  就由 `[stress fault isolation status FAIL]` 擊殺；拿掉 `process_finish_exit()` 的
+  `syscall_close_user_files()` 後，pipe pool 數輪即耗盡，child 以 setup failure 返回，
+  同一具名 parent gate 擊殺。連同 fd/process capacity 與 PMM leak，總計 **5/5 killed**。
+- **最終遠端 gate（code head）**：push／PR 的完整 `Tests`、clean build、static analysis、
+  native + QEMU、ASan+UBSan、mutation jobs 全綠；本機因沒有 cppcheck 與 32-bit libgcc，
+  僅執行 freestanding ELF、Python/shell 語法與 mutation-source 編譯，沒有宣稱本機 QEMU。

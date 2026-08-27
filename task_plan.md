@@ -506,6 +506,18 @@ Status: complete
 - GitHub Actions 實測每輪恰好 209 個 4000-byte allocation 後返回 NULL，兩輪健康快照
   均維持 PMM `714/7478`、heap `9/25168`；三個 mutants 全數由預期 gate 擊殺。
 
+## Phase 37: Session 37 — abnormal user-fault teardown 壓力
+Status: complete
+- 擴充既有 `fault`：觸發 supervisor-only address page fault 前，先 fault-in 16 頁 sbrk
+  heap、32 頁 mmap，並保留一個開啟檔案與一對 pipe fd，刻意不走 user-space cleanup。
+- `stress` 每輪 spawn/wait 24 次，逐次要求 page-fault handler 的 status 精確為 `-1`；
+  harness 要求兩輪共 48 組 armed／USER PAGE FAULT／termination marker，不能多也不能少。
+- 新增 user-fault status 與 `process_finish_exit` 漏關 fd/pipe 兩個 mutants；連同既有三個
+  capacity/PMM leak mutants，GitHub Actions 實測 **5/5 killed**。
+- 健康兩輪穩定在 PMM `716/7476`、heap `11/33348`、user `0/0`、process `0/0/16`、
+  blocked/sleeping `0/0`、RAMFS `58`；11-page heap 是第一輪 workload 暖機高水位，
+  第二輪沒有再成長。
+
 ## Decisions & Assumptions Log
 重大設計決策集中在 `PROJECT_STATE.md` 第 4 節；每個項目的完整分析在 `findings.md`。
 

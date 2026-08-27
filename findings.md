@@ -1738,6 +1738,31 @@ regs->eflags = (sc->eflags & EFLAGS_USER_MASK) | EFLAGS_ALWAYS_SET;
 - cppcheck 曾在第一版上限失敗路徑抓到忽略的 `malloc` 回傳值；保留並釋放意外配置後
   才通過。這是 host static-analysis gate 實際阻止測試碼自己洩漏的證據。
 
+## Session 37 — 2026-08-27
+
+### CAP23 follow-up：帶載 user page fault 的異常退出所有權
+- 檔案: `user/fault.c`, `user/stress.c`, `tests/run_qemu_stress.py`,
+  `tests/run_qemu_stress_mutants.sh`, `tests/run_static_analysis.sh`
+- 類別: exception isolation / abnormal process teardown / 測試有效性
+- 結論: **健康核心能完整回收 page-fault child 的 address space、檔案與 pipe；沒有找到
+  production defect。新增兩個 mutation 證明 status 與 fd/pipe cleanup 不是假覆蓋。**
+- 舊 `fault` 只讀一次 supervisor-only `0x200000`；它證明 handler 能殺掉 user process，
+  卻幾乎沒有 teardown 所有權。新版在 fault 前以 sbrk fault-in 16 頁、mmap fault-in
+  32 頁、打開靜態 RAMFS 檔並建立 pipe。程式刻意完全不 close/unmap，所有清理只能來自
+  `page_fault_handler()` → `task_exit(-1)` → `process_finish_exit()`。
+- `stress` 每輪重複 spawn/wait 24 次，並要求 PID 與 `-1` status 精確吻合。QEMU harness
+  不再籠統禁止所有 `USER PAGE FAULT`，而是依兩輪 iteration marker 計算預期總數 48，
+  再對帳 armed、fault address、termination 三組 marker；所以預期 fault 可通過，任何
+  額外 kernel/user fault 仍會因數量不符或 `PAGE FAULT!` 禁詞失敗。
+- 健康版兩輪都回到 PMM `716/7476`、heap `11 pages/33348 free-bytes`、user `0/0`、
+  process `0/0/16`、task/timer `0/0`、RAMFS `58`。Session 36 的 9-page heap 變成 11-page
+  high-water arena，但多出的約 8 KiB 全在 free bytes，第二輪也沒有增長；這符合目前
+  kernel heap 會重用但不把空頁退回 PMM 的契約，不是跨輪洩漏。
+- 新增兩個精確 mutants：user fault status `-1→-2` 立即由 parent status gate 擊殺；
+  省略 `syscall_close_user_files(process)` 會洩漏 pipe refs，數輪後 child setup 失敗並由
+  同一具名 gate 擊殺。既有 PMM leak mutant 在新 baseline 下仍產生第一輪
+  `2272/5920` → 第二輪 `3828/4364` 的 drift；完整 matrix **5/5 killed**。
+
 ## 已知限制（本輪審查有發現、但刻意不修的項目，附理由）
 以下項目屬於真實觀察到的架構/效能取捨，但要嘛需要較大幅度重構、要嘛觸發
 門檻在這個專案的實際使用場景下極難達到，依照「保守、相容現有設計」的原則
