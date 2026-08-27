@@ -518,6 +518,17 @@ Status: complete
   blocked/sleeping `0/0`、RAMFS `58`；11-page heap 是第一輪 workload 暖機高水位，
   第二輪沒有再成長。
 
+## Phase 38: Session 38 — ring-3 CPU exception isolation（F26）
+Status: complete
+- 找到 F26（P0 DoS）：未註冊 handler 的 #DE/#UD/#GP 只印 `Received Exception` 就 iret，
+  CPU 回到同一條 faulting instruction，任何 user process 都能讓核心陷入無窮 exception。
+- generic ISR 改以 `CS.RPL` 分流；CPL3 exception 呼叫 `task_exit(-1)`，CPL0 exception
+  輸出向量後停機，不能冒險恢復未知 kernel state。
+- `fault` 的 24 iterations 均分為 #PF/#DE/#UD/#GP；兩輪各類精確 12 次、總 termination
+  48 次，全部仍帶著 16 heap pages、32 mmap pages、file 與 pipe 做 abnormal teardown。
+- 新增 CPL classification 與 generic exception status mutants；GitHub Actions 實測
+  **7/7 killed**，健康快照維持 PMM `716/7476`、heap `11/33348`。
+
 ## Decisions & Assumptions Log
 重大設計決策集中在 `PROJECT_STATE.md` 第 4 節；每個項目的完整分析在 `findings.md`。
 

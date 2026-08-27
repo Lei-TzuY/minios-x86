@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 37 / 2026-08-27）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 38 / 2026-08-27）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -91,9 +91,9 @@ DiskFS: mounted=1 generation=9 files=0
 
 ## 3. 已完成工作
 
-### 已修問題（F1–F25）
+### 已修問題（F1–F26）
 
-分佈：**5 個 P0**（F1、F2、F14、F22、F25；其中三個可讓**整台機器停機**，
+分佈：**6 個 P0**（F1、F2、F14、F22、F25、F26；其中四個可讓**整台機器停機／凍結**，
 F25 則是**權限提升**——ring 3 自己取得 IOPL）、
 4 個 P1、8 個 P2、6 個 P3、2 個 P4。
 
@@ -122,6 +122,7 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
 | F23 | P3 | FAT16 寫入 0 位元組時仍把長度推到 seek 位置（F9 修法的殘留邊界） |
 | F24 | P2 | ATA 逾時的命令會答覆**下一個**操作 → 讀到別的 sector／假的寫入成功 |
 | F25 | **P0** | `sys_sigreturn` 讓 ring 3 自選 EFLAGS → **IOPL=3／NT／VM／關 IF** |
+| F26 | **P0** | 未處理的 ring-3 #DE/#UD/#GP iret 回原指令 → **無窮例外凍結整機** |
 
 ### 功能與效能
 
@@ -181,11 +182,11 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   gate-to-iret 排程邊界均已釘住；7/7 meaningful mutants killed。
 - **CAP23** `user/stress.c` ＋ `test-stress`：在真實 ring 3／QEMU 中整合施壓 heap、
   真正耗盡並回收 sbrk arena、demand paging、完整 4 MiB mmap 區、PIT/IRQ preemption、
-  scheduler/context switch、帶著 heap/mmap/fd/pipe 遭 page fault 的異常退出、
+  scheduler/context switch、帶著 heap/mmap/fd/pipe 輪流遭 #PF/#DE/#UD/#GP 的異常退出、
   syscall pointer validation、RAMFS/DiskFS/FAT16、threads/processes、fd/pipe/process/node
   exhaustion 與反覆 fork/exec/create/destroy。monitor-driven harness 在同次開機跑兩輪，
   要求十個具名階段各通過兩次，並逐欄比較 PMM、heap、user spaces、process/task/timer、
-  RAMFS 快照；另有 ASan/UBSan、cppcheck 與 5 個具名 QEMU capacity/leak/fault mutants
+  RAMFS 快照；另有 ASan/UBSan、cppcheck 與 7 個具名 QEMU capacity/leak/exception mutants
   的 CI gate。
 
 目前 25 套件，`make unit` <1 秒：
@@ -304,6 +305,9 @@ signal 103 / vm-lifecycle 36
 - **Session 37 加固**：每輪另啟動 24 個故意 page fault 的子行程；每個都帶著 16 頁
   sbrk heap、32 頁 mmap、一個開啟檔案與一對 pipe fd，必須以 status `-1` 被 parent
   精確回收。兩個新增 mutants 分別證明 user-fault status 與異常 fd/pipe teardown gate。
+- **Session 38 / F26**：同一 fault workload 輪流執行 #PF、整數除零 #DE、`ud2` #UD、
+  ring-3 `cli` #GP。generic ISR 依 `CS.RPL` 分流：CPL3 只終止肇事 task，CPL0 才輸出
+  `KERNEL EXCEPTION` 並停機；修正原本印字後 iret 回同一指令造成的整機無窮例外。
 - **B 類**：IRQ-driven ATA（見 ASSESS1，阻礙是 diskfs 沒有併發模型）、
   可中斷睡眠 + EINTR（會動 ABI）。兩者都需要人類決策。
 
