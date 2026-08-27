@@ -136,8 +136,13 @@ static int test_heap_and_paging(void) {
         }
         if (count < 128 || count == HEAP_EXHAUST_SLOTS)
             return fail("heap exhaustion capacity");
-        if (malloc(HEAP_EXHAUST_BYTES) != 0)
-            return fail("heap exhaustion limit");
+        {
+            void *unexpected = malloc(HEAP_EXHAUST_BYTES);
+            if (unexpected) {
+                free(unexpected);
+                return fail("heap exhaustion limit");
+            }
+        }
 
         write_str("[stress heap exhaustion allocations=");
         write_int(count);
