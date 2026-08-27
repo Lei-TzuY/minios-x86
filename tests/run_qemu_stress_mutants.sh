@@ -89,4 +89,16 @@ run_mutant \
     $'    /* mutant: discard the fd table without closing files or pipes */\n    paging_destroy_user_address_space(process->address_space);' \
     '[stress fault isolation status FAIL]'
 
-echo "QEMU stress mutations killed (5/5)"
+run_mutant \
+    isr.c \
+    '    if ((regs->cs & 0x3) == 0x3) {' \
+    '    if ((regs->cs & 0x3) == 0x0) { /* mutant: misclassify user exceptions */' \
+    'KERNEL EXCEPTION 0'
+
+run_mutant \
+    isr.c \
+    '        task_exit(-1);' \
+    '        task_exit(-2); /* mutant: corrupt generic exception status */' \
+    '[stress fault isolation status FAIL]'
+
+echo "QEMU stress mutations killed (7/7)"

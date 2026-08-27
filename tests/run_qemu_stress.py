@@ -231,16 +231,30 @@ def validate(log: str) -> None:
             fault_counts[0] < 16):
         raise HarnessError(f"fault isolation count mismatch: {fault_counts}")
     expected_faults = sum(fault_counts)
-    for marker in (
-        "[fault resources armed]",
+    if expected_faults % 4:
+        raise HarnessError(f"fault mode distribution is not even: {fault_counts}")
+    expected_per_mode = expected_faults // 4
+    per_mode_markers = (
+        "[fault resources armed mode=page]",
+        "[fault resources armed mode=divide]",
+        "[fault resources armed mode=invalid]",
+        "[fault resources armed mode=privileged]",
         "USER PAGE FAULT at address 2097152",
-        "Terminating user program.",
-    ):
+        "USER EXCEPTION 0\n",
+        "USER EXCEPTION 6\n",
+        "USER EXCEPTION 13\n",
+    )
+    for marker in per_mode_markers:
         actual = log.count(marker)
-        if actual != expected_faults:
+        if actual != expected_per_mode:
             raise HarnessError(
-                f"expected {expected_faults} occurrences of {marker}, found {actual}"
+                f"expected {expected_per_mode} occurrences of {marker}, found {actual}"
             )
+    actual_terminations = log.count("Terminating user program.")
+    if actual_terminations != expected_faults:
+        raise HarnessError(
+            f"expected {expected_faults} user terminations, found {actual_terminations}"
+        )
 
     first, second = snapshots(log)
     if first != second:

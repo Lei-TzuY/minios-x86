@@ -77,11 +77,15 @@ static int test_invalid_pointers(void) {
 }
 
 static int test_fault_isolation(void) {
+    static const char *modes[] = {
+        "page", "divide", "invalid", "privileged"
+    };
     const int rounds = 24;
 
     for (int i = 0; i < rounds; i++) {
+        const char *fault_argv[] = { "fault", modes[i % ARRAY_SIZE(modes)] };
         int status = 0;
-        int pid = sys_spawn("fault");
+        int pid = sys_spawn_argv(ARRAY_SIZE(fault_argv), fault_argv);
 
         if (pid < 0) return fail("fault isolation spawn");
         if (sys_waitpid(pid, &status, 0) != pid)
