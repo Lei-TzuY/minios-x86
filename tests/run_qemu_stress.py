@@ -190,6 +190,7 @@ def snapshots(log: str) -> list[dict[str, tuple[int, ...]]]:
 def validate(log: str) -> None:
     required = [
         "[stress invalid pointers ok]",
+        "[stress fault isolation ok]",
         "[stress heap exhaustion ok]",
         "[stress heap and paging ok]",
         "[stress fd and pipe exhaustion ok]",
@@ -209,7 +210,6 @@ def validate(log: str) -> None:
         " FAIL]",
         "System Halted.",
         "PAGE FAULT!",
-        "USER PAGE FAULT",
         "exec: not found",
     ]
     for marker in forbidden:
@@ -222,6 +222,25 @@ def validate(log: str) -> None:
     ]
     if len(heap_counts) != 2 or heap_counts[0] != heap_counts[1]:
         raise HarnessError(f"heap exhaustion count mismatch: {heap_counts}")
+
+    fault_counts = [
+        int(value)
+        for value in re.findall(r"\[stress fault isolation iterations=(\d+)\]", log)
+    ]
+    if (len(fault_counts) != 2 or fault_counts[0] != fault_counts[1] or
+            fault_counts[0] < 16):
+        raise HarnessError(f"fault isolation count mismatch: {fault_counts}")
+    expected_faults = sum(fault_counts)
+    for marker in (
+        "[fault resources armed]",
+        "USER PAGE FAULT at address 2097152",
+        "Terminating user program.",
+    ):
+        actual = log.count(marker)
+        if actual != expected_faults:
+            raise HarnessError(
+                f"expected {expected_faults} occurrences of {marker}, found {actual}"
+            )
 
     first, second = snapshots(log)
     if first != second:

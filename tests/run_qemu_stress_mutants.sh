@@ -77,4 +77,16 @@ run_mutant \
     $'    /* Free the frame only once its last COW sharer is gone (as in destroy). */\n    if (cow_ref_release(page->frame)) {\n        /* mutant: drop the mapping without returning its physical frame */\n    }\n    memset(page, 0, sizeof(*page));' \
     'resource snapshot drift:'
 
-echo "QEMU stress mutations killed (3/3)"
+run_mutant \
+    paging.c \
+    '        task_exit(-1);' \
+    '        task_exit(-2); /* mutant: corrupt the user-fault exit status */' \
+    '[stress fault isolation status FAIL]'
+
+run_mutant \
+    process.c \
+    $'    syscall_close_user_files(process);\n    paging_destroy_user_address_space(process->address_space);' \
+    $'    /* mutant: discard the fd table without closing files or pipes */\n    paging_destroy_user_address_space(process->address_space);' \
+    '[stress fault isolation status FAIL]'
+
+echo "QEMU stress mutations killed (5/5)"

@@ -76,6 +76,26 @@ static int test_invalid_pointers(void) {
     return 0;
 }
 
+static int test_fault_isolation(void) {
+    const int rounds = 24;
+
+    for (int i = 0; i < rounds; i++) {
+        int status = 0;
+        int pid = sys_spawn("fault");
+
+        if (pid < 0) return fail("fault isolation spawn");
+        if (sys_waitpid(pid, &status, 0) != pid)
+            return fail("fault isolation reap");
+        if (status != -1) return fail("fault isolation status");
+    }
+
+    write_str("[stress fault isolation iterations=");
+    write_int(rounds);
+    write_str("]\n");
+    pass("fault isolation");
+    return 0;
+}
+
 static void *mmap_slots[1024];
 
 #define HEAP_EXHAUST_SLOTS 256
@@ -559,6 +579,7 @@ int main(void) {
     write_str("[stress BEGIN]\n");
 
     if (test_invalid_pointers() != 0 ||
+        test_fault_isolation() != 0 ||
         test_heap_and_paging() != 0 ||
         test_descriptor_and_pipe_exhaustion() != 0 ||
         test_filesystems() != 0 ||

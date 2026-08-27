@@ -32,6 +32,6 @@ cppcheck \
     -DHOSTED_TEST \
     utils.c fs.c pmm.c heap.c ramfs.c diskfs.c fat16.c pipe.c sem.c \
     timer.c task.c rtc.c procfs.c vga.c ata.c process.c syscall.c elf_loader.c \
-    user/stress.c user/ush.c
+    user/fault.c user/stress.c user/ush.c
 
 echo "Python, shell, and cppcheck static analysis passed"
