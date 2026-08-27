@@ -34,14 +34,14 @@ jobs:
           make clean
           make all -j4
 
+      - name: Static analysis
+        run: make static-analysis
+
       - name: Native and QEMU regression suites
         run: make test
 
       - name: Host ASan and UBSan suites
         run: make sanitize
-
-      - name: Static analysis
-        run: make static-analysis
 
       - name: Preserve QEMU stress log
         if: always()
