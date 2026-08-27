@@ -66,10 +66,12 @@ jobs:
       - name: Prove stress assertions kill kernel mutants
         run: make test-stress-mutants
 
-      - name: Preserve mutant QEMU log
+      - name: Preserve mutant QEMU logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: qemu-stress-mutant-${{ github.run_id }}-${{ github.run_attempt }}
-          path: tests/qemu-stress.log
+          path: |
+            tests/qemu-stress.log
+            tests/qemu-stress-driver.log
           if-no-files-found: warn

@@ -7,6 +7,7 @@ cd "$repo_dir"
 active_file=
 backup_file=
 baseline_hash=
+driver_log=tests/qemu-stress-driver.log
 
 restore_active() {
     if [[ -n "$active_file" && -n "$backup_file" && -f "$backup_file" ]]; then
@@ -38,10 +39,10 @@ run_mutant() {
     baseline_hash=$(sha256sum "$active_file" | awk '{print $1}')
     python3 tests/apply_mutation.py "$active_file" "$old" "$new"
 
-    rm -f tests/qemu-stress.log
+    rm -f tests/qemu-stress.log "$driver_log"
     set +e
-    make test-stress
-    rc=$?
+    make test-stress 2>&1 | tee "$driver_log"
+    rc=${PIPESTATUS[0]}
     set -e
 
     restore_active
@@ -50,8 +51,8 @@ run_mutant() {
         echo "mutant survived: $file" >&2
         exit 1
     fi
-    if [[ ! -f tests/qemu-stress.log ]] ||
-       ! grep -Fq "$expected_marker" tests/qemu-stress.log; then
+    if [[ ! -f "$driver_log" ]] ||
+       ! grep -Fq "$expected_marker" "$driver_log"; then
         echo "mutant failed for the wrong reason; missing $expected_marker" >&2
         exit 1
     fi
@@ -70,4 +71,10 @@ run_mutant \
     $'static process_t *process_allocate(void) {\n    for (int i = 0; i < MAX_PROCESSES - 1; i++) {' \
     '[stress process exhaustion fill FAIL]'
 
-echo "QEMU stress mutations killed (2/2)"
+run_mutant \
+    paging.c \
+    $'    /* Free the frame only once its last COW sharer is gone (as in destroy). */\n    if (cow_ref_release(page->frame)) {\n        pmm_free_block((void *)(page->frame << 12));\n    }\n    memset(page, 0, sizeof(*page));' \
+    $'    /* Free the frame only once its last COW sharer is gone (as in destroy). */\n    if (cow_ref_release(page->frame)) {\n        /* mutant: drop the mapping without returning its physical frame */\n    }\n    memset(page, 0, sizeof(*page));' \
+    'resource snapshot drift:'
+
+echo "QEMU stress mutations killed (3/3)"

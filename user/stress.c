@@ -78,6 +78,10 @@ static int test_invalid_pointers(void) {
 
 static void *mmap_slots[1024];
 
+#define HEAP_EXHAUST_SLOTS 256
+#define HEAP_EXHAUST_BYTES 4000
+static unsigned char *heap_exhaust_slots[HEAP_EXHAUST_SLOTS];
+
 static int test_heap_and_paging(void) {
     unsigned char *blocks[32];
     unsigned sizes[32];
@@ -114,6 +118,55 @@ static int test_heap_and_paging(void) {
         }
         free(big);
     }
+
+    /* Drive the sbrk-backed allocator to a real failure, not merely to a
+     * fixed iteration count.  The slot bound is deliberately larger than the
+     * entire user heap: reaching it would mean this test never proved the
+     * exhaustion path.  Touch both ends of every allocation so demand paging
+     * and allocator metadata remain coupled to the check. */
+    {
+        int count = 0;
+
+        while (count < HEAP_EXHAUST_SLOTS) {
+            unsigned char *p = (unsigned char *)malloc(HEAP_EXHAUST_BYTES);
+            if (!p) break;
+            p[0] = (unsigned char)(count * 19 + 7);
+            p[HEAP_EXHAUST_BYTES - 1] = (unsigned char)(count * 23 + 11);
+            heap_exhaust_slots[count++] = p;
+        }
+        if (count < 128 || count == HEAP_EXHAUST_SLOTS)
+            return fail("heap exhaustion capacity");
+        if (malloc(HEAP_EXHAUST_BYTES) != 0)
+            return fail("heap exhaustion limit");
+
+        write_str("[stress heap exhaustion allocations=");
+        write_int(count);
+        write_str("]\n");
+
+        for (int i = 0; i < count; i++) {
+            if (heap_exhaust_slots[i][0] != (unsigned char)(i * 19 + 7) ||
+                heap_exhaust_slots[i][HEAP_EXHAUST_BYTES - 1] !=
+                    (unsigned char)(i * 23 + 11)) {
+                return fail("heap exhaustion contents");
+            }
+        }
+        for (int i = count - 1; i >= 0; i--) free(heap_exhaust_slots[i]);
+
+        /* Reverse-order frees must coalesce the contiguous sbrk arena well
+         * enough to serve a request much larger than an individual chunk. */
+        {
+            unsigned char *again = (unsigned char *)malloc(128 * 1024);
+            if (!again) return fail("heap exhaustion recovery");
+            for (int i = 0; i < 128 * 1024; i += PAGE_SIZE)
+                again[i] = (unsigned char)(i / PAGE_SIZE + 29);
+            for (int i = 0; i < 128 * 1024; i += PAGE_SIZE) {
+                if (again[i] != (unsigned char)(i / PAGE_SIZE + 29))
+                    return fail("heap recovery contents");
+            }
+            free(again);
+        }
+    }
+    pass("heap exhaustion");
 
     /* Repeated page-in/unmap cycles must reuse the same virtual run. */
     for (int round = 0; round < 32; round++) {

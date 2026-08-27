@@ -190,6 +190,7 @@ def snapshots(log: str) -> list[dict[str, tuple[int, ...]]]:
 def validate(log: str) -> None:
     required = [
         "[stress invalid pointers ok]",
+        "[stress heap exhaustion ok]",
         "[stress heap and paging ok]",
         "[stress fd and pipe exhaustion ok]",
         "[stress filesystems ok]",
@@ -214,6 +215,13 @@ def validate(log: str) -> None:
     for marker in forbidden:
         if marker in log:
             raise HarnessError(f"forbidden marker in QEMU log: {marker}")
+
+    heap_counts = [
+        int(value)
+        for value in re.findall(r"\[stress heap exhaustion allocations=(\d+)\]", log)
+    ]
+    if len(heap_counts) != 2 or heap_counts[0] != heap_counts[1]:
+        raise HarnessError(f"heap exhaustion count mismatch: {heap_counts}")
 
     first, second = snapshots(log)
     if first != second:
