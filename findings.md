@@ -1712,6 +1712,32 @@ regs->eflags = (sc->eflags & EFLAGS_USER_MASK) | EFLAGS_ALWAYS_SET;
   `[stress process exhaustion fill FAIL]`。腳本只接受這兩個具名 marker，並在 EXIT trap
   以 SHA-256 證明 source 位元組完整還原。
 
+## Session 36 — 2026-08-27
+
+### CAP23 follow-up：heap 真耗盡與 user-page teardown leak proof
+- 檔案: `user/stress.c`, `tests/run_qemu_stress.py`,
+  `tests/run_qemu_stress_mutants.sh`, `.github/workflows/kernel-regression.yml`
+- 類別: 記憶體配置 / 資源生命週期 / 測試有效性
+- 結論: **沒有發現健康核心的資源洩漏；補上真實 allocator exhaustion 與一個能證明
+  兩輪 PMM 快照確實會抓 teardown leak 的 mutation。**
+- 舊 workload 的 256 KiB sbrk 配置能碰到 demand paging，但不保證 allocator 真的回傳
+  NULL，也不保證 free-list 能把多個 arena 合併成大區塊。新測試以 256-slot 上限持續
+  配置 4000 bytes；目前 image 在兩輪都精確成功 209 次後耗盡。每個 live chunk 的首尾
+  pattern 都須保持，逆序釋放後再配置 128 KiB 並逐頁驗證，才宣告
+  `[stress heap exhaustion ok]`。
+- 256 是保護 harness 的界線，不是硬編碼 allocator 容量：若日後 heap 變大到 256 次仍
+  未返回 NULL，測試會具名失敗，要求同步擴大 slot，而不會越界寫測試陣列。harness 只
+  要求同一個 image 的兩輪 allocation count 相等，不把 209 寫成產品契約。
+- 第三個 mutation 讓 `paging_unmap_user_page()` 清 PTE 卻不把實體頁交回 PMM。每輪單獨
+  仍可跑完所有九階段，因此只看 `[stress PASS]` 會假綠；完整 snapshot 比對看到 PMM
+  從第一輪 `used/free=2270/5922` 漂到第二輪 `3826/4366`，以
+  `resource snapshot drift` 精準失敗。這直接證明「同次開機跑兩輪」不是裝飾。
+- 健康版兩輪則維持 PMM `714/7478`、heap `9 pages/25168 free-bytes`、user `0/0`、
+  process `0/0/16`、blocked/sleeping `0/0`、RAMFS `58`。fd/process/leak 三個 mutants
+  全由預期 gate 擊殺（**3/3**），且 mutation runner 現在同時保存 driver 與 guest log。
+- cppcheck 曾在第一版上限失敗路徑抓到忽略的 `malloc` 回傳值；保留並釋放意外配置後
+  才通過。這是 host static-analysis gate 實際阻止測試碼自己洩漏的證據。
+
 ## 已知限制（本輪審查有發現、但刻意不修的項目，附理由）
 以下項目屬於真實觀察到的架構/效能取捨，但要嘛需要較大幅度重構、要嘛觸發
 門檻在這個專案的實際使用場景下極難達到，依照「保守、相容現有設計」的原則

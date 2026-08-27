@@ -119,8 +119,10 @@ miniOS uses two complementary layers.
 behavior and boot path. The dedicated stress regression drives memory allocation
 and paging, timer interrupts and preemption, context switching, syscalls, all
 writable filesystems, process/thread teardown, invalid user pointers and exact
-resource-exhaustion boundaries. It runs twice in one boot and requires the
-post-run resource snapshots to match exactly.
+resource-exhaustion boundaries. The user allocator must reach a real NULL
+result, preserve every live chunk, then coalesce enough freed space for a large
+reuse allocation. The suite runs twice in one boot and requires the post-run
+resource snapshots to match exactly.
 
 Mutation testing is used selectively to answer a harder question than line coverage: *would the suite actually fail if this logic were wrong?*
 
@@ -149,8 +151,8 @@ make unit         # native unit tests only
 make test         # native + QEMU / ISO validation
 make test-stress  # focused ring-3 stress run, twice in one QEMU boot
 make sanitize     # hosted suites under AddressSanitizer + UBSan
-make static-analysis       # Python syntax checks + cppcheck
-make test-stress-mutants   # prove two exact exhaustion assertions fire
+make static-analysis       # Python + shell syntax checks, then cppcheck
+make test-stress-mutants   # prove two capacity gates and one leak gate fire
 make iso          # produce miniOS.iso
 make run-iso      # boot the ISO through GRUB in QEMU
 ```

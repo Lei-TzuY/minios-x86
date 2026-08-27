@@ -1104,3 +1104,25 @@
 - **mutation proof**：`make test-stress-mutants` 將 fd 上限 8→7、process allocator
   少掃一格，分別必須由 `[stress fd exhaustion fill FAIL]` 與
   `[stress process exhaustion fill FAIL]` 具名擊殺；每輪 EXIT trap 還原並驗 SHA-256。
+
+## Session 36 — 2026-08-27
+
+- **heap 壓力改成真正的 exhaustion contract**：`user/stress.c` 不再只配置固定 256 KiB；
+  以 256-slot 硬上限持續配置 4000-byte chunk，必須先看到 `malloc()==NULL` 才算通過。
+  QEMU 兩輪各在 **209** 個 allocation 後精確耗盡，且所有仍存活 chunk 的首尾內容都
+  完整。若 allocator 錯誤地超過 slot 上限仍成功，測試會先釋放意外指標再具名失敗。
+- **回收不是只看 free 沒 crash**：所有 chunk 逆序釋放後，再配置 128 KiB 並逐頁寫入／
+  讀回，直接驗證 K&R free-list 能跨 sbrk arena coalesce 並重用；新增第九個
+  `[stress heap exhaustion ok]` marker，兩輪都必須出現。
+- **新增 teardown leak mutant**：精確移除 `paging_unmap_user_page()` 的
+  `pmm_free_block()`。mutant 第一輪 PMM 為 `used/free=2270/5922`，第二輪惡化為
+  `3826/4366`，harness 以具名 `resource snapshot drift` 擊殺；原有 fd/process capacity
+  mutants 亦分別由預期 marker 擊殺，總計 **3/3 killed**。
+- **mutation 診斷可保存**：driver stdout 與 QEMU debugcon log 都上傳為失敗 artifact，
+  因為跨輪 snapshot 比對結果出現在 driver，不一定存在 guest log。
+- **靜態分析先抓到測試碼缺口**：第一版在「超過上限仍配置成功」路徑忽略 `malloc`
+  回傳值，cppcheck 以 `leakReturnValNotUsed` 擋下；改成保留並釋放該意外 allocation 後，
+  Python bytecode、shell syntax、cppcheck 全綠。
+- **健康核心仍回到完全相同 baseline**：兩輪均為 PMM `used/free=714/7478`、kernel heap
+  `9 pages/25168 free-bytes`、user pages/spaces `0/0`、process `0/0/16`、blocked/sleeping
+  `0/0`、RAMFS `58`；host ASan+UBSan 亦通過。

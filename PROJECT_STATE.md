@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 35 / 2026-08-26）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 36 / 2026-08-27）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -180,11 +180,12 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   修改 production code。sbrk 邊界、mmap free/reuse、fork/exec/slot-reuse metadata 與
   gate-to-iret 排程邊界均已釘住；7/7 meaningful mutants killed。
 - **CAP23** `user/stress.c` ＋ `test-stress`：在真實 ring 3／QEMU 中整合施壓 heap、
-  demand paging、完整 4 MiB mmap 區、PIT/IRQ preemption、scheduler/context switch、
+  真正耗盡並回收 sbrk arena、demand paging、完整 4 MiB mmap 區、PIT/IRQ preemption、
+  scheduler/context switch、
   syscall pointer validation、RAMFS/DiskFS/FAT16、threads/processes、fd/pipe/process/node
   exhaustion 與反覆 fork/exec/create/destroy。monitor-driven harness 在同次開機跑兩輪，
-  要求八個具名階段各通過兩次，並逐欄比較 PMM、heap、user spaces、process/task/timer、
-  RAMFS 快照；另有 ASan/UBSan、cppcheck 與 2 個具名 QEMU exhaustion mutants 的 CI gate。
+  要求九個具名階段各通過兩次，並逐欄比較 PMM、heap、user spaces、process/task/timer、
+  RAMFS 快照；另有 ASan/UBSan、cppcheck 與 3 個具名 QEMU capacity/leak mutants 的 CI gate。
 
 目前 25 套件，`make unit` <1 秒：
 
@@ -296,6 +297,9 @@ signal 103 / vm-lifecycle 36
   workload 組合記憶體、分頁、timer preemption、threads、processes、syscalls、三個可寫
   filesystem 與精確資源耗盡；同次開機跑兩輪並要求完整資源快照一致。pipe、semaphore、
   timer 與 process teardown 的跨模組缺口已由此直接覆蓋。
+- **Session 36 加固**：heap exhaustion 不再以固定 iteration 冒充耗盡；必須實際收到
+  `malloc()==NULL`、驗證所有 live chunk、逆序釋放後再成功配置 128 KiB。mutation matrix
+  另注入 `munmap` 清 PTE 但漏還實體頁，必須由兩輪 PMM snapshot drift 擊殺。
 - **B 類**：IRQ-driven ATA（見 ASSESS1，阻礙是 diskfs 沒有併發模型）、
   可中斷睡眠 + EINTR（會動 ABI）。兩者都需要人類決策。
 

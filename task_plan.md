@@ -483,17 +483,28 @@ F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P
    效能，但沒人測過它的算術邊界，F22（P0，凍結整台機器）因此潛伏了 23 輪。
 
 ## Phase 35: Session 35 — 跨子系統 QEMU 壓力與自動品質 gate（CAP23）
-Status: in progress
+Status: complete
 - 新增 `user/stress.c`，從 ring 3 組合施壓記憶體／分頁、PIT IRQ preemption、排程與
   context switch、syscall 指標驗證、三個可寫 filesystem、thread/process lifecycle、
   fd/pipe/process/node exhaustion，以及反覆 fork/exec/create/destroy。
 - 新增 monitor-driven `test-stress`：同次 QEMU 開機執行兩輪，不靠固定完成延遲；每輪
-  必須出現八個具名成功 marker，結束後 PMM、heap、user space、process/task/timer、
+  必須出現九個具名成功 marker，結束後 PMM、heap、user space、process/task/timer、
   RAMFS 快照必須逐欄一致且回到精確 baseline。
-- 新增 hosted ASan+UBSan、Python bytecode + cppcheck gate，以及兩個必須由具名斷言
-  擊殺的 QEMU exhaustion mutants；mutation source 由 EXIT trap 位元組精確還原。
+- 新增 hosted ASan+UBSan、Python bytecode + shell syntax + cppcheck gate，以及三個必須由
+  具名容量斷言或 snapshot drift 擊殺的 QEMU mutants；mutation source 由 EXIT trap
+  位元組精確還原。
 - 更新 GitHub Actions，使完整 native/QEMU、sanitizer、static-analysis、mutation matrix
   在 branch 與 pull request 自動執行。
+
+## Phase 36: Session 36 — heap 真耗盡與 teardown mutation 加固
+Status: complete
+- 把固定次數的 heap 壓力改為 bounded-until-NULL：slot 上限大於整個 user heap，若沒看到
+  真正配置失敗，測試本身即失敗；所有 live chunk 仍須保有內容。
+- 逆序釋放後配置並逐頁驗證 128 KiB，直接檢查 K&R free-list 跨 sbrk arena 合併與重用。
+- 注入 `paging_unmap_user_page` 漏掉 `pmm_free_block` 的 mutant，要求兩輪 PMM snapshot
+  產生具名 `resource snapshot drift`；driver stdout 與 QEMU debugcon log 一併保存。
+- GitHub Actions 實測每輪恰好 209 個 4000-byte allocation 後返回 NULL，兩輪健康快照
+  均維持 PMM `714/7478`、heap `9/25168`；三個 mutants 全數由預期 gate 擊殺。
 
 ## Decisions & Assumptions Log
 重大設計決策集中在 `PROJECT_STATE.md` 第 4 節；每個項目的完整分析在 `findings.md`。

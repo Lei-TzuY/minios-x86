@@ -24,7 +24,8 @@ python3）。Windows 端沒有編譯器。
 - `make test` 的 QEMU 目標：`test-ata-absent`、`test-boot`、`test-iso`、
   `test-stress`、`test-shell`。
 - 額外品質 gate：`make sanitize`（hosted ASan + UBSan）、`make static-analysis`
-  （Python bytecode + cppcheck）、`make test-stress-mutants`（兩個具名 exhaustion mutant）。
+  （Python bytecode + shell syntax + cppcheck）、`make test-stress-mutants`（兩個具名
+  capacity mutant + 一個 PMM leak mutant）。
 
 ### ⚠️ 離開碼陷阱（會造成假綠燈）
 
