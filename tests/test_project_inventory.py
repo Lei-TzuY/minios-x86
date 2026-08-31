@@ -79,6 +79,14 @@ class ProjectInventoryTests(unittest.TestCase):
         self.assertIn("missing one", message)
         self.assertIn("extra three", message)
 
+    def test_require_substrings_rejects_stale_documentation(self) -> None:
+        with self.assertRaisesRegex(inventory.InventoryError, "stale/missing"):
+            inventory.require_substrings(
+                "README.md",
+                "51 system calls",
+                ("51 system calls", "53 user programs / demos"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

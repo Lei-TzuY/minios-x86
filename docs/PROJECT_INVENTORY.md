@@ -165,6 +165,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 - every user program is registered to its matching embedded ELF in `kernel.c`
 - every `UNIT_BINS` target has a matching test source
 - every QEMU dependency of the top-level `test` target is defined
+- README / PROJECT_STATE / CLAUDE headline counts match source-derived totals
 - the stress mutation harness contains at least one `run_mutant` case
 
 Regenerate with:
