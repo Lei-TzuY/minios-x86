@@ -57,6 +57,7 @@ enum syscall_number {
     SYS_THREAD_CREATE = 49, /* spawn a thread sharing this address space */
     SYS_THREAD_JOIN   = 50, /* block until all threads have exited */
     SYS_MUNMAP        = 51, /* release pages previously obtained from SYS_MMAP */
+    SYS_DUP           = 52, /* duplicate a descriptor into the lowest free fd */
 };
 
 /* Keep kernel names distinct from the SEEK_* macros provided by hosted C

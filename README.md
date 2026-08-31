@@ -21,7 +21,7 @@ The project is developed with an audit-driven testing loop: bugs and invariants 
 
 Recent project checkpoints include:
 
-- **51 system calls** and **53 user programs / demos**
+- **52 system calls** and **53 user programs / demos**
 - native host-side unit suites for kernel logic
 - QEMU end-to-end tests, including the real GRUB/ISO boot path
 - mutation testing used to validate whether tests actually detect injected faults
@@ -105,11 +105,11 @@ A unified VFS over:
 Programs can be executed from mounted filesystems rather than only from the built-in RAMFS.
 
 ### User land
-- 51 system calls
+- 52 system calls
 - 53 user programs / demos
 - kernel shell
 - ring-3 user shell (`ush`)
-- pipes, redirection, background jobs and shell variables
+- pipes, `dup`/`dup2`, redirection, background jobs and shell variables
 
 ## Testing strategy
 
