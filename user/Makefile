@@ -3,6 +3,7 @@ AS      = as
 LD      = ld
 CFLAGS  = -m32 -nostdlib -fno-stack-protector -fno-pie -no-pie \
           -ffreestanding -O2 -Wall -Wextra
+DEPFLAGS = -MMD -MP
 LOAD    = 0x310000
 PROGRAMS = hello.elf cat.elf fault.elf badptr.elf worker.elf spawner.elf \
 	   orphan.elf sleeptest.elf fstest.elf echo.elf malloctest.elf wc.elf grep.elf \
@@ -11,6 +12,9 @@ PROGRAMS = hello.elf cat.elf fault.elf badptr.elf worker.elf spawner.elf \
 	   alarmdemo.elf pausedemo.elf pipedemo.elf jobctl.elf uptime.elf date.elf \
 	   printenv.elf cputime.elf shmtest.elf semtest.elf mmaptest.elf \
 	   threadtest.elf threadexit.elf execguard.elf ramgrow.elf pathlim.elf redirref.elf fatref.elf fatgrow.elf forkredir.elf sigretguard.elf sigflags.elf killthread.elf killwait.elf bigseek.elf stress.elf ush.elf
+DEPS = $(PROGRAMS:.elf=.d)
+
+.PHONY: all clean
 
 all: $(PROGRAMS)
 
@@ -21,7 +25,9 @@ crt0.o: crt0.s
 	$(AS) --32 $< -o $@
 
 %.o: %.c
-	$(CC) -c $(CFLAGS) $< -o $@
+	$(CC) -c $(CFLAGS) $(DEPFLAGS) $< -o $@
+
+-include $(DEPS)
 
 clean:
-	rm -f *.o $(PROGRAMS)
+	rm -f *.o *.d $(PROGRAMS)

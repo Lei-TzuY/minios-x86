@@ -16,7 +16,9 @@ python3 tools/check_syscall_abi.py
 
 bash -n \
     tests/run_host_sanitizers.sh tests/run_qemu_stress_mutants.sh \
-    tests/run_static_analysis.sh
+    tests/run_static_analysis.sh tests/test_user_incremental_build.sh
+
+bash tests/test_user_incremental_build.sh
 
 if ! command -v cppcheck >/dev/null 2>&1; then
     echo "cppcheck is required for static-analysis" >&2
@@ -40,4 +42,4 @@ cppcheck \
     timer.c task.c rtc.c procfs.c vga.c ata.c isr.c process.c syscall.c elf_loader.c \
     user/fault.c user/stress.c user/ush.c
 
-echo "Python, inventory, syscall ABI, shell, and cppcheck static analysis passed"
+echo "Python, inventory, syscall ABI, incremental user build, shell, and cppcheck static analysis passed"
