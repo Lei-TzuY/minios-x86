@@ -133,7 +133,6 @@ int paging_user_range_mapped(uint32_t vaddr, uint32_t size) {
 
 #include "../syscall.c"
 
-/* test.h after syscall.c: syscall.h's SEEK_* enum must precede <stdio.h>. */
 #include "test.h"
 
 /* --- harness -------------------------------------------------------------- */

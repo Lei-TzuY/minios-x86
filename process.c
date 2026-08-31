@@ -481,7 +481,7 @@ void process_set_cwd(int32_t pid, const char *cwd) {
 
     if (process && cwd) {
         int i = 0;
-        while (cwd[i] && i < PROCESS_CWD_MAX - 1) {
+        while (i < PROCESS_CWD_MAX - 1 && cwd[i]) {
             process->cwd[i] = cwd[i];
             i++;
         }
@@ -682,7 +682,8 @@ int process_ext_free(process_t *proc, uint32_t vaddr, uint32_t npages) {
 /* Bounded copy into a fixed env field (always null-terminated). */
 static void env_copy(char *dst, const char *src, uint32_t max) {
     uint32_t i = 0;
-    while (src[i] && i < max - 1) { dst[i] = src[i]; i++; }
+    if (max == 0) return;
+    while (i < max - 1 && src[i]) { dst[i] = src[i]; i++; }
     dst[i] = '\0';
 }
 

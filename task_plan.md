@@ -482,6 +482,53 @@ F1–F23 全數修復並驗證：4 個 P0（F1、F2、F14、**F22**）、4 個 P
 3. **「量過效能」≠「驗證過正確性」**：PERF2 在 Session 13 被 `make bench` 量過
    效能，但沒人測過它的算術邊界，F22（P0，凍結整台機器）因此潛伏了 23 輪。
 
+## Phase 35: Session 35 — 跨子系統 QEMU 壓力與自動品質 gate（CAP23）
+Status: complete
+- 新增 `user/stress.c`，從 ring 3 組合施壓記憶體／分頁、PIT IRQ preemption、排程與
+  context switch、syscall 指標驗證、三個可寫 filesystem、thread/process lifecycle、
+  fd/pipe/process/node exhaustion，以及反覆 fork/exec/create/destroy。
+- 新增 monitor-driven `test-stress`：同次 QEMU 開機執行兩輪，不靠固定完成延遲；每輪
+  必須出現九個具名成功 marker，結束後 PMM、heap、user space、process/task/timer、
+  RAMFS 快照必須逐欄一致且回到精確 baseline。
+- 新增 hosted ASan+UBSan、Python bytecode + shell syntax + cppcheck gate，以及三個必須由
+  具名容量斷言或 snapshot drift 擊殺的 QEMU mutants；mutation source 由 EXIT trap
+  位元組精確還原。
+- 更新 GitHub Actions，使完整 native/QEMU、sanitizer、static-analysis、mutation matrix
+  在 branch 與 pull request 自動執行。
+
+## Phase 36: Session 36 — heap 真耗盡與 teardown mutation 加固
+Status: complete
+- 把固定次數的 heap 壓力改為 bounded-until-NULL：slot 上限大於整個 user heap，若沒看到
+  真正配置失敗，測試本身即失敗；所有 live chunk 仍須保有內容。
+- 逆序釋放後配置並逐頁驗證 128 KiB，直接檢查 K&R free-list 跨 sbrk arena 合併與重用。
+- 注入 `paging_unmap_user_page` 漏掉 `pmm_free_block` 的 mutant，要求兩輪 PMM snapshot
+  產生具名 `resource snapshot drift`；driver stdout 與 QEMU debugcon log 一併保存。
+- GitHub Actions 實測每輪恰好 209 個 4000-byte allocation 後返回 NULL，兩輪健康快照
+  均維持 PMM `714/7478`、heap `9/25168`；三個 mutants 全數由預期 gate 擊殺。
+
+## Phase 37: Session 37 — abnormal user-fault teardown 壓力
+Status: complete
+- 擴充既有 `fault`：觸發 supervisor-only address page fault 前，先 fault-in 16 頁 sbrk
+  heap、32 頁 mmap，並保留一個開啟檔案與一對 pipe fd，刻意不走 user-space cleanup。
+- `stress` 每輪 spawn/wait 24 次，逐次要求 page-fault handler 的 status 精確為 `-1`；
+  harness 要求兩輪共 48 組 armed／USER PAGE FAULT／termination marker，不能多也不能少。
+- 新增 user-fault status 與 `process_finish_exit` 漏關 fd/pipe 兩個 mutants；連同既有三個
+  capacity/PMM leak mutants，GitHub Actions 實測 **5/5 killed**。
+- 健康兩輪穩定在 PMM `716/7476`、heap `11/33348`、user `0/0`、process `0/0/16`、
+  blocked/sleeping `0/0`、RAMFS `58`；11-page heap 是第一輪 workload 暖機高水位，
+  第二輪沒有再成長。
+
+## Phase 38: Session 38 — ring-3 CPU exception isolation（F26）
+Status: complete
+- 找到 F26（P0 DoS）：未註冊 handler 的 #DE/#UD/#GP 只印 `Received Exception` 就 iret，
+  CPU 回到同一條 faulting instruction，任何 user process 都能讓核心陷入無窮 exception。
+- generic ISR 改以 `CS.RPL` 分流；CPL3 exception 呼叫 `task_exit(-1)`，CPL0 exception
+  輸出向量後停機，不能冒險恢復未知 kernel state。
+- `fault` 的 24 iterations 均分為 #PF/#DE/#UD/#GP；兩輪各類精確 12 次、總 termination
+  48 次，全部仍帶著 16 heap pages、32 mmap pages、file 與 pipe 做 abnormal teardown。
+- 新增 CPL classification 與 generic exception status mutants；GitHub Actions 實測
+  **7/7 killed**，健康快照維持 PMM `716/7476`、heap `11/33348`。
+
 ## Decisions & Assumptions Log
 重大設計決策集中在 `PROJECT_STATE.md` 第 4 節；每個項目的完整分析在 `findings.md`。
 

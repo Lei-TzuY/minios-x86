@@ -37,8 +37,6 @@ void *memcpy(void *d, const void *s, size_t n) {
 
 #include "../process.c"
 
-/* Included after process.c so syscall.h's SEEK_* enum is seen before <stdio.h>
- * (pulled in by test.h) defines SEEK_SET as a macro. */
 #include "test.h"
 
 static void reset(void) {

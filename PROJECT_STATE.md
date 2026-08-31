@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 34 / 2026-08-16）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 38 / 2026-08-27）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -12,11 +12,11 @@
 
 | 項目 | 數量 |
 |---|---|
-| 核心 C/ASM（不含 `*_embed.c` 產生檔） | ~9,300 行 |
-| `user/` ring-3 程式與 syscall wrapper | ~3,700 行 |
-| `tests/` 原生單元測試 | ~12,100 行 |
+| 核心 C/ASM（不含 `*_embed.c` 產生檔） | ~9,400 行 |
+| `user/` ring-3 程式與 syscall wrapper | ~4,300 行 |
+| `tests/` 原生單元測試 | ~12,700 行 |
 | 系統呼叫 | 51 |
-| 使用者程式 | 52 |
+| 使用者程式 | 53 |
 | 單元測試套件 | 25 |
 
 ### 子系統
@@ -81,7 +81,7 @@ User pages: accessible=0 spaces=0
 Processes: running=0 zombies=0 peak=4
 Tasks: blocked=0
 Timers: sleeping=0
-RAMFS nodes=59
+RAMFS nodes=60
 ATA sectors: available=2048 reads=19 writes=76
 DiskFS: mounted=1 generation=9 files=0
 ```
@@ -91,9 +91,9 @@ DiskFS: mounted=1 generation=9 files=0
 
 ## 3. 已完成工作
 
-### 已修問題（F1–F25）
+### 已修問題（F1–F26）
 
-分佈：**5 個 P0**（F1、F2、F14、F22、F25；其中三個可讓**整台機器停機**，
+分佈：**6 個 P0**（F1、F2、F14、F22、F25、F26；其中四個可讓**整台機器停機／凍結**，
 F25 則是**權限提升**——ring 3 自己取得 IOPL）、
 4 個 P1、8 個 P2、6 個 P3、2 個 P4。
 
@@ -122,6 +122,7 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
 | F23 | P3 | FAT16 寫入 0 位元組時仍把長度推到 seek 位置（F9 修法的殘留邊界） |
 | F24 | P2 | ATA 逾時的命令會答覆**下一個**操作 → 讀到別的 sector／假的寫入成功 |
 | F25 | **P0** | `sys_sigreturn` 讓 ring 3 自選 EFLAGS → **IOPL=3／NT／VM／關 IF** |
+| F26 | **P0** | 未處理的 ring-3 #DE/#UD/#GP iret 回原指令 → **無窮例外凍結整機** |
 
 ### 功能與效能
 
@@ -136,7 +137,7 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   檢查。**目前不可觸發**（所有後端的檔案節點 finddir 都是 NULL），是縱深防禦而非
   修掉的 bug——補它是因為原本同一個路徑在兩個進入點意義不同，而那正是 F8 的溫床。
 
-### 測試能力（CAP1–CAP13）
+### 測試能力（CAP1–CAP23）
 
 - **CAP1** `test-iso`：補上從未驗證過的 GRUB/ISO 開機路徑。
 - **CAP2** `tests/` 原生單元測試框架 + 突變測試方法論。
@@ -179,15 +180,23 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   model 對齊 `int $0x80` interrupt gate 後證明在現行單核、全域 cli ABI 下不可達；沒有
   修改 production code。sbrk 邊界、mmap free/reuse、fork/exec/slot-reuse metadata 與
   gate-to-iret 排程邊界均已釘住；7/7 meaningful mutants killed。
+- **CAP23** `user/stress.c` ＋ `test-stress`：在真實 ring 3／QEMU 中整合施壓 heap、
+  真正耗盡並回收 sbrk arena、demand paging、完整 4 MiB mmap 區、PIT/IRQ preemption、
+  scheduler/context switch、帶著 heap/mmap/fd/pipe 輪流遭 #PF/#DE/#UD/#GP 的異常退出、
+  syscall pointer validation、RAMFS/DiskFS/FAT16、threads/processes、fd/pipe/process/node
+  exhaustion 與反覆 fork/exec/create/destroy。monitor-driven harness 在同次開機跑兩輪，
+  要求十個具名階段各通過兩次，並逐欄比較 PMM、heap、user spaces、process/task/timer、
+  RAMFS 快照；另有 ASan/UBSan、cppcheck 與 7 個具名 QEMU capacity/leak/exception mutants
+  的 CI gate。
 
 目前 25 套件，`make unit` <1 秒：
 
 ```
-utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37399 /
-diskfs 979 / pipe 68 / sem 32 / timer 63 / task 72 / rtc 35 /
-process-env 47 / syscall-valid 36 / paging-cow 31 / elf 139 / ramfs 4335 /
-kb 1675 / procfs 183 / vga 4769 / ata 8967 / fdtable 474 / process 397 /
-signal 88 / vm-lifecycle 36
+utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37455 /
+diskfs 979 / pipe 89 / sem 38 / timer 63 / task 82 / rtc 35 /
+process-env 47 / syscall-valid 46 / paging-cow 31 / elf 146 / ramfs 4335 /
+kb 1675 / procfs 183 / vga 4769 / ata 8995 / fdtable 489 / process 419 /
+signal 103 / vm-lifecycle 36
 ```
 
 ---
@@ -286,9 +295,19 @@ signal 88 / vm-lifecycle 36
   36 checks、`test_process` 397 checks、7/7 meaningful mutants killed）。初步的
   `munmap` race 是 hosted model 沒有模型化 syscall interrupt gate；在現行 ABI 下不可達，
   故沒有硬加冗餘 lock。
-- **尚未直接覆蓋的核心區域**（依歷史缺陷密度排序）：
-  1. **pipe / semaphore / timer 與行程 teardown 的跨模組交互**：各自都有單元測試，
-     但「行程在持有這些資源時退出」的路徑沒有被直接測過。
+- ~~**CAP23：跨子系統 QEMU 壓力與 teardown**~~：**Session 35 完成**。同一個 ring-3
+  workload 組合記憶體、分頁、timer preemption、threads、processes、syscalls、三個可寫
+  filesystem 與精確資源耗盡；同次開機跑兩輪並要求完整資源快照一致。pipe、semaphore、
+  timer 與 process teardown 的跨模組缺口已由此直接覆蓋。
+- **Session 36 加固**：heap exhaustion 不再以固定 iteration 冒充耗盡；必須實際收到
+  `malloc()==NULL`、驗證所有 live chunk、逆序釋放後再成功配置 128 KiB。mutation matrix
+  另注入 `munmap` 清 PTE 但漏還實體頁，必須由兩輪 PMM snapshot drift 擊殺。
+- **Session 37 加固**：每輪另啟動 24 個故意 page fault 的子行程；每個都帶著 16 頁
+  sbrk heap、32 頁 mmap、一個開啟檔案與一對 pipe fd，必須以 status `-1` 被 parent
+  精確回收。兩個新增 mutants 分別證明 user-fault status 與異常 fd/pipe teardown gate。
+- **Session 38 / F26**：同一 fault workload 輪流執行 #PF、整數除零 #DE、`ud2` #UD、
+  ring-3 `cli` #GP。generic ISR 依 `CS.RPL` 分流：CPL3 只終止肇事 task，CPL0 才輸出
+  `KERNEL EXCEPTION` 並停機；修正原本印字後 iret 回同一指令造成的整機無窮例外。
 - **B 類**：IRQ-driven ATA（見 ASSESS1，阻礙是 diskfs 沒有併發模型）、
   可中斷睡眠 + EINTR（會動 ABI）。兩者都需要人類決策。
 

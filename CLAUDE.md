@@ -1,7 +1,7 @@
 # CLAUDE.md — miniOS 工作指引
 
-32-bit x86 教學型作業系統。核心 C/ASM 約 9,300 行（不含產生檔）、`user/` ring-3
-程式約 3,700 行、`tests/` 原生單元測試約 12,100 行。
+32-bit x86 教學型作業系統。核心 C/ASM 約 9,400 行（不含產生檔）、`user/` ring-3
+程式約 4,300 行、`tests/` 原生單元測試約 12,700 行。
 
 **先讀 `PROJECT_STATE.md`**：那裡有架構、已完成工作、設計決策、測試基準、已知問題
 與下一輪候選。本檔只講「怎麼動手」。
@@ -17,11 +17,16 @@ python3）。Windows 端沒有編譯器。
 |---|---|---|
 | `make all -j4` | 建置核心（**不是** `make`，見下） | ~30s |
 | `make unit` | 25 套原生單元測試 | <1s |
-| `make test` | 完整回歸：`unit` + 4 個 QEMU 目標 | ~8-10 分鐘 |
+| `make test` | 完整回歸：`unit` + 5 個 QEMU 目標 | ~8-10 分鐘 |
 | `make bench` | 效能量測（資訊性，不在 `make test` 內） | ~5s |
 
 - 裸 `make` 只會建第一個目標（一個單元測試執行檔），**不是**核心。用 `make all`。
-- `make test` 的 QEMU 目標：`test-ata-absent`、`test-boot`、`test-iso`、`test-shell`。
+- `make test` 的 QEMU 目標：`test-ata-absent`、`test-boot`、`test-iso`、
+  `test-stress`、`test-shell`。
+- 額外品質 gate：`make sanitize`（hosted ASan + UBSan）、`make static-analysis`
+  （Python bytecode + shell syntax + cppcheck）、`make test-stress-mutants`（兩個具名
+  capacity、PMM leak、兩個 fault status、abnormal fd/pipe teardown、CPL classification，
+  共 7 個 mutants）。
 
 ### ⚠️ 離開碼陷阱（會造成假綠燈）
 

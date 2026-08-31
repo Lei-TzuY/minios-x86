@@ -3,6 +3,7 @@
 #include "vga.h"
 #include "io.h"
 #include "syscall.h"
+#include "task.h"
 
 isr_t interrupt_handlers[256];
 
@@ -65,10 +66,24 @@ void isr_handler(registers_t *regs) {
         return;
     }
 
-    terminal_writestring("Received Exception: ");
-    char num[3] = { '0' + (regs->int_no / 10), '0' + (regs->int_no % 10), '\0' };
-    terminal_writestring(num);
-    terminal_writestring("\n");
+    /* Fault-class exceptions such as #DE/#UD/#GP return to the same
+     * instruction.  Returning from the generic path would therefore trap
+     * forever and let one ring-3 process monopolise the machine.  Kill only
+     * that task; resuming unknown unhandled CPL0 state is unsafe. */
+    if ((regs->cs & 0x3) == 0x3) {
+        terminal_setcolor(4); /* VGA_COLOR_RED */
+        terminal_writestring("\nUSER EXCEPTION ");
+        terminal_write_dec(regs->int_no);
+        terminal_writestring("\nTerminating user program.\n");
+        terminal_setcolor(15);
+        task_exit(-1);
+    }
+
+    terminal_setcolor(4); /* VGA_COLOR_RED */
+    terminal_writestring("\nKERNEL EXCEPTION ");
+    terminal_write_dec(regs->int_no);
+    terminal_writestring("\nSystem Halted.\n");
+    while (1) { __asm__ volatile("hlt"); }
 }
 
 void irq_handler(registers_t *regs) {

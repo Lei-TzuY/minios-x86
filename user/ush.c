@@ -27,7 +27,8 @@ static int streq(const char *a, const char *b) {
 
 static void copy_str(char *dst, const char *src, int max) {
     int i = 0;
-    while (src[i] && i < max - 1) { dst[i] = src[i]; i++; }
+    if (max <= 0) return;
+    while (i < max - 1 && src[i]) { dst[i] = src[i]; i++; }
     dst[i] = '\0';
 }
 

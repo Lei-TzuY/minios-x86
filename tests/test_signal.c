@@ -127,7 +127,6 @@ uint32_t timer_get_ticks(void) { return g_timer_ticks; }
 
 #include "../syscall.c"
 
-/* test.h after syscall.c: syscall.h's SEEK_* enum must precede <stdio.h>. */
 #include "test.h"
 
 /* --- a real user stack ----------------------------------------------------- */

@@ -59,10 +59,13 @@ enum syscall_number {
     SYS_MUNMAP        = 51, /* release pages previously obtained from SYS_MMAP */
 };
 
+/* Keep kernel names distinct from the SEEK_* macros provided by hosted C
+ * libraries and modelled by tools such as cppcheck.  The ABI values remain
+ * the conventional 0/1/2 exposed to userspace. */
 enum seek_whence {
-    SEEK_SET = 0,
-    SEEK_CUR = 1,
-    SEEK_END = 2,
+    SYS_SEEK_SET = 0,
+    SYS_SEEK_CUR = 1,
+    SYS_SEEK_END = 2,
 };
 
 struct process;
