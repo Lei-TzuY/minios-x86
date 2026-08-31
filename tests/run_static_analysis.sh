@@ -6,8 +6,9 @@ cd "$repo_dir"
 
 python3 -m py_compile \
     gen_embed.py gen_fat16.py gen_ata_image.py tests/run_qemu_stress.py \
-    tests/apply_mutation.py tools/project_inventory.py
+    tests/apply_mutation.py tools/project_inventory.py tests/test_project_inventory.py
 
+python3 tests/test_project_inventory.py
 python3 tools/project_inventory.py --check docs/PROJECT_INVENTORY.md
 
 bash -n \
