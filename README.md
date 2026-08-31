@@ -27,6 +27,8 @@ Recent project checkpoints include:
 - mutation testing used to validate whether tests actually detect injected faults
 - regression tests for issues involving ELF loading, integer overflow, user-pointer validation, process lifecycle, descriptor ownership, filesystems, ATA behavior and signal handling
 
+The exact current syscall, user-program, native-suite and QEMU-target lists are machine-derived in [docs/PROJECT_INVENTORY.md](docs/PROJECT_INVENTORY.md). `make static-analysis` rejects both generated-inventory drift and stale headline counts in the main project docs.
+
 Build and run the complete validation path with:
 
 ```sh
@@ -153,7 +155,7 @@ make unit         # native unit tests only
 make test         # native + QEMU / ISO validation
 make test-stress  # focused ring-3 stress run, twice in one QEMU boot
 make sanitize     # hosted suites under AddressSanitizer + UBSan
-make static-analysis       # Python + shell syntax checks, then cppcheck
+make static-analysis       # Python + inventory + shell syntax checks, then cppcheck
 make test-stress-mutants   # prove all seven capacity/leak/exception gates fire
 make iso          # produce miniOS.iso
 make run-iso      # boot the ISO through GRUB in QEMU
@@ -179,6 +181,7 @@ ush
 kernel / drivers / MM / VFS   top-level C and assembly sources
 user/                         ring-3 programs and syscall wrappers
 tests/                        native unit tests
+docs/PROJECT_INVENTORY.md     generated syscall/program/test inventory
 gen_*.py                      image / ELF generation helpers
 Makefile                      build, run, ISO and test targets
 ```
