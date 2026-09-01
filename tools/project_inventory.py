@@ -24,6 +24,7 @@ class Inventory:
     syscalls: tuple[tuple[int, str], ...]
     user_programs: tuple[str, ...]
     native_suites: tuple[str, ...]
+    standalone_native_suites: tuple[str, ...]
     qemu_targets: tuple[str, ...]
     stress_mutations: int
 
@@ -33,6 +34,7 @@ class Inventory:
                 "syscalls": len(self.syscalls),
                 "user_programs": len(self.user_programs),
                 "native_suites": len(self.native_suites),
+                "standalone_native_suites": len(self.standalone_native_suites),
                 "qemu_targets": len(self.qemu_targets),
                 "stress_mutations": self.stress_mutations,
             },
@@ -41,6 +43,7 @@ class Inventory:
             ],
             "user_programs": list(self.user_programs),
             "native_suites": list(self.native_suites),
+            "standalone_native_suites": list(self.standalone_native_suites),
             "qemu_targets": list(self.qemu_targets),
         }
 
@@ -115,6 +118,39 @@ def parse_syscalls(text: str) -> tuple[tuple[int, str], ...]:
             f"found {numbers}, expected {expected}"
         )
     return tuple(entries)
+
+
+def parse_executed_shell_scripts(text: str) -> tuple[str, ...]:
+    """Return repo-local shell scripts directly executed by a gate script."""
+    return tuple(
+        re.findall(r"^\s*bash\s+(tests/[A-Za-z0-9_.-]+\.sh)\s*$", text, re.M)
+    )
+
+
+def parse_native_test_targets(text: str) -> tuple[str, ...]:
+    """Return the native C test explicitly declared by a standalone runner.
+
+    A bare mention of ``tests/test_*.c`` in a comment or diagnostic is not
+    evidence that the runner compiles it. Standalone runners therefore expose a
+    small machine-readable contract and use that variable in their compile
+    command::
+
+        NATIVE_TEST_SOURCE=tests/test_example.c
+        "$cc" ... "$repo_dir/$NATIVE_TEST_SOURCE" ...
+    """
+    matches = re.findall(
+        r"^\s*NATIVE_TEST_SOURCE\s*=\s*(tests/test_[A-Za-z0-9_]+\.c)\s*$",
+        text,
+        re.M,
+    )
+    if not matches:
+        return ()
+    if len(matches) != 1:
+        raise InventoryError("standalone runner must declare NATIVE_TEST_SOURCE exactly once")
+    if "$NATIVE_TEST_SOURCE" not in text and "${NATIVE_TEST_SOURCE}" not in text:
+        raise InventoryError("standalone runner declares but does not use NATIVE_TEST_SOURCE")
+    source = matches[0]
+    return (source[:-2],)
 
 
 def program_name_from_embed(token: str) -> str | None:
@@ -213,6 +249,26 @@ def collect() -> Inventory:
             + ", ".join(missing_native_sources)
         )
 
+    static_gate = read("tests/run_static_analysis.sh")
+    standalone_native: list[str] = []
+    for runner in parse_executed_shell_scripts(static_gate):
+        runner_path = ROOT / runner
+        if not runner_path.is_file():
+            raise InventoryError(f"static-analysis executes missing script {runner}")
+        for target in parse_native_test_targets(runner_path.read_text(encoding="utf-8")):
+            if target not in standalone_native:
+                standalone_native.append(target)
+    standalone_native_suites = tuple(standalone_native)
+
+    source_native_suites = tuple(
+        f"tests/{path.stem}" for path in sorted((ROOT / "tests").glob("test_*.c"))
+    )
+    require_same(
+        "native C test sources disagree with registered unit/standalone gates",
+        source_native_suites,
+        tuple(native_suites) + standalone_native_suites,
+    )
+
     test_deps = parse_target_dependencies(root_make, "test")
     qemu_targets = tuple(dep for dep in test_deps if dep.startswith("test-"))
     if not qemu_targets:
@@ -234,6 +290,7 @@ def collect() -> Inventory:
         syscalls=syscalls,
         user_programs=user_programs,
         native_suites=native_suites,
+        standalone_native_suites=standalone_native_suites,
         qemu_targets=qemu_targets,
         stress_mutations=stress_mutations,
     )
@@ -286,6 +343,7 @@ def render_markdown(inv: Inventory) -> str:
         f"| System calls | {len(inv.syscalls)} |",
         f"| User programs | {len(inv.user_programs)} |",
         f"| Native unit suites | {len(inv.native_suites)} |",
+        f"| Standalone native gates | {len(inv.standalone_native_suites)} |",
         f"| QEMU regression targets in `make test` | {len(inv.qemu_targets)} |",
         f"| QEMU stress mutants | {inv.stress_mutations} |",
         "",
@@ -297,6 +355,11 @@ def render_markdown(inv: Inventory) -> str:
     lines.extend(f"- `{name}`" for name in inv.user_programs)
     lines += ["", "## Native unit suites", ""]
     lines.extend(f"- `{target}`" for target in inv.native_suites)
+    lines += ["", "## Standalone native gates", ""]
+    if inv.standalone_native_suites:
+        lines.extend(f"- `{target}`" for target in inv.standalone_native_suites)
+    else:
+        lines.append("- none")
     lines += ["", "## QEMU regression targets", ""]
     lines.extend(f"- `{target}`" for target in inv.qemu_targets)
     lines += [
@@ -308,6 +371,8 @@ def render_markdown(inv: Inventory) -> str:
         "- every user program has a matching root-Makefile `*_embed.o` object",
         "- every user program is registered to its matching embedded ELF in `kernel.c`",
         "- every `UNIT_BINS` target has a matching test source",
+        "- every `tests/test_*.c` source is registered in `UNIT_BINS` or an executed standalone native gate",
+        "- every standalone native gate runner executed by static-analysis exists",
         "- every QEMU dependency of the top-level `test` target is defined",
         "- README / PROJECT_STATE / CLAUDE headline counts match source-derived totals",
         "- the stress mutation harness contains at least one `run_mutant` case",
