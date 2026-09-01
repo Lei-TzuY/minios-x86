@@ -1,9 +1,27 @@
 #include <stdint.h>
+#include "../fs.h"
+#include "../pipe.h"
 
-/* Reuse the real descriptor-table harness and all of its counting stubs in the
- * same translation unit, but replace its normal main with this focused entry
- * point.  This keeps the regression coupled to the real syscall.c while
- * avoiding a second copy of the large hosted stub surface. */
+uint32_t read_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    (void)node; (void)offset; (void)size; (void)buffer;
+    return 0;
+}
+
+uint32_t write_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    (void)node; (void)offset; (void)size; (void)buffer;
+    return 0;
+}
+
+uint32_t pipe_read(pipe_t *pipe, uint8_t *buffer, uint32_t len) {
+    (void)pipe; (void)buffer; (void)len;
+    return 0;
+}
+
+uint32_t pipe_write(pipe_t *pipe, const uint8_t *buffer, uint32_t len) {
+    (void)pipe; (void)buffer; (void)len;
+    return 0;
+}
+
 #define main fdtable_full_suite_main
 #include "test_fdtable.c"
 #undef main
@@ -23,9 +41,6 @@ int main(void) {
     for (size_t i = 0; i < sizeof(invalid_fds) / sizeof(invalid_fds[0]); i++) {
         int32_t fd = invalid_fds[i];
 
-        /* Invalid descriptors must be rejected before any user-pointer access.
-         * On the old implementation INT32_MIN reached `fd - FIRST_USER_FD`
-         * first, which is signed overflow and is trapped by this UBSan build. */
         CHECK_EQ(sys_read_file(fd, NULL, 0), -1);
         CHECK_EQ(sys_write_file(fd, NULL, 0), -1);
         CHECK_EQ(sys_seek(fd, 0, SYS_SEEK_SET), -1);
@@ -35,7 +50,6 @@ int main(void) {
         CHECK_EQ(sys_close(fd), -1);
     }
 
-    /* Rejections must not touch the live descriptor or its ownership. */
     CHECK_EQ(open_files[0][0].kind, OF_FILE);
     CHECK(open_files[0][0].node == &g_nodes[0]);
     CHECK_EQ(g_node_refs[0], 1);
