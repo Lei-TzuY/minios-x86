@@ -128,13 +128,29 @@ def parse_executed_shell_scripts(text: str) -> tuple[str, ...]:
 
 
 def parse_native_test_targets(text: str) -> tuple[str, ...]:
-    """Return ``tests/test_*`` C targets referenced by a shell runner."""
-    seen: list[str] = []
-    for stem in re.findall(r"tests/(test_[A-Za-z0-9_]+)\.c\b", text):
-        target = f"tests/{stem}"
-        if target not in seen:
-            seen.append(target)
-    return tuple(seen)
+    """Return the native C test explicitly declared by a standalone runner.
+
+    A bare mention of ``tests/test_*.c`` in a comment or diagnostic is not
+    evidence that the runner compiles it. Standalone runners therefore expose a
+    small machine-readable contract and use that variable in their compile
+    command::
+
+        NATIVE_TEST_SOURCE=tests/test_example.c
+        "$cc" ... "$repo_dir/$NATIVE_TEST_SOURCE" ...
+    """
+    matches = re.findall(
+        r"^\s*NATIVE_TEST_SOURCE\s*=\s*(tests/test_[A-Za-z0-9_]+\.c)\s*$",
+        text,
+        re.M,
+    )
+    if not matches:
+        return ()
+    if len(matches) != 1:
+        raise InventoryError("standalone runner must declare NATIVE_TEST_SOURCE exactly once")
+    if "$NATIVE_TEST_SOURCE" not in text and "${NATIVE_TEST_SOURCE}" not in text:
+        raise InventoryError("standalone runner declares but does not use NATIVE_TEST_SOURCE")
+    source = matches[0]
+    return (source[:-2],)
 
 
 def program_name_from_embed(token: str) -> str | None:
