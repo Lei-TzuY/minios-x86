@@ -23,6 +23,7 @@ class ProjectInventoryTests(unittest.TestCase):
         )
         self.assertIn("stress", current.user_programs)
         self.assertIn("tests/test_process", current.native_suites)
+        self.assertIn("tests/test_fd_dup", current.standalone_native_suites)
         self.assertIn("test-stress", current.qemu_targets)
         self.assertGreater(current.stress_mutations, 0)
 
@@ -36,6 +37,31 @@ class ProjectInventoryTests(unittest.TestCase):
         self.assertEqual(
             inventory.parse_make_variable(text, "PROGRAMS"),
             ("one.elf", "two.elf", "three.elf", "four.elf"),
+        )
+
+    def test_executed_shell_parser_ignores_bash_n(self) -> None:
+        text = """
+        bash -n tests/run_fd_dup_test.sh
+        bash tests/test_user_incremental_build.sh
+        bash tests/run_fd_dup_test.sh
+        """
+        self.assertEqual(
+            inventory.parse_executed_shell_scripts(text),
+            (
+                "tests/test_user_incremental_build.sh",
+                "tests/run_fd_dup_test.sh",
+            ),
+        )
+
+    def test_native_test_target_parser_deduplicates_sources(self) -> None:
+        runner = r'''
+        "$cc" tests/test_fd_dup.c -o "$tmp_dir/test_fd_dup"
+        # The same source in a diagnostic string must not create a second gate.
+        echo tests/test_fd_dup.c
+        '''
+        self.assertEqual(
+            inventory.parse_native_test_targets(runner),
+            ("tests/test_fd_dup",),
         )
 
     def test_syscall_parser_rejects_a_gap(self) -> None:
@@ -78,6 +104,15 @@ class ProjectInventoryTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("missing one", message)
         self.assertIn("extra three", message)
+
+    def test_orphan_native_test_source_is_reported(self) -> None:
+        with self.assertRaises(inventory.InventoryError) as caught:
+            inventory.require_same(
+                "native C test sources disagree with registered unit/standalone gates",
+                {"tests/test_one", "tests/test_orphan"},
+                {"tests/test_one"},
+            )
+        self.assertIn("missing tests/test_orphan", str(caught.exception))
 
     def test_require_substrings_rejects_stale_documentation(self) -> None:
         with self.assertRaisesRegex(inventory.InventoryError, "stale/missing"):
