@@ -21,3 +21,5 @@ switch_task:
     pop %ebp
 
     ret
+
+.section .note.GNU-stack,"",@progbits

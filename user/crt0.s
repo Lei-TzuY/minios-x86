@@ -19,3 +19,5 @@ _start:
 __sig_trampoline:
     mov  $24, %eax  /* SYS_SIGRETURN */
     int  $0x80
+
+.section .note.GNU-stack,"",@progbits

@@ -20,3 +20,5 @@ enable_paging:
 
     pop %ebp
     ret
+
+.section .note.GNU-stack,"",@progbits

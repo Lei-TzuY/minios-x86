@@ -133,3 +133,5 @@ irq_common_stub:
     add $8, %esp
     sti
     iret
+
+.section .note.GNU-stack,"",@progbits
