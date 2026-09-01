@@ -53,16 +53,41 @@ class ProjectInventoryTests(unittest.TestCase):
             ),
         )
 
-    def test_native_test_target_parser_deduplicates_sources(self) -> None:
+    def test_native_test_target_parser_requires_declared_source_contract(self) -> None:
         runner = r'''
-        "$cc" tests/test_fd_dup.c -o "$tmp_dir/test_fd_dup"
-        # The same source in a diagnostic string must not create a second gate.
+        NATIVE_TEST_SOURCE=tests/test_fd_dup.c
+        "$cc" "$repo_dir/$NATIVE_TEST_SOURCE" -o "$tmp_dir/test_fd_dup"
+        # Repeated mentions do not create duplicate gates.
         echo tests/test_fd_dup.c
         '''
         self.assertEqual(
             inventory.parse_native_test_targets(runner),
             ("tests/test_fd_dup",),
         )
+
+    def test_native_test_target_parser_ignores_bare_source_mentions(self) -> None:
+        runner = r'''
+        # This runner used to compile tests/test_fd_dup.c.
+        echo tests/test_fd_dup.c
+        '''
+        self.assertEqual(inventory.parse_native_test_targets(runner), ())
+
+    def test_native_test_target_parser_rejects_unused_contract(self) -> None:
+        runner = r'''
+        NATIVE_TEST_SOURCE=tests/test_fd_dup.c
+        "$cc" tests/test_other.c -o "$tmp_dir/test_other"
+        '''
+        with self.assertRaisesRegex(inventory.InventoryError, "declares but does not use"):
+            inventory.parse_native_test_targets(runner)
+
+    def test_native_test_target_parser_rejects_duplicate_contract(self) -> None:
+        runner = r'''
+        NATIVE_TEST_SOURCE=tests/test_one.c
+        NATIVE_TEST_SOURCE=tests/test_two.c
+        "$cc" "$repo_dir/$NATIVE_TEST_SOURCE" -o "$tmp_dir/test"
+        '''
+        with self.assertRaisesRegex(inventory.InventoryError, "exactly once"):
+            inventory.parse_native_test_targets(runner)
 
     def test_syscall_parser_rejects_a_gap(self) -> None:
         text = """
