@@ -18,3 +18,5 @@ tss_flush:
     mov $0x2B, %ax
     ltr %ax
     ret
+
+.section .note.GNU-stack,"",@progbits

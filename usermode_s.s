@@ -54,3 +54,5 @@ enter_user_mode_iret:
     mov 36(%ebp), %ebp  /* ebp last: overwrites the frame pointer */
 
     iret
+
+.section .note.GNU-stack,"",@progbits
