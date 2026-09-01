@@ -11,8 +11,11 @@ on:
 permissions:
   contents: read
 
+# Push and pull_request events for the same branch tree share one expensive
+# kernel/QEMU lane. The head repository keeps same-named branches from distinct
+# forks isolated from each other.
 concurrency:
-  group: kernel-regression-${{ github.ref }}
+  group: kernel-regression-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
