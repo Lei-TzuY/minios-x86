@@ -7,12 +7,15 @@ cd "$repo_dir"
 python3 -m py_compile \
     gen_embed.py gen_fat16.py gen_ata_image.py tests/run_qemu_stress.py \
     tests/apply_mutation.py tools/project_inventory.py tests/test_project_inventory.py \
-    tools/check_syscall_abi.py tests/test_syscall_abi.py
+    tools/check_syscall_abi.py tests/test_syscall_abi.py \
+    tools/check_test_gate_registration.py tests/test_test_gate_registration.py
 
 python3 tests/test_project_inventory.py
 python3 tools/project_inventory.py --check docs/PROJECT_INVENTORY.md
 python3 tests/test_syscall_abi.py
 python3 tools/check_syscall_abi.py
+python3 tests/test_test_gate_registration.py
+python3 tools/check_test_gate_registration.py
 
 bash -n \
     tests/run_host_sanitizers.sh tests/run_qemu_stress_mutants.sh \
@@ -44,4 +47,4 @@ cppcheck \
     timer.c task.c rtc.c procfs.c vga.c ata.c isr.c process.c syscall.c elf_loader.c \
     user/fault.c user/stress.c user/ush.c
 
-echo "Python, inventory, syscall ABI, incremental user build, fd dup, shell, and cppcheck static analysis passed"
+echo "Python, test registration, inventory, syscall ABI, incremental user build, fd dup, shell, and cppcheck static analysis passed"
