@@ -1,8 +1,8 @@
 #include "user_syscall.h"
 
-/* User-space pipe + dup2 demo (the mechanism a ring-3 shell uses for "cmd1 |
- * cmd2"): the child redirects its stdout onto a pipe with dup2 and writes via
- * the normal stdout path; the parent reads the pipe and echoes it. */
+/* User-space pipe + descriptor-duplication demo.  Before exercising dup2 for
+ * stdout redirection, prove the ordinary dup syscall works through the real
+ * ring-3 int $0x80 path and owns its duplicated file reference correctly. */
 
 static void write_str(const char *s) {
     int len = 0;
@@ -10,8 +10,34 @@ static void write_str(const char *s) {
     sys_write(s, len);
 }
 
+static int test_dup(void) {
+    static const char *path = "dupref.tmp";
+    int fd = sys_create(path);
+    int copy;
+
+    if (fd != 3) return -1;
+    if (sys_write_file(fd, "x", 1) != 1) return -1;
+
+    copy = sys_dup(fd);
+    if (copy != 4) return -1;
+    if (sys_seek(copy, 0, SEEK_CUR) != 1) return -1;
+
+    /* Closing the source must not release the duplicate's VFS reference. */
+    if (sys_close(fd) != 0) return -1;
+    if (sys_unlink(path) != -1) return -1;
+
+    if (sys_close(copy) != 0) return -1;
+    if (sys_unlink(path) != 0) return -1;
+    return 0;
+}
+
 int main(void) {
     int fds[2];
+
+    if (test_dup() != 0) {
+        write_str("[dup failed]\n");
+        return 1;
+    }
 
     if (sys_pipe(fds) != 0) {
         write_str("[pipe failed]\n");
