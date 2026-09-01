@@ -20,6 +20,7 @@ class SyscallAbiTests(unittest.TestCase):
             report.wrappers,
             report.kernel_syscalls - len(abi.NON_WRAPPER_SYSCALLS),
         )
+        self.assertEqual(report.dispatch_cases, report.kernel_syscalls)
         self.assertGreater(report.named_direct_sites, 0)
 
     def test_wrapper_parser_maps_function_name_to_immediate(self) -> None:
@@ -58,6 +59,44 @@ class SyscallAbiTests(unittest.TestCase):
                 {"SYS_EXIT": 3},
                 (("SYS_EXIT", 4, "user/crt0.s", 12),),
             )
+
+    def test_validate_rejects_missing_kernel_dispatch_case(self) -> None:
+        kernel = ((1, "SYS_WRITE"), (4, "SYS_EXEC"), (24, "SYS_SIGRETURN"))
+        with self.assertRaisesRegex(abi.AbiError, "missing dispatch cases: SYS_EXEC"):
+            abi.validate(
+                kernel,
+                {"SYS_WRITE": 1},
+                (),
+                ("SYS_WRITE", "SYS_SIGRETURN"),
+            )
+
+    def test_dispatch_parser_scopes_to_syscall_handler(self) -> None:
+        source = r'''
+        static int unrelated(int whence) {
+            switch (whence) {
+                case SYS_SEEK_SET: return 0;
+                default: return -1;
+            }
+        }
+
+        static void syscall_handler(registers_t *regs) {
+            switch (regs->eax) {
+                case SYS_WRITE:
+                    break;
+                case SYS_READ:
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        void syscall_install(void) {
+        }
+        '''
+        self.assertEqual(
+            abi.parse_dispatch_cases(source),
+            ("SYS_WRITE", "SYS_READ"),
+        )
 
     def test_named_direct_site_parser_uses_sys_comment(self) -> None:
         import tempfile
@@ -99,7 +138,10 @@ class SyscallAbiTests(unittest.TestCase):
                 encoding="utf-8",
             )
             sites = abi.parse_named_direct_sites((path,))
-            self.assertEqual([(name, number) for name, number, _path, _line in sites], [("SYS_SIGRETURN", 24)])
+            self.assertEqual(
+                [(name, number) for name, number, _path, _line in sites],
+                [("SYS_SIGRETURN", 24)],
+            )
 
 
 if __name__ == "__main__":
