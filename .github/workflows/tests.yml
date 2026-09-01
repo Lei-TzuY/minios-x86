@@ -7,6 +7,14 @@ on:
 permissions:
   contents: read
 
+# A same-repository push and its pull_request event describe the same branch
+# tree. Share one concurrency identity so we run the expensive QEMU suite once.
+# Include the head repository so two forks using the same branch name cannot
+# cancel each other's checks.
+concurrency:
+  group: tests-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
