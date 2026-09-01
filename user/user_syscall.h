@@ -353,6 +353,20 @@ static inline int sys_dup2(int oldfd, int newfd) {
     return ret;
 }
 
+/* Duplicate oldfd into the lowest-numbered available descriptor (SYS_DUP = 52).
+ * The new descriptor has an independent ownership reference and returns -1 if
+ * oldfd is invalid or the per-process descriptor table is full. */
+static inline int sys_dup(int oldfd) {
+    int ret;
+    __asm__ volatile(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(52), "b"(oldfd)
+        : "memory"
+    );
+    return ret;
+}
+
 /* Block until a signal arrives (SYS_PAUSE = 34). Always returns -1. */
 static inline int sys_pause(void) {
     int ret;
