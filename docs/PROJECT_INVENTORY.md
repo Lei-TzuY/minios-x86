@@ -8,7 +8,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 | System calls | 52 |
 | User programs | 53 |
 | Native unit suites | 25 |
-| Standalone native gates | 2 |
+| Standalone native gates | 3 |
 | QEMU regression targets in `make test` | 5 |
 | QEMU stress mutants | 7 |
 
@@ -155,6 +155,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 
 - `tests/test_fd_dup`
 - `tests/test_fd_index_ubsan`
+- `tests/test_wait_concurrency`
 
 ## QEMU regression targets
 
