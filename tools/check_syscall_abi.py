@@ -34,6 +34,70 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def find_braced_body(text: str, brace: int, label: str) -> tuple[str, int]:
+    """Return a C braced body and the position just after its closing brace.
+
+    The scanner ignores braces inside strings, character literals, and comments.
+    It is intentionally small rather than a C parser, but robust enough for the
+    static inline wrappers and syscall dispatcher audited by this tool.
+    """
+    if brace < 0 or brace >= len(text) or text[brace] != "{":
+        raise AbiError(f"could not find body for {label}")
+
+    depth = 1
+    end = brace + 1
+    quote: str | None = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    while end < len(text) and depth:
+        ch = text[end]
+        nxt = text[end + 1] if end + 1 < len(text) else ""
+
+        if line_comment:
+            if ch == "\n":
+                line_comment = False
+            end += 1
+            continue
+        if block_comment:
+            if ch == "*" and nxt == "/":
+                block_comment = False
+                end += 2
+            else:
+                end += 1
+            continue
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            end += 1
+            continue
+        if ch == "/" and nxt == "/":
+            line_comment = True
+            end += 2
+            continue
+        if ch == "/" and nxt == "*":
+            block_comment = True
+            end += 2
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            end += 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        end += 1
+
+    if depth:
+        raise AbiError(f"unterminated body for {label}")
+    return text[brace + 1 : end - 1], end
+
+
 def extract_inline_wrappers(text: str) -> tuple[tuple[str, str], ...]:
     """Return ``(function_name, body)`` for static inline ``sys_*`` wrappers."""
     wrappers: list[tuple[str, str]] = []
@@ -51,59 +115,9 @@ def extract_inline_wrappers(text: str) -> tuple[tuple[str, str], ...]:
             pos = brace + 1
             continue
 
-        depth = 1
-        end = brace + 1
-        quote: str | None = None
-        escaped = False
-        line_comment = False
-        block_comment = False
-        while end < len(text) and depth:
-            ch = text[end]
-            nxt = text[end + 1] if end + 1 < len(text) else ""
-
-            if line_comment:
-                if ch == "\n":
-                    line_comment = False
-                end += 1
-                continue
-            if block_comment:
-                if ch == "*" and nxt == "/":
-                    block_comment = False
-                    end += 2
-                else:
-                    end += 1
-                continue
-            if quote is not None:
-                if escaped:
-                    escaped = False
-                elif ch == "\\":
-                    escaped = True
-                elif ch == quote:
-                    quote = None
-                end += 1
-                continue
-            if ch == "/" and nxt == "/":
-                line_comment = True
-                end += 2
-                continue
-            if ch == "/" and nxt == "*":
-                block_comment = True
-                end += 2
-                continue
-            if ch in ('"', "'"):
-                quote = ch
-                end += 1
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-            end += 1
-
-        if depth:
-            raise AbiError(f"unterminated body for {name_match.group(1)}")
-        wrappers.append((name_match.group(1), text[brace + 1 : end - 1]))
-        pos = end
+        function = name_match.group(1)
+        body, pos = find_braced_body(text, brace, function)
+        wrappers.append((function, body))
     return tuple(wrappers)
 
 
@@ -143,21 +157,18 @@ def parse_named_direct_sites(paths: Iterable[Path]) -> tuple[tuple[str, int, str
 
 
 def parse_dispatch_cases(text: str) -> tuple[str, ...]:
-    """Return the SYS_* cases from the kernel's syscall_handler switch only.
+    """Return the SYS_* cases from the kernel's syscall_handler function only.
 
     syscall.c has other switches whose labels include names such as
-    SYS_SEEK_SET; scoping the scan to syscall_handler prevents those ordinary
-    enum cases from being mistaken for syscall dispatch entries.
+    SYS_SEEK_SET. Extracting the function's matched braced body prevents those
+    ordinary enum cases (or later functions) from becoming fake syscall cases.
     """
     start = text.find("static void syscall_handler")
     if start < 0:
         raise AbiError("could not find syscall_handler")
-    end = text.find("\nvoid syscall_install", start)
-    if end < 0:
-        raise AbiError("could not find end of syscall_handler")
-    return tuple(
-        re.findall(r"^\s*case\s+(SYS_[A-Z0-9_]+)\s*:", text[start:end], re.M)
-    )
+    brace = text.find("{", start)
+    body, _end = find_braced_body(text, brace, "syscall_handler")
+    return tuple(re.findall(r"^\s*case\s+(SYS_[A-Z0-9_]+)\s*:", body, re.M))
 
 
 def validate(
