@@ -26,10 +26,11 @@ python3 tools/check_gnu_stack_notes.py
 bash -n \
     tests/run_host_sanitizers.sh tests/run_qemu_stress_mutants.sh \
     tests/run_static_analysis.sh tests/test_user_incremental_build.sh \
-    tests/run_fd_dup_test.sh
+    tests/run_fd_dup_test.sh tests/run_fd_extreme_ubsan.sh
 
 bash tests/test_user_incremental_build.sh
 bash tests/run_fd_dup_test.sh
+bash tests/run_fd_extreme_ubsan.sh
 
 if ! command -v cppcheck >/dev/null 2>&1; then
     echo "cppcheck is required for static-analysis" >&2
@@ -53,4 +54,4 @@ cppcheck \
     timer.c task.c rtc.c procfs.c vga.c ata.c isr.c process.c syscall.c elf_loader.c \
     user/fault.c user/stress.c user/ush.c
 
-echo "Python, test registration/ownership, inventory, syscall ABI, GNU-stack metadata, incremental user build, fd dup, shell, and cppcheck static analysis passed"
+echo "Python, test registration/ownership, inventory, syscall ABI, GNU-stack metadata, incremental user build, fd dup/extreme-fd UBSan, shell, and cppcheck static analysis passed"

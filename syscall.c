@@ -39,6 +39,14 @@ static open_file_t *current_open_files(void) {
     return open_files[process->slot];
 }
 
+/* Validate a user-controlled descriptor before converting it to a table slot.
+ * In particular, never subtract FIRST_USER_FD from INT32_MIN: signed overflow
+ * is undefined behaviour even if the resulting index would later be rejected. */
+static int user_fd_index(int32_t fd) {
+    if (fd < FIRST_USER_FD || fd >= FIRST_USER_FD + MAX_OPEN_FILES) return -1;
+    return (int)(fd - FIRST_USER_FD);
+}
+
 /* Reserve a free descriptor slot; returns its fd number or -1. */
 static int32_t alloc_fd(open_file_t *files, of_kind_t kind,
                         fs_node_t *node, pipe_t *pipe) {
@@ -203,11 +211,11 @@ int32_t sys_create(const char *name) {
 }
 
 int32_t sys_read_file(int32_t fd, char *buffer, size_t count) {
-    int index = fd - FIRST_USER_FD;
+    int index = user_fd_index(fd);
     open_file_t *files = current_open_files();
     uint32_t bytes_read;
 
-    if (index < 0 || index >= MAX_OPEN_FILES || !files) return -1;
+    if (index < 0 || !files) return -1;
     if (!user_buffer_valid(buffer, count)) return -1;
 
     if (files[index].kind == OF_PIPE_R)
@@ -223,11 +231,11 @@ int32_t sys_read_file(int32_t fd, char *buffer, size_t count) {
 }
 
 int32_t sys_write_file(int32_t fd, const char *buffer, size_t count) {
-    int index = fd - FIRST_USER_FD;
+    int index = user_fd_index(fd);
     open_file_t *files = current_open_files();
     uint32_t bytes_written;
 
-    if (index < 0 || index >= MAX_OPEN_FILES || !files) return -1;
+    if (index < 0 || !files) return -1;
     if (!user_buffer_valid(buffer, count)) return -1;
 
     if (files[index].kind == OF_PIPE_W)
@@ -318,12 +326,12 @@ int32_t sys_readdir(const char *path, uint32_t index, char *buffer) {
 }
 
 int32_t sys_seek(int32_t fd, int32_t offset, int32_t whence) {
-    int index = fd - FIRST_USER_FD;
+    int index = user_fd_index(fd);
     open_file_t *files = current_open_files();
     int64_t base;
     int64_t position;
 
-    if (index < 0 || index >= MAX_OPEN_FILES) return -1;
+    if (index < 0) return -1;
     if (!files || files[index].kind != OF_FILE) return -1;
 
     switch (whence) {
@@ -368,10 +376,10 @@ int32_t sys_stat(const char *path, void *statbuf) {
 }
 
 int32_t sys_fstat(int32_t fd, void *statbuf) {
-    int index = fd - FIRST_USER_FD;
+    int index = user_fd_index(fd);
     open_file_t *files = current_open_files();
 
-    if (index < 0 || index >= MAX_OPEN_FILES) return -1;
+    if (index < 0) return -1;
     if (!files || files[index].kind != OF_FILE) return -1;
     if (!user_buffer_valid(statbuf, 12)) return -1;
 
@@ -413,12 +421,10 @@ static int32_t sys_pipe(int32_t *user_fds) {
  * current file offset. Pipe read/write ends retain the matching end only. */
 static int32_t sys_dup(int32_t oldfd) {
     open_file_t *files = current_open_files();
-    int oidx;
+    int oidx = user_fd_index(oldfd);
     open_file_t src;
 
-    if (!files || oldfd < FIRST_USER_FD ||
-        oldfd >= FIRST_USER_FD + MAX_OPEN_FILES) return -1;
-    oidx = oldfd - FIRST_USER_FD;
+    if (!files || oidx < 0) return -1;
     if (files[oidx].kind == OF_NONE) return -1;
     src = files[oidx];
 
@@ -441,11 +447,10 @@ static int32_t sys_dup(int32_t oldfd) {
 static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
     process_t *process = process_get_current();
     open_file_t *files = current_open_files();
-    int oidx = oldfd - FIRST_USER_FD;
+    int oidx = user_fd_index(oldfd);
     open_file_t src;
 
-    if (!process || !files) return -1;
-    if (oldfd < FIRST_USER_FD || oidx >= MAX_OPEN_FILES) return -1;
+    if (!process || !files || oidx < 0) return -1;
     if (files[oidx].kind == OF_NONE) return -1;
     src = files[oidx];
 
@@ -493,8 +498,8 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
         return newfd;
     }
     if (newfd >= FIRST_USER_FD) {           /* copy into another table slot */
-        int nidx = newfd - FIRST_USER_FD;
-        if (nidx >= MAX_OPEN_FILES) return -1;
+        int nidx = user_fd_index(newfd);
+        if (nidx < 0) return -1;
         if (newfd == oldfd) return newfd;
         close_fd_entry(&files[nidx]);
         files[nidx] = src;
@@ -510,10 +515,10 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
 }
 
 int32_t sys_close(int32_t fd) {
-    int index = fd - FIRST_USER_FD;
+    int index = user_fd_index(fd);
     open_file_t *files = current_open_files();
 
-    if (index < 0 || index >= MAX_OPEN_FILES) return -1;
+    if (index < 0) return -1;
     if (!files || files[index].kind == OF_NONE) return -1;
 
     close_fd_entry(&files[index]);
