@@ -5,7 +5,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 
 | Metric | Count |
 |---|---:|
-| System calls | 51 |
+| System calls | 52 |
 | User programs | 53 |
 | Native unit suites | 25 |
 | QEMU regression targets in `make test` | 5 |
@@ -64,6 +64,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 - `49` `SYS_THREAD_CREATE`
 - `50` `SYS_THREAD_JOIN`
 - `51` `SYS_MUNMAP`
+- `52` `SYS_DUP`
 
 ## User programs
 

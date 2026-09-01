@@ -408,6 +408,34 @@ static int32_t sys_pipe(int32_t *user_fds) {
     return 0;
 }
 
+/* Duplicate oldfd into the lowest-numbered free descriptor slot. The duplicate
+ * gets its own ownership reference and starts with the source descriptor's
+ * current file offset. Pipe read/write ends retain the matching end only. */
+static int32_t sys_dup(int32_t oldfd) {
+    open_file_t *files = current_open_files();
+    int oidx;
+    open_file_t src;
+
+    if (!files || oldfd < FIRST_USER_FD ||
+        oldfd >= FIRST_USER_FD + MAX_OPEN_FILES) return -1;
+    oidx = oldfd - FIRST_USER_FD;
+    if (files[oidx].kind == OF_NONE) return -1;
+    src = files[oidx];
+
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        if (files[i].kind != OF_NONE) continue;
+        files[i] = src;
+        switch (src.kind) {
+            case OF_FILE:   if (src.node) open_fs(src.node); break;
+            case OF_PIPE_R: pipe_ref_read(src.pipe); break;
+            case OF_PIPE_W: pipe_ref_write(src.pipe); break;
+            default: break;
+        }
+        return FIRST_USER_FD + i;
+    }
+    return -1;
+}
+
 /* Duplicate descriptor oldfd onto newfd. A pipe end may be placed on stdin (0)
  * or stdout (1); any descriptor may be copied to another table slot (>= 3). */
 static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
@@ -1031,6 +1059,9 @@ static void syscall_handler(registers_t *regs) {
         case SYS_DUP2:
             regs->eax = (uint32_t)sys_dup2((int32_t)regs->ebx,
                                            (int32_t)regs->ecx);
+            break;
+        case SYS_DUP:
+            regs->eax = (uint32_t)sys_dup((int32_t)regs->ebx);
             break;
         case SYS_GETPROCS:
             regs->eax = (uint32_t)sys_getprocs((void *)regs->ebx,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that ring-3 syscall immediates match the kernel syscall ABI."""
+"""Verify that ring-3 syscall sites and kernel dispatch match the syscall ABI."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ DIRECT_EAX_IMMEDIATE = re.compile(
 
 
 class AbiError(RuntimeError):
-    """Raised when a user-space syscall site disagrees with the kernel ABI."""
+    """Raised when a user-space or kernel syscall site disagrees with the ABI."""
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,7 @@ class AbiReport:
     kernel_syscalls: int
     wrappers: int
     named_direct_sites: int
+    dispatch_cases: int
 
 
 def read(path: str) -> str:
@@ -123,7 +124,7 @@ def parse_wrapper_immediates(text: str) -> dict[str, int]:
 def parse_named_direct_sites(paths: Iterable[Path]) -> tuple[tuple[str, int, str, int], ...]:
     """Find named assembly sites that explicitly load a syscall ID into EAX.
 
-    Requiring the ``mov[l] $N, %eax`` shape is deliberate.  User-source comments
+    Requiring the ``mov[l] $N, %eax`` shape is deliberate. User-source comments
     also mention the interrupt vector as ``int $0x80``; treating any ``$N`` on a
     line containing ``SYS_*`` as a syscall number would turn that vector into a
     bogus ABI value of 128.
@@ -141,10 +142,29 @@ def parse_named_direct_sites(paths: Iterable[Path]) -> tuple[tuple[str, int, str
     return tuple(sites)
 
 
+def parse_dispatch_cases(text: str) -> tuple[str, ...]:
+    """Return the SYS_* cases from the kernel's syscall_handler switch only.
+
+    syscall.c has other switches whose labels include names such as
+    SYS_SEEK_SET; scoping the scan to syscall_handler prevents those ordinary
+    enum cases from being mistaken for syscall dispatch entries.
+    """
+    start = text.find("static void syscall_handler")
+    if start < 0:
+        raise AbiError("could not find syscall_handler")
+    end = text.find("\nvoid syscall_install", start)
+    if end < 0:
+        raise AbiError("could not find end of syscall_handler")
+    return tuple(
+        re.findall(r"^\s*case\s+(SYS_[A-Z0-9_]+)\s*:", text[start:end], re.M)
+    )
+
+
 def validate(
     kernel_entries: Iterable[tuple[int, str]],
     wrapper_numbers: dict[str, int],
     direct_sites: Iterable[tuple[str, int, str, int]],
+    dispatch_names: Iterable[str] | None = None,
 ) -> AbiReport:
     kernel = {name: number for number, name in kernel_entries}
     if len(kernel) == 0:
@@ -173,6 +193,24 @@ def validate(
                 f"{path}:{line_no}: {name} direct immediate={actual}, kernel={expected}"
             )
 
+    dispatch_count = 0
+    if dispatch_names is not None:
+        dispatch = tuple(dispatch_names)
+        dispatch_count = len(dispatch)
+        duplicates = sorted({name for name in dispatch if dispatch.count(name) > 1})
+        if duplicates:
+            errors.append("duplicate kernel dispatch cases: " + ", ".join(duplicates))
+        missing_dispatch = sorted(set(kernel) - set(dispatch))
+        if missing_dispatch:
+            errors.append(
+                "kernel syscalls missing dispatch cases: " + ", ".join(missing_dispatch)
+            )
+        unknown_dispatch = sorted(set(dispatch) - set(kernel))
+        if unknown_dispatch:
+            errors.append(
+                "kernel dispatch references unknown syscalls: " + ", ".join(unknown_dispatch)
+            )
+
     if errors:
         raise AbiError("syscall ABI parity failed:\n  " + "\n  ".join(errors))
 
@@ -180,6 +218,7 @@ def validate(
         kernel_syscalls=len(kernel),
         wrappers=len(wrapper_numbers),
         named_direct_sites=direct_count,
+        dispatch_cases=dispatch_count,
     )
 
 
@@ -188,7 +227,8 @@ def collect_and_validate() -> AbiReport:
     wrappers = parse_wrapper_immediates(read("user/user_syscall.h"))
     user_paths = sorted((ROOT / "user").glob("*.c")) + [ROOT / "user" / "crt0.s"]
     direct_sites = parse_named_direct_sites(user_paths)
-    return validate(kernel_entries, wrappers, direct_sites)
+    dispatch = parse_dispatch_cases(read("syscall.c"))
+    return validate(kernel_entries, wrappers, direct_sites, dispatch)
 
 
 def main() -> int:
@@ -200,8 +240,9 @@ def main() -> int:
 
     print(
         "syscall ABI parity passed: "
-        f"{report.wrappers} wrappers + {report.named_direct_sites} named direct sites "
-        f"against {report.kernel_syscalls} kernel syscall numbers"
+        f"{report.wrappers} wrappers + {report.named_direct_sites} named direct sites + "
+        f"{report.dispatch_cases} kernel dispatch cases against "
+        f"{report.kernel_syscalls} syscall numbers"
     )
     return 0
 

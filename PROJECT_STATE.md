@@ -1,4 +1,4 @@
-# PROJECT_STATE — miniOS 專案狀態（截至 Session 38 / 2026-08-27）
+# PROJECT_STATE — miniOS 專案狀態（截至 Session 39 / 2026-09-01）
 
 新 session 接手請依序讀：本檔 → `CLAUDE.md`（操作方式）→ 需要細節時查
 `findings.md`（每個問題的完整分析）與 `progress.md`（每輪流水帳）。
@@ -15,7 +15,7 @@
 | 核心 C/ASM（不含 `*_embed.c` 產生檔） | ~9,400 行 |
 | `user/` ring-3 程式與 syscall wrapper | ~4,300 行 |
 | `tests/` 原生單元測試 | ~12,700 行 |
-| 系統呼叫 | 51 |
+| 系統呼叫 | 52 |
 | 使用者程式 | 53 |
 | 單元測試套件 | 25 |
 
@@ -128,6 +128,8 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
 
 - **FEAT1**：可執行檔改走 VFS 查找，能從任何已掛載檔案系統執行程式。
   （**注意**：這也是 F20/F21/CAP12 之所以必要的原因——威脅模型因此改變。）
+- **FEAT2**：新增 `dup()` 系統呼叫，配置最低可用 fd；檔案與 pipe end 都取得獨立
+  參照，並保留來源描述子的目前 offset。所有權語意由 hosted fd regression 守護。
 - **FAIR1**：blocked 串列改 FIFO 喚醒。
 - **PERF1**：memcpy/memset 4-byte 批次（對齊時 3–5x；**來源/目的相對未對齊時
   無改善**，已誠實記錄）。
