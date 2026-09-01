@@ -8,6 +8,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 | System calls | 52 |
 | User programs | 53 |
 | Native unit suites | 25 |
+| Standalone native gates | 1 |
 | QEMU regression targets in `make test` | 5 |
 | QEMU stress mutants | 7 |
 
@@ -150,6 +151,10 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 - `tests/test_signal`
 - `tests/test_vm_lifecycle`
 
+## Standalone native gates
+
+- `tests/test_fd_dup`
+
 ## QEMU regression targets
 
 - `test-ata-absent`
@@ -165,6 +170,8 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 - every user program has a matching root-Makefile `*_embed.o` object
 - every user program is registered to its matching embedded ELF in `kernel.c`
 - every `UNIT_BINS` target has a matching test source
+- every `tests/test_*.c` source is registered in `UNIT_BINS` or an executed standalone native gate
+- every standalone native gate runner executed by static-analysis exists
 - every QEMU dependency of the top-level `test` target is defined
 - README / PROJECT_STATE / CLAUDE headline counts match source-derived totals
 - the stress mutation harness contains at least one `run_mutant` case
