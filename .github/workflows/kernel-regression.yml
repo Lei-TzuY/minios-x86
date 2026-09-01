@@ -48,7 +48,7 @@ jobs:
 
       - name: Preserve QEMU stress log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qemu-stress-${{ github.run_id }}-${{ github.run_attempt }}
           path: tests/qemu-stress.log
@@ -71,7 +71,7 @@ jobs:
 
       - name: Preserve mutant QEMU logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qemu-stress-mutant-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
