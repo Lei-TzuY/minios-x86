@@ -1,0 +1,115 @@
+name: Fix PR35 waitpid wake
+
+on:
+  push:
+    branches: [codex/concurrent-waiters-20260902]
+    paths:
+      - ".github/pr35-fix-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Patch waitpid wake semantics
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, got {text.count(old)}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "process.h",
+              "    uint8_t         main_exited;\n    uint8_t         alarm_active;    /* alarm_tick is meaningful even when zero */",
+              "    uint8_t         main_exited;\n    /* Dedicated wait channel for threads blocked in waitpid(). Its address,\n     * not its value, is the synchronization identity. Keeping it distinct\n     * from process_t prevents child-exit notification from waking unrelated\n     * tasks that happen to wait on the process object itself. */\n    uint8_t         waitpid_event;\n    uint8_t         alarm_active;    /* alarm_tick is meaningful even when zero */",
+          )
+
+          replace_once(
+              "process.c",
+              '''    /* SIGCHLD targets the process's main task, but waitpid may be blocked in a\n     * sibling thread. Also broadcast on the parent process channel so every\n     * waiter using waitpid's predicate is nudged to re-check it. The existing\n     * child-channel broadcast below remains the wakeup for process_wait(). */\n    if (process->parent_pid > 0) {\n        int32_t parent_pid = process->parent_pid;\n        process_t *parent;\n\n        process_send_signal(parent_pid, SIGCHLD);\n        parent = process_find(parent_pid);\n        if (parent) task_wake_all(parent);\n    }''',
+              '''    /* SIGCHLD still targets the parent's main task by identity. A sibling\n     * thread can also be blocked in waitpid(), so notify the parent's dedicated\n     * child-event channel. Do not broadcast on process_t itself: unrelated\n     * waits may legitimately use that object as their channel. */\n    if (process->parent_pid > 0) {\n        int32_t parent_pid = process->parent_pid;\n        process_t *parent = process_find(parent_pid);\n\n        process_send_signal(parent_pid, SIGCHLD);\n        if (parent) task_wake_all(&parent->waitpid_event);\n    }''',
+          )
+
+          replace_once(
+              "process.c",
+              '''int32_t process_waitpid(int32_t pid, int32_t *status_out, int nohang) {\n    int32_t current_pid = process_get_current_pid();\n    uint32_t flags = save_irq_disable();''',
+              '''int32_t process_waitpid(int32_t pid, int32_t *status_out, int nohang) {\n    process_t *current = process_get_current();\n    int32_t current_pid;\n    uint32_t flags;\n\n    if (!current) return -1;\n    current_pid = current->pid;\n    flags = save_irq_disable();''',
+          )
+          replace_once(
+              "process.c",
+              '''        /* Block until a child exits; SIGCHLD's wake (or any reap) re-checks. */\n        task_block_killable(process_get_current());''',
+              '''        /* Block on the parent's child-event channel. SIGCHLD still wakes the\n         * main task by identity, while this channel reaches sibling waiters too. */\n        task_block_killable(&current->waitpid_event);''',
+          )
+
+          replace_once(
+              "tests/test_process.c",
+              '''static void test_waitpid_blocks_on_its_own_process(void) {''',
+              '''static void test_waitpid_blocks_on_dedicated_child_event(void) {''',
+          )
+          replace_once(
+              "tests/test_process.c",
+              '''    TEST("waitpid parks on the parent, the exit broadcasts on the child");''',
+              '''    TEST("waitpid parks on a dedicated parent child-event channel");''',
+          )
+          replace_once(
+              "tests/test_process.c",
+              '''    /* waitpid parked on the PARENT ... */\n    CHECK(g_last_block_channel == (const void *)parent);\n    /* ... while the exiting child broadcast on ITSELF. */\n    CHECK(g_last_wake_all_channel == (const void *)child);\n    /* The two differ, which is the whole point: the broadcast is not what\n     * woke the parent. */\n    CHECK(g_last_block_channel != g_last_wake_all_channel);''',
+              '''    /* waitpid uses an explicit child-event identity, not process_t itself.\n     * The final broadcast is still the child's process_wait() channel. */\n    CHECK(g_last_block_channel == (const void *)&parent->waitpid_event);\n    CHECK(g_last_block_channel != (const void *)parent);\n    CHECK(g_last_wake_all_channel == (const void *)child);\n    CHECK(g_last_block_channel != g_last_wake_all_channel);''',
+          )
+          replace_once(
+              "tests/test_process.c",
+              '''    test_waitpid_blocks_on_its_own_process();''',
+              '''    test_waitpid_blocks_on_dedicated_child_event();''',
+          )
+
+          replace_once(
+              "tests/test_wait_concurrency.c",
+              '''static void test_thread_waitpid_is_woken_on_parent_channel(void) {''',
+              '''static void test_thread_waitpid_is_woken_on_child_event_channel(void) {''',
+          )
+          replace_once(
+              "tests/test_wait_concurrency.c",
+              '''    TEST("waitpid from a sibling thread is woken when its child exits");''',
+              '''    TEST("waitpid sibling wakes through the dedicated child-event channel");''',
+          )
+          replace_once(
+              "tests/test_wait_concurrency.c",
+              '''    /* process->task is still the main task. The waiting sibling therefore\n     * cannot rely on SIGCHLD's identity wake of parent->task; child exit must\n     * also broadcast on the parent process channel used by waitpid. */''',
+              '''    /* process->task is still the main task. The waiting sibling therefore\n     * cannot rely on SIGCHLD's identity wake of parent->task; child exit must\n     * also broadcast on the dedicated parent child-event wait channel. */''',
+          )
+          replace_once(
+              "tests/test_wait_concurrency.c",
+              '''    test_thread_waitpid_is_woken_on_parent_channel();''',
+              '''    test_thread_waitpid_is_woken_on_child_event_channel();''',
+          )
+          PY
+      - name: Install 32-bit test toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+      - name: Run focused regressions
+        run: |
+          set -euo pipefail
+          make unit
+          bash tests/run_wait_concurrency_test.sh
+          bash tests/run_static_analysis.sh
+      - name: Commit bounded fix and remove bootstrap
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/fix-pr35-waitpid.yml .github/pr35-fix-trigger
+          git config user.name "LeiZ"
+          git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: isolate waitpid child-event wakeups"
+          git push origin HEAD:codex/concurrent-waiters-20260902
