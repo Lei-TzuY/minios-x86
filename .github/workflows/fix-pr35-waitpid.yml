@@ -94,10 +94,10 @@ jobs:
               '''    test_thread_waitpid_is_woken_on_child_event_channel();''',
           )
           PY
-      - name: Install 32-bit test toolchain
+      - name: Install focused-test toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib
+          sudo apt-get install -y gcc-multilib cppcheck
       - name: Run focused regressions
         run: |
           set -euo pipefail
