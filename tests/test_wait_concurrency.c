@@ -57,14 +57,14 @@ static void test_wait_revalidates_after_another_waiter_reaps(void) {
     CHECK_EQ(used_slots(), 1);              /* only the parent remains */
 }
 
-static void test_thread_waitpid_is_woken_on_parent_channel(void) {
+static void test_thread_waitpid_is_woken_on_child_event_channel(void) {
     process_t *parent, *child;
     task_t *thread;
     int32_t tid;
     int32_t status = 0;
     int32_t child_pid;
 
-    TEST("waitpid from a sibling thread is woken when its child exits");
+    TEST("waitpid sibling wakes through the dedicated child-event channel");
     reset_world();
     parent = launch("parent", 0);
     child = launch("child", 1);
@@ -82,7 +82,7 @@ static void test_thread_waitpid_is_woken_on_parent_channel(void) {
 
     /* process->task is still the main task. The waiting sibling therefore
      * cannot rely on SIGCHLD's identity wake of parent->task; child exit must
-     * also broadcast on the parent process channel used by waitpid. */
+     * also broadcast on the dedicated parent child-event wait channel. */
     CHECK(parent->task != thread);
     g_current_task = thread;
     g_on_block = child_exits;
@@ -98,6 +98,6 @@ static void test_thread_waitpid_is_woken_on_parent_channel(void) {
 
 int main(void) {
     test_wait_revalidates_after_another_waiter_reaps();
-    test_thread_waitpid_is_woken_on_parent_channel();
+    test_thread_waitpid_is_woken_on_child_event_channel();
     TEST_REPORT("wait-concurrency");
 }
