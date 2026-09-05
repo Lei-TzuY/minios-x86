@@ -158,8 +158,17 @@ static void process_finish_exit(process_t *process, int32_t status) {
     process->task = NULL;
     process->exit_status = status;
     process->state = PROCESS_ZOMBIE;
-    /* Notify the parent that a child has exited (ignored unless it handles it). */
-    if (process->parent_pid > 0) process_send_signal(process->parent_pid, SIGCHLD);
+    /* SIGCHLD still targets the parent's main task by identity. A sibling
+     * thread can also be blocked in waitpid(), so notify the parent's dedicated
+     * child-event channel. Do not broadcast on process_t itself: unrelated
+     * waits may legitimately use that object as their channel. */
+    if (process->parent_pid > 0) {
+        int32_t parent_pid = process->parent_pid;
+        process_t *parent = process_find(parent_pid);
+
+        process_send_signal(parent_pid, SIGCHLD);
+        if (parent) task_wake_all(&parent->waitpid_event);
+    }
     task_wake_all(process);
     if (process->auto_reap) process_release(process);
 }
@@ -326,16 +335,34 @@ int process_exec_reset(address_space_t *new_space, uint32_t heap_base,
 }
 
 int32_t process_wait(int32_t pid) {
-    process_t *process = process_find(pid);
     int32_t current_pid = process_get_current_pid();
+    process_t *process;
     int32_t status;
-    uint32_t flags;
+    uint32_t flags = save_irq_disable();
 
-    if (!process || process->parent_pid != current_pid) return -1;
+    /* Find and validate the target while the process table is stable. Another
+     * thread in this parent may reap the same child while this waiter blocks,
+     * so the cached slot must never be trusted again without revalidating its
+     * identity and parent after every wake. */
+    process = process_find(pid);
+    if (!process || process->parent_pid != current_pid) {
+        restore_irq(flags);
+        return -1;
+    }
 
-    flags = save_irq_disable();
     while (process->state == PROCESS_RUNNING) {
         task_block_killable(process);
+        if (process->state == PROCESS_UNUSED || process->pid != pid ||
+            process->parent_pid != current_pid) {
+            restore_irq(flags);
+            return -1;
+        }
+    }
+
+    if (process->state != PROCESS_ZOMBIE || process->pid != pid ||
+        process->parent_pid != current_pid) {
+        restore_irq(flags);
+        return -1;
     }
 
     status = process->exit_status;
@@ -345,8 +372,13 @@ int32_t process_wait(int32_t pid) {
 }
 
 int32_t process_waitpid(int32_t pid, int32_t *status_out, int nohang) {
-    int32_t current_pid = process_get_current_pid();
-    uint32_t flags = save_irq_disable();
+    process_t *current = process_get_current();
+    int32_t current_pid;
+    uint32_t flags;
+
+    if (!current) return -1;
+    current_pid = current->pid;
+    flags = save_irq_disable();
 
     while (1) {
         process_t *zombie = NULL;
@@ -376,8 +408,9 @@ int32_t process_waitpid(int32_t pid, int32_t *status_out, int nohang) {
         if (!has_child) { restore_irq(flags); return -1; }
         if (nohang) { restore_irq(flags); return 0; }
 
-        /* Block until a child exits; SIGCHLD's wake (or any reap) re-checks. */
-        task_block_killable(process_get_current());
+        /* Block on the parent's child-event channel. SIGCHLD still wakes the
+         * main task by identity, while this channel reaches sibling waiters too. */
+        task_block_killable(&current->waitpid_event);
     }
 }
 
@@ -731,7 +764,7 @@ int process_has_sighandler(int32_t pid, int signum) {
 
 void process_request_kill(int32_t pid) {
     process_t *proc;
-    /* Mark and wake every task of the process, not just proc->task. Two
+    /* Mark and wake every task of a process, not just proc->task. Two
      * reasons: a process may own several tasks (SYS_THREAD_CREATE), and a
      * blocked task cannot be killed by the per-tick check below -- it only
      * ever runs the few instructions between waking and re-blocking, with

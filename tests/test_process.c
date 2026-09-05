@@ -527,7 +527,7 @@ static void test_waitpid_is_woken_without_a_sigchld_handler(void) {
     expect_no_underflow();
 }
 
-static void test_waitpid_blocks_on_its_own_process(void) {
+static void test_waitpid_blocks_on_dedicated_child_event(void) {
     process_t *parent, *child;
     int32_t status = 0;
 
@@ -536,7 +536,7 @@ static void test_waitpid_blocks_on_its_own_process(void) {
      * not assume they are the same. This one records which channel each of
      * them parks on, so a change to either is visible.
      */
-    TEST("waitpid parks on the parent, the exit broadcasts on the child");
+    TEST("waitpid parks on a dedicated parent child-event channel");
     reset_world();
 
     parent = launch("parent", 0);
@@ -551,12 +551,11 @@ static void test_waitpid_blocks_on_its_own_process(void) {
     g_on_block_remaining = 1;
     (void)process_waitpid(child->pid, &status, 0);
 
-    /* waitpid parked on the PARENT ... */
-    CHECK(g_last_block_channel == (const void *)parent);
-    /* ... while the exiting child broadcast on ITSELF. */
+    /* waitpid uses an explicit child-event identity, not process_t itself.
+     * The final broadcast is still the child's process_wait() channel. */
+    CHECK(g_last_block_channel == (const void *)&parent->waitpid_event);
+    CHECK(g_last_block_channel != (const void *)parent);
     CHECK(g_last_wake_all_channel == (const void *)child);
-    /* The two differ, which is the whole point: the broadcast is not what
-     * woke the parent. */
     CHECK(g_last_block_channel != g_last_wake_all_channel);
 }
 
@@ -1665,7 +1664,7 @@ int main(void) {
     }
 
     test_waitpid_is_woken_without_a_sigchld_handler();
-    test_waitpid_blocks_on_its_own_process();
+    test_waitpid_blocks_on_dedicated_child_event();
     test_waitpid_wake_is_identity_not_channel_luck();
     test_wait_parks_on_the_child();
     test_spurious_wake_rechecks();

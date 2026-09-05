@@ -83,6 +83,11 @@ typedef struct process {
      * this, exiting while a sibling thread is still scheduled would destroy
      * the address space out from under it. */
     uint8_t         main_exited;
+    /* Dedicated wait channel for threads blocked in waitpid(). Its address,
+     * not its value, is the synchronization identity. Keeping it distinct
+     * from process_t prevents child-exit notification from waking unrelated
+     * tasks that happen to wait on the process object itself. */
+    uint8_t         waitpid_event;
     uint8_t         alarm_active;    /* alarm_tick is meaningful even when zero */
     uint32_t        alarm_tick;      /* timer tick to raise SIGALRM */
     uint32_t        cpu_ticks;       /* timer ticks spent running this process */
