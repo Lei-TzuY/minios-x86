@@ -156,7 +156,7 @@ make test         # native + QEMU / ISO validation
 make test-stress  # focused ring-3 stress run, twice in one QEMU boot
 make sanitize     # hosted suites under AddressSanitizer + UBSan
 make static-analysis       # Python + inventory + shell syntax checks, then cppcheck
-make test-stress-mutants   # prove all seven capacity/leak/exception gates fire
+make test-stress-mutants   # prove all eight capacity/leak/exception/timer gates fire
 make iso          # produce miniOS.iso
 make run-iso      # boot the ISO through GRUB in QEMU
 ```

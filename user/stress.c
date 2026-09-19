@@ -393,6 +393,38 @@ static void alarm_handler(int signum) {
     alarm_seen = 1;
 }
 
+static volatile int sleep_alarm_rearm;
+
+static void sleep_alarm_handler(int signum) {
+    alarm_handler(signum);
+    /* Keep a future wake armed even if a PIT interrupt delivers the first
+     * alarm between sys_alarm and sys_sleep in the test driver. */
+    if (sleep_alarm_rearm) sys_alarm(3);
+}
+
+static int test_interrupted_sleep(void) {
+    sleep_alarm_rearm = 1;
+    if (sys_signal(SIGALRM, sleep_alarm_handler) != 0)
+        return fail("interrupted sleep handler");
+
+    /* More than the kernel's 16 sleep slots, with deadlines far beyond this
+     * test. Every caught alarm must return its slot before the next sleep. */
+    for (int i = 0; i < 32; i++) {
+        alarm_seen = 0;
+        if (sys_alarm(3) < 0) return fail("interrupted sleep alarm");
+        if (sys_sleep(0x7FFFFFFF) != 0)
+            return fail("interrupted sleep capacity");
+        if (!alarm_seen) return fail("interrupted sleep delivery");
+    }
+    sleep_alarm_rearm = 0;
+    if (sys_alarm(0) < 0 || sys_signal(SIGALRM, (void (*)(int))1) != 0 ||
+        sys_sleep(2) != 0)
+        return fail("interrupted sleep recovery");
+
+    pass("interrupted sleep");
+    return 0;
+}
+
 static int test_interrupts_and_preemption(void) {
     volatile unsigned *shared;
     int children[3];
@@ -587,6 +619,7 @@ int main(void) {
         test_heap_and_paging() != 0 ||
         test_descriptor_and_pipe_exhaustion() != 0 ||
         test_filesystems() != 0 ||
+        test_interrupted_sleep() != 0 ||
         test_interrupts_and_preemption() != 0 ||
         test_threads_and_context_switches() != 0 ||
         test_process_exhaustion() != 0 ||

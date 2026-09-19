@@ -544,3 +544,43 @@ Status: complete
 | 突變 pattern 對不上（CRLF 樹用 `\n`） | Python 字面替換 + LF 正規化後依原行尾寫回 |
 | `bigseek` 誤用 API 導致節點數飄移（Session 25） | `sys_create` 已回傳開啟的 fd；測試改為**斷言**清理成功 |
 | 往返測試沒模型化 handler 的 `ret`，在正確程式上也因錯的理由通過（Session 33） | 突變測試逼出來；補上 `useresp += 4` 才是真的往返 |
+
+## 2026-09-19 — interrupted sleep reservation lifetime
+
+- Inspected live main `e63d4218ea91069506b05944ead5a9198bf8568a`, 12 recent
+  commits, all workflows, open issues (none), the only open PR #36 at
+  `4d9cfeff4193a735972dad4c238b2fdf3d951741`, its diff and discussion. Both
+  main and PR #36 had successful Tests, Static analysis and Kernel regression.
+  Reviewed README, PROJECT_STATE, CLAUDE, inventory, source TODOs (none), and
+  timer/process/scheduler/IPC implementation. PR #36 addresses interrupt-entry
+  DF handling; this independent branch addresses timer reservation lifetime.
+- Behavior: SYS_SLEEP enters with IF clear; timer_sleep reserves one of 16
+  slots and blocks. process_send_signal wakes the task by identity. The return
+  path released its reservation only for kill_pending, leaving ordinary early
+  returns occupied until their original deadline. Sixteen interrupted maximum
+  sleeps prevented the seventeenth sleep, potentially for about 248 days.
+- Reproduced on unchanged main timer.c: deterministic native model reported
+  54 failures; actual ring-3 SIGALRM workload failed the named
+  `[stress interrupted sleep capacity FAIL]` assertion in QEMU.
+- Fix: release a still-owned reservation after every block return, before the
+  kill check. Keep the owner check because a deadline can free the slot and a
+  different task can reuse it before the old sleeper resumes. No syscall ABI,
+  early-return semantics, deadline arithmetic or concurrency-model change.
+- Replace the timer's immediate-return scheduler stub with suspended pthread
+  stacks serialized by one test mutex. Verify deadlines/wrap/maximum duration,
+  16 actual sleepers, capacity recovery, 32 early wakes, cancellation of stale
+  deadlines, kill before/during sleep and slot takeover before normal/kill return.
+- Local validation: kernel build; 548 timer assertions on a 64-bit host build;
+  the same timer suite with ASan/UBSan; 39 Python regressions and all inventory,
+  ABI, test-registration, native-owner and GNU-stack checkers passed. Three
+  isolated native mutants (leak, owner-check deletion, early deadline) failed
+  named assertions without modifying the production tree. Ring-3 stress passed
+  twice in one QEMU boot, with both interrupted-sleep markers and matching
+  resource snapshots including zero remaining timer reservations.
+- Local environment cannot execute 32-bit hosted binaries or create Unix
+  monitor sockets. The QEMU check used an external scratch harness overriding
+  only the monitor transport to stdio; repository assertions were unchanged.
+  Full repository checks and the new eighth QEMU mutant are delegated to the
+  existing GitHub Actions workflows, with results to be recorded in the PR.
+- findings.md and progress.md are binary/non-UTF-8 on the base; this record
+  preserves those files and documents both findings and verification here.

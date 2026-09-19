@@ -195,6 +195,7 @@ def validate(log: str) -> None:
         "[stress heap and paging ok]",
         "[stress fd and pipe exhaustion ok]",
         "[stress filesystems ok]",
+        "[stress interrupted sleep ok]",
         "[stress interrupts and preemption ok]",
         "[stress scheduling and context switches ok]",
         "[stress process exhaustion ok]",
