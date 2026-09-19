@@ -189,6 +189,8 @@ def snapshots(log: str) -> list[dict[str, tuple[int, ...]]]:
 
 def validate(log: str) -> None:
     required = [
+        "[stress direction flag syscall ok]",
+        "[stress direction flag fault ok]",
         "[stress invalid pointers ok]",
         "[stress fault isolation ok]",
         "[stress heap exhaustion ok]",

@@ -529,6 +529,19 @@ Status: complete
 - 新增 CPL classification 與 generic exception status mutants；GitHub Actions 實測
   **7/7 killed**，健康快照維持 PMM `716/7476`、heap `11/33348`。
 
+## Phase 39: ISR/IRQ direction-flag ABI invariant
+Status: implemented; regression verification tracked in the pull request
+- 確認 ring-3 `STD; int 0x80` 會把 DF 帶進 C handler；真實 RAMFS read 在未修正
+  核心出現 `[stress direction flag syscall copy FAIL]`，寫壞目的 buffer 前的 canary。
+- ISR 與 IRQ common stub 各加一個 `CLD`，不改硬體保存的 EFLAGS，讓 `iret` 保留
+  caller 的 DF；避免 compiler-generated string instructions 反向複製。
+- `stress` 加入帶 DF 的 syscall canary 與 fork/COW #PF 測試；獨立 Multiboot probe
+  直接連結 production entry assembly，檢查兩種 DF 狀態、saved frame 與 `iret`。
+- probe 以 software INT 進入真實 IRQ stub，避免 scheduler 切換到另一個 task 時
+  還原不同 EFLAGS 而掩蓋缺陷；刪除任一 `CLD` 必須由對應具名 DF assertion 擊殺。
+- 本輪 findings/progress 記錄集中在此及 PR：既有 `findings.md` 與 `progress.md`
+  在 base commit 已是相同的非 UTF-8 二進位內容，本次不猜測其原文或改寫。
+
 ## Decisions & Assumptions Log
 重大設計決策集中在 `PROJECT_STATE.md` 第 4 節；每個項目的完整分析在 `findings.md`。
 

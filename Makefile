@@ -16,7 +16,7 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
        malloctest_embed.o wc_embed.o grep_embed.o \
        head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o fatgrow_embed.o forkredir_embed.o sigretguard_embed.o sigflags_embed.o killthread_embed.o killwait_embed.o bigseek_embed.o stress_embed.o ush_embed.o
 
-.PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot \
+.PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot test-interrupt-entry \
         test-iso test-shell test-stress test-stress-mutants unit sanitize \
         static-analysis bench
 
@@ -774,6 +774,7 @@ clean:
 	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c fatgrow_embed.c forkredir_embed.c sigretguard_embed.c sigflags_embed.c killthread_embed.c killwait_embed.c bigseek_embed.c stress_embed.c ush_embed.c fat16.img fat16_image_embed.c
 	rm -rf isodir miniOS.iso
 	rm -f $(UNIT_BINS) $(BENCH_BINS)
+	rm -f tests/interrupt_entry_probe.o tests/interrupt_entry_probe.bin
 	$(MAKE) -C user clean
 
 run: kernel.bin $(ATA_IMAGE)
@@ -802,7 +803,27 @@ run-headless: kernel.bin $(ATA_IMAGE)
 	timeout 5s $(QEMU) $(ATA_DRIVE) -display none -serial none -debugcon stdio \
 	    -no-reboot -no-shutdown -kernel kernel.bin || test $$? -eq 124
 
-test: unit test-ata-absent test-boot test-iso test-stress test-shell
+test: unit test-interrupt-entry test-ata-absent test-boot test-iso test-stress test-shell
+
+# Execute the real ISR/IRQ entry assembly in a minimal bootable image. Keep
+# the probe out of kernel.bin, and use QEMU's exit device for a bounded result.
+tests/interrupt_entry_probe.o: tests/interrupt_entry_probe.c gdt.h idt.h io.h isr.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+tests/interrupt_entry_probe.bin: tests/interrupt_entry_probe.o boot.o gdt.o \
+                               gdt_s.o idt.o interrupt.o linker.ld
+	$(CC) -T linker.ld $(LDFLAGS) -o $@ $(filter %.o,$^) -lgcc
+
+test-interrupt-entry: tests/interrupt_entry_probe.bin
+	@log=$$(mktemp); status=0; \
+	timeout 10s $(QEMU) -display none -serial none -monitor none \
+	    -debugcon stdio -no-reboot -no-shutdown \
+	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+	    -kernel tests/interrupt_entry_probe.bin > $$log 2>&1 || status=$$?; \
+	cat $$log; \
+	grep -q '^\[interrupt entry PASS\]$$' $$log; result=$$?; \
+	rm -f $$log; \
+	test $$result -eq 0 && test $$status -eq 33
 
 # Boot the real GRUB/ISO path, the one used on VMs and hardware. The other
 # targets all use QEMU's -kernel multiboot loader, which bypasses the

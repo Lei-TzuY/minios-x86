@@ -89,7 +89,11 @@ IRQ 46, 14
 IRQ 47, 15
 
 .extern isr_handler
+/* Interrupt gates preserve DF, but the C ABI requires forward string
+ * operations. Clear the live flag before C (including fault handlers);
+ * the saved EFLAGS remain untouched for iret to restore the caller. */
 isr_common_stub:
+    cld
     pusha
     mov %ds, %ax
     push %eax
@@ -112,7 +116,9 @@ isr_common_stub:
     iret
 
 .extern irq_handler
+/* Hardware IRQs can interrupt ring-3 code with DF set as well. */
 irq_common_stub:
+    cld
     pusha
     mov %ds, %ax
     push %eax
