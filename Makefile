@@ -92,8 +92,10 @@ tests/test_sem: tests/test_sem.c tests/test.h sem.c sem.h task.h
 # timer.c reaches port I/O (timer_install) and the scheduler; the port ops are
 # no-ops under HOSTED_TEST and the scheduler/process hooks are stubbed in the
 # test. The static timer_callback is captured via register_interrupt_handler.
+# pthreads preserve genuinely suspended stacks; a test mutex serializes all
+# kernel execution, dropping only at the simulated context-switch boundary.
 tests/test_timer: tests/test_timer.c tests/test.h timer.c timer.h isr.h io.h irq.h task.h
-	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_timer.c timer.c -o $@
+	$(CC) $(UNIT_CFLAGS) -pthread -DHOSTED_TEST tests/test_timer.c timer.c -o $@
 
 # The context switch (switch_task, assembly) and paging/pmm are stubbed in the
 # test, leaving the ready-ring and blocked-list logic exercisable. task.c's raw
