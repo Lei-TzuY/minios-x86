@@ -149,7 +149,7 @@ sudo apt install -y grub-pc-bin grub-common xorriso mtools
 ## Build and run
 
 ```sh
-make              # build kernel.bin
+make all          # build kernel.bin
 make run          # run in QEMU with a test disk attached
 make unit         # native unit tests only
 make test         # native + QEMU / ISO validation
@@ -160,6 +160,14 @@ make test-stress-mutants   # prove all seven capacity/leak/exception gates fire
 make iso          # produce miniOS.iso
 make run-iso      # boot the ISO through GRUB in QEMU
 ```
+
+Kernel C objects track direct and transitive project headers through compiler-generated
+dependency files. `make all` recompiles affected objects and relinks the kernel after
+a header edit; `make clean` also removes dependency files. Changing the root Makefile
+rebuilds all kernel objects, including older checkouts without dependency files.
+Run `make clean` when changing command-line compiler flags or toolchains.
+The real-build regression is `python3 tests/test_kernel_incremental_build.py` and
+runs in `make static-analysis`.
 
 On Windows, prefix commands with `wsl`.
 

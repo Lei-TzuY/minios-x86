@@ -21,6 +21,10 @@ python3）。Windows 端沒有編譯器。
 | `make bench` | 效能量測（資訊性，不在 `make test` 內） | ~5s |
 
 - 裸 `make` 只會建第一個目標（一個單元測試執行檔），**不是**核心。用 `make all`。
+- 核心 C 物件以 `-MMD -MP` 追蹤直接／間接標頭依賴；根 Makefile 變更會重建
+  核心物件，`make clean` 會清掉 `.d`。改命令列編譯旗標或工具鏈時仍須 clean。
+  `tests/test_kernel_incremental_build.py` 在隔離副本用真實工具鏈驗證，已納入
+  `make static-analysis`。
 - `make test` 的 QEMU 目標：`test-ata-absent`、`test-boot`、`test-iso`、
   `test-stress`、`test-shell`。
 - 額外品質 gate：`make sanitize`（hosted ASan + UBSan）、`make static-analysis`
