@@ -10,7 +10,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 | Native unit suites | 25 |
 | Standalone native gates | 3 |
 | QEMU regression targets in `make test` | 5 |
-| QEMU stress mutants | 7 |
+| QEMU stress mutants | 9 |
 
 ## System calls
 

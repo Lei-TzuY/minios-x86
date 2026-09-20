@@ -477,7 +477,7 @@ static int test_threads_and_context_switches(void) {
                               stack2 + THREAD_STACK_PAGES * PAGE_SIZE) < 0) {
             return fail("thread creation");
         }
-        sys_thread_join();
+        if (sys_thread_join() != 0) return fail("main thread join");
         if (thread_counter != 2 * THREAD_ITERS)
             return fail("thread shared state");
         if (sys_munmap(stack1, THREAD_STACK_PAGES) != 0 ||
@@ -489,6 +489,73 @@ static int test_threads_and_context_switches(void) {
 
     pass("scheduling and context switches");
     return 0;
+}
+
+#define JOIN_START_SEM 6
+static volatile int join_results[2];
+
+static void join_worker(int index) {
+    if (sys_sem_wait(JOIN_START_SEM) != 0) sys_exit(81);
+    join_results[index] = sys_thread_join();
+    sys_exit(0);
+}
+
+static void join_worker_first(void) { join_worker(0); }
+static void join_worker_second(void) { join_worker(1); }
+
+static int join_child(void) {
+    char *stacks[2];
+
+    if (sys_thread_join() != 0) return 82;
+    for (int i = 0; i < ARRAY_SIZE(stacks); i++) {
+        stacks[i] = (char *)sys_mmap(THREAD_STACK_PAGES);
+        if (!stacks[i]) return 83;
+        join_results[i] = 123;
+    }
+    /* Both workers must exist before either tries to join. In the old kernel
+     * they wait for each other as well as for their own exits. */
+    if (sys_sem_init(JOIN_START_SEM, 0) != 0 ||
+        sys_thread_create(join_worker_first,
+                          stacks[0] + THREAD_STACK_PAGES * PAGE_SIZE) < 0 ||
+        sys_thread_create(join_worker_second,
+                          stacks[1] + THREAD_STACK_PAGES * PAGE_SIZE) < 0 ||
+        sys_sem_post(JOIN_START_SEM) != 0 ||
+        sys_sem_post(JOIN_START_SEM) != 0) return 84;
+
+    if (sys_thread_join() != 0) return 85;
+    if (join_results[0] != -1 || join_results[1] != -1) return 86;
+    if (sys_thread_join() != 0) return 87;
+    for (int i = 0; i < ARRAY_SIZE(stacks); i++) {
+        if (sys_munmap(stacks[i], THREAD_STACK_PAGES) != 0) return 88;
+    }
+    return 0;
+}
+
+static int test_thread_join_callers(void) {
+    int pid = sys_fork();
+    unsigned start;
+
+    if (pid < 0) return fail("thread join fork");
+    if (pid == 0) sys_exit(join_child());
+
+    /* Keep the watchdog outside the potentially deadlocked process. A bad
+     * join must fail a named assertion and be reaped, not time out QEMU. */
+    start = sys_uptime();
+    while ((unsigned)(sys_uptime() - start) < 200u) {
+        int status = 0;
+        int reaped = sys_waitpid(pid, &status, WNOHANG);
+
+        if (reaped == pid) {
+            if (status != 0) return fail("thread join result");
+            pass("thread join callers");
+            return 0;
+        }
+        if (reaped != 0) return fail("thread join reap");
+        sys_yield();
+    }
+    if (sys_kill(pid, SIGKILL) != 0 || sys_waitpid(pid, 0, 0) != pid)
+        return fail("thread join watchdog cleanup");
+    return fail("thread join caller liveness");
 }
 
 static int test_process_exhaustion(void) {
@@ -589,6 +656,7 @@ int main(void) {
         test_filesystems() != 0 ||
         test_interrupts_and_preemption() != 0 ||
         test_threads_and_context_switches() != 0 ||
+        test_thread_join_callers() != 0 ||
         test_process_exhaustion() != 0 ||
         test_repeated_lifecycle() != 0) {
         write_str("[stress FAILED]\n");

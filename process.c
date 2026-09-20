@@ -636,17 +636,23 @@ int32_t process_thread_create(uint32_t entry, uint32_t stack_top) {
     return (int32_t)task->id;
 }
 
-void process_thread_join(void) {
+int32_t process_thread_join(void) {
     uint32_t flags = save_irq_disable();
     process_t *process = process_get_current();
 
-    if (process) {
-        while (process->thread_count > 0) {
-            task_block_killable(&process->thread_count);
-        }
+    /* This is a join-all operation. A worker is included in thread_count,
+     * so letting it wait for zero would make it wait for its own exit. */
+    if (!process || task_get_current() != process->task) {
+        restore_irq(flags);
+        return -1;
+    }
+
+    while (process->thread_count > 0) {
+        task_block_killable(&process->thread_count);
     }
 
     restore_irq(flags);
+    return 0;
 }
 
 /* --- mmap-region page allocator ---------------------------------------------
