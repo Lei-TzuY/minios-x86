@@ -529,6 +529,32 @@ Status: complete
 - 新增 CPL classification 與 generic exception status mutants；GitHub Actions 實測
   **7/7 killed**，健康快照維持 PMM `716/7476`、heap `11/33348`。
 
+## 2026-09-20 — BUILD1: kernel header dependencies
+Status: implementation and local validation complete; hosted CI results recorded in the PR.
+
+- 重新確認 main `e63d4218`、近期提交、0 個 open issues、開放 PR #36／#37／#38
+  與各自成功的 CI；三個 PR 分別處理中斷 DF、sleep slot 與 thread join，沒有
+  覆蓋本輪建置工作。另讀 roadmap、TODO、CLAUDE 與 PROJECT_STATE。
+- **問題／重現**：舊核心 C 規則只有 `.c` prerequisite。先建 main，再將
+  `TASK_KILL_STATUS` 從 -130 改為 -131，`make -q all` 仍回傳 0；增量核心
+  SHA256 不變，但 clean build 不同，證明會執行舊標頭常數。
+- **修法**：所有核心 C 編譯規則使用獨立 `DEPFLAGS=-MMD -MP`，載入 `.d`；
+  根 Makefile 成為核心物件 prerequisite，讓沒有 `.d` 的既有物件也能遷移；
+  clean 清除 `.d`，git 忽略產生檔。維持既有預設目標與嵌入程式建置規則。
+- **回歸**：隔離副本用真實 GCC/as/ld，固定時間戳而不 sleep，測直接／間接
+  標頭、只重建受影響物件、連結結果、Makefile 遷移、CFLAGS override、移除
+  標頭、phony clean，並比對增量與乾淨核心的 SHA256。接入 static-analysis
+  與 test registration gate；原生／QEMU 套件數不變。
+- **本地結果**：新回歸通過（7.7 秒）；完整核心建置成功，沒有 compiler
+  warning/error，未修改原始碼的核心與 main 位元組相同。5 個隔離 mutants
+  全由預期具名斷言抓到：取消產生 `.d`、取消 include、取消 Makefile
+  prerequisite、取消 `-MP`、把依賴旗標只放在可被覆蓋的 CFLAGS。
+- **環境限制**：本地不支援執行 hosted i386 與 AF_UNIX QEMU monitor；完整
+  `make test`、sanitize、static-analysis 與 QEMU mutants 交由 PR CI 執行，
+  不將未執行的測試記為通過。
+- `findings.md`／`progress.md` 在 main 是非 UTF-8 二進位內容，本輪不覆寫；
+  問題分析、進度與驗證記錄集中於此。
+
 ## Decisions & Assumptions Log
 重大設計決策集中在 `PROJECT_STATE.md` 第 4 節；每個項目的完整分析在 `findings.md`。
 

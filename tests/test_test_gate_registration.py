@@ -19,6 +19,7 @@ class TestGateRegistrationTests(unittest.TestCase):
         self.assertIn("tests/test_project_inventory.py", report.python_tests)
         self.assertIn("tests/test_syscall_abi.py", report.python_tests)
         self.assertIn("tests/test_test_gate_registration.py", report.python_tests)
+        self.assertIn("tests/test_kernel_incremental_build.py", report.python_tests)
         self.assertEqual(report.shell_tests, ("tests/test_user_incremental_build.sh",))
 
     def test_python_parser_ignores_py_compile(self) -> None:

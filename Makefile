@@ -6,6 +6,7 @@ ATA_DRIVE = -drive file=$(ATA_IMAGE),format=raw,if=ide,index=0,media=disk,snapsh
 
 ASFLAGS = --32
 CFLAGS  = -m32 -std=gnu99 -ffreestanding -fno-pie -fno-stack-protector -O2 -Wall -Wextra
+DEPFLAGS = -MMD -MP
 LDFLAGS = -m32 -ffreestanding -fno-pie -no-pie -O2 -nostdlib -Wl,--build-id=none
 
 OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
@@ -15,6 +16,8 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
        orphan_embed.o sleeptest_embed.o fstest_embed.o echo_embed.o \
        malloctest_embed.o wc_embed.o grep_embed.o \
        head_embed.o tail_embed.o sort_embed.o sigtest_embed.o sigipc_embed.o forktest_embed.o execdemo_embed.o demandtest_embed.o sigchld_embed.o waitdemo_embed.o cwddemo_embed.o statdemo_embed.o cowstress_embed.o alarmdemo_embed.o pausedemo_embed.o pipedemo_embed.o jobctl_embed.o uptime_embed.o date_embed.o printenv_embed.o cputime_embed.o shmtest_embed.o semtest_embed.o mmaptest_embed.o threadtest_embed.o threadexit_embed.o execguard_embed.o ramgrow_embed.o pathlim_embed.o redirref_embed.o fatref_embed.o fatgrow_embed.o forkredir_embed.o sigretguard_embed.o sigflags_embed.o killthread_embed.o killwait_embed.o bigseek_embed.o stress_embed.o ush_embed.o
+
+KERNEL_DEPS = $(OBJS:.o=.d)
 
 .PHONY: all clean run run-headless iso run-iso test test-ata-absent test-boot \
         test-iso test-shell test-stress test-stress-mutants unit sanitize \
@@ -272,7 +275,7 @@ usermode_s.o: usermode_s.s
 
 # C objects
 %.o: %.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 # User-space programs are built separately and embedded into the kernel.
 user/hello.elf: user/hello.c user/user_syscall.h user/crt0.s user/Makefile
@@ -438,319 +441,319 @@ hello_embed.c: user/hello.elf gen_embed.py
 	python3 gen_embed.py user/hello.elf hello_elf > $@
 
 hello_embed.o: hello_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 cat_embed.c: user/cat.elf gen_embed.py
 	python3 gen_embed.py user/cat.elf cat_elf > $@
 
 cat_embed.o: cat_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 fault_embed.c: user/fault.elf gen_embed.py
 	python3 gen_embed.py user/fault.elf fault_elf > $@
 
 fault_embed.o: fault_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 badptr_embed.c: user/badptr.elf gen_embed.py
 	python3 gen_embed.py user/badptr.elf badptr_elf > $@
 
 badptr_embed.o: badptr_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 worker_embed.c: user/worker.elf gen_embed.py
 	python3 gen_embed.py user/worker.elf worker_elf > $@
 
 worker_embed.o: worker_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 spawner_embed.c: user/spawner.elf gen_embed.py
 	python3 gen_embed.py user/spawner.elf spawner_elf > $@
 
 spawner_embed.o: spawner_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 orphan_embed.c: user/orphan.elf gen_embed.py
 	python3 gen_embed.py user/orphan.elf orphan_elf > $@
 
 orphan_embed.o: orphan_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 sleeptest_embed.c: user/sleeptest.elf gen_embed.py
 	python3 gen_embed.py user/sleeptest.elf sleeptest_elf > $@
 
 sleeptest_embed.o: sleeptest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 fstest_embed.c: user/fstest.elf gen_embed.py
 	python3 gen_embed.py user/fstest.elf fstest_elf > $@
 
 fstest_embed.o: fstest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 echo_embed.c: user/echo.elf gen_embed.py
 	python3 gen_embed.py user/echo.elf echo_elf > $@
 
 echo_embed.o: echo_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 malloctest_embed.c: user/malloctest.elf gen_embed.py
 	python3 gen_embed.py user/malloctest.elf malloctest_elf > $@
 
 malloctest_embed.o: malloctest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 wc_embed.c: user/wc.elf gen_embed.py
 	python3 gen_embed.py user/wc.elf wc_elf > $@
 
 wc_embed.o: wc_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 grep_embed.c: user/grep.elf gen_embed.py
 	python3 gen_embed.py user/grep.elf grep_elf > $@
 
 grep_embed.o: grep_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 head_embed.c: user/head.elf gen_embed.py
 	python3 gen_embed.py user/head.elf head_elf > $@
 
 head_embed.o: head_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 tail_embed.c: user/tail.elf gen_embed.py
 	python3 gen_embed.py user/tail.elf tail_elf > $@
 
 tail_embed.o: tail_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 sort_embed.c: user/sort.elf gen_embed.py
 	python3 gen_embed.py user/sort.elf sort_elf > $@
 
 sort_embed.o: sort_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 sigtest_embed.c: user/sigtest.elf gen_embed.py
 	python3 gen_embed.py user/sigtest.elf sigtest_elf > $@
 
 sigtest_embed.o: sigtest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 sigipc_embed.c: user/sigipc.elf gen_embed.py
 	python3 gen_embed.py user/sigipc.elf sigipc_elf > $@
 
 sigipc_embed.o: sigipc_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 forktest_embed.c: user/forktest.elf gen_embed.py
 	python3 gen_embed.py user/forktest.elf forktest_elf > $@
 
 forktest_embed.o: forktest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 execdemo_embed.c: user/execdemo.elf gen_embed.py
 	python3 gen_embed.py user/execdemo.elf execdemo_elf > $@
 
 execdemo_embed.o: execdemo_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 demandtest_embed.c: user/demandtest.elf gen_embed.py
 	python3 gen_embed.py user/demandtest.elf demandtest_elf > $@
 
 demandtest_embed.o: demandtest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 sigchld_embed.c: user/sigchld.elf gen_embed.py
 	python3 gen_embed.py user/sigchld.elf sigchld_elf > $@
 
 sigchld_embed.o: sigchld_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 waitdemo_embed.c: user/waitdemo.elf gen_embed.py
 	python3 gen_embed.py user/waitdemo.elf waitdemo_elf > $@
 
 waitdemo_embed.o: waitdemo_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 cwddemo_embed.c: user/cwddemo.elf gen_embed.py
 	python3 gen_embed.py user/cwddemo.elf cwddemo_elf > $@
 
 cwddemo_embed.o: cwddemo_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 statdemo_embed.c: user/statdemo.elf gen_embed.py
 	python3 gen_embed.py user/statdemo.elf statdemo_elf > $@
 
 statdemo_embed.o: statdemo_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 cowstress_embed.c: user/cowstress.elf gen_embed.py
 	python3 gen_embed.py user/cowstress.elf cowstress_elf > $@
 
 cowstress_embed.o: cowstress_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 alarmdemo_embed.c: user/alarmdemo.elf gen_embed.py
 	python3 gen_embed.py user/alarmdemo.elf alarmdemo_elf > $@
 
 alarmdemo_embed.o: alarmdemo_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 pausedemo_embed.c: user/pausedemo.elf gen_embed.py
 	python3 gen_embed.py user/pausedemo.elf pausedemo_elf > $@
 
 pausedemo_embed.o: pausedemo_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 pipedemo_embed.c: user/pipedemo.elf gen_embed.py
 	python3 gen_embed.py user/pipedemo.elf pipedemo_elf > $@
 
 pipedemo_embed.o: pipedemo_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 jobctl_embed.c: user/jobctl.elf gen_embed.py
 	python3 gen_embed.py user/jobctl.elf jobctl_elf > $@
 
 jobctl_embed.o: jobctl_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 uptime_embed.c: user/uptime.elf gen_embed.py
 	python3 gen_embed.py user/uptime.elf uptime_elf > $@
 
 uptime_embed.o: uptime_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 date_embed.c: user/date.elf gen_embed.py
 	python3 gen_embed.py user/date.elf date_elf > $@
 
 date_embed.o: date_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 printenv_embed.c: user/printenv.elf gen_embed.py
 	python3 gen_embed.py user/printenv.elf printenv_elf > $@
 
 printenv_embed.o: printenv_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 cputime_embed.c: user/cputime.elf gen_embed.py
 	python3 gen_embed.py user/cputime.elf cputime_elf > $@
 
 cputime_embed.o: cputime_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 shmtest_embed.c: user/shmtest.elf gen_embed.py
 	python3 gen_embed.py user/shmtest.elf shmtest_elf > $@
 
 shmtest_embed.o: shmtest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 semtest_embed.c: user/semtest.elf gen_embed.py
 	python3 gen_embed.py user/semtest.elf semtest_elf > $@
 
 semtest_embed.o: semtest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 mmaptest_embed.c: user/mmaptest.elf gen_embed.py
 	python3 gen_embed.py user/mmaptest.elf mmaptest_elf > $@
 
 mmaptest_embed.o: mmaptest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 threadtest_embed.c: user/threadtest.elf gen_embed.py
 	python3 gen_embed.py user/threadtest.elf threadtest_elf > $@
 
 threadtest_embed.o: threadtest_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 threadexit_embed.c: user/threadexit.elf gen_embed.py
 	python3 gen_embed.py user/threadexit.elf threadexit_elf > $@
 
 threadexit_embed.o: threadexit_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 execguard_embed.c: user/execguard.elf gen_embed.py
 	python3 gen_embed.py user/execguard.elf execguard_elf > $@
 
 execguard_embed.o: execguard_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 ramgrow_embed.c: user/ramgrow.elf gen_embed.py
 	python3 gen_embed.py user/ramgrow.elf ramgrow_elf > $@
 
 ramgrow_embed.o: ramgrow_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 pathlim_embed.c: user/pathlim.elf gen_embed.py
 	python3 gen_embed.py user/pathlim.elf pathlim_elf > $@
 
 pathlim_embed.o: pathlim_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 redirref_embed.c: user/redirref.elf gen_embed.py
 	python3 gen_embed.py user/redirref.elf redirref_elf > $@
 
 redirref_embed.o: redirref_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 fatref_embed.c: user/fatref.elf gen_embed.py
 	python3 gen_embed.py user/fatref.elf fatref_elf > $@
 
 fatref_embed.o: fatref_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 fatgrow_embed.c: user/fatgrow.elf gen_embed.py
 	python3 gen_embed.py user/fatgrow.elf fatgrow_elf > $@
 
 fatgrow_embed.o: fatgrow_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 forkredir_embed.c: user/forkredir.elf gen_embed.py
 	python3 gen_embed.py user/forkredir.elf forkredir_elf > $@
 
 forkredir_embed.o: forkredir_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 sigflags_embed.c: user/sigflags.elf gen_embed.py
 	python3 gen_embed.py user/sigflags.elf sigflags_elf > $@
 
 sigflags_embed.o: sigflags_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 sigretguard_embed.c: user/sigretguard.elf gen_embed.py
 	python3 gen_embed.py user/sigretguard.elf sigretguard_elf > $@
 
 sigretguard_embed.o: sigretguard_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 killthread_embed.c: user/killthread.elf gen_embed.py
 	python3 gen_embed.py user/killthread.elf killthread_elf > $@
 
 killthread_embed.o: killthread_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 killwait_embed.c: user/killwait.elf gen_embed.py
 	python3 gen_embed.py user/killwait.elf killwait_elf > $@
 
 killwait_embed.o: killwait_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 bigseek_embed.c: user/bigseek.elf gen_embed.py
 	python3 gen_embed.py user/bigseek.elf bigseek_elf > $@
 
 bigseek_embed.o: bigseek_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 stress_embed.c: user/stress.elf gen_embed.py
 	python3 gen_embed.py user/stress.elf stress_elf > $@
 
 stress_embed.o: stress_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 ush_embed.c: user/ush.elf gen_embed.py
 	python3 gen_embed.py user/ush.elf ush_elf > $@
 
 ush_embed.o: ush_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 # Embedded read-only FAT16 image mounted at /fat.
 fat16.img: gen_fat16.py
@@ -760,17 +763,24 @@ fat16_image_embed.c: fat16.img gen_embed.py
 	python3 gen_embed.py fat16.img fat16_image > $@
 
 fat16_image_embed.o: fat16_image_embed.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEPFLAGS)
 
 # Kernel binary
 kernel.bin: $(OBJS) linker.ld
 	$(CC) -T linker.ld -o kernel.bin $(LDFLAGS) $(OBJS) -lgcc
+
+# Rebuild existing objects when build rules change, including checkouts that
+# predate dependency files. Keep includes after real targets so a .d file
+# cannot become make's default goal. Assembly has no C headers or .d output.
+$(OBJS): Makefile
+-include $(KERNEL_DEPS)
 
 $(ATA_IMAGE): gen_ata_image.py
 	python3 gen_ata_image.py $@
 
 # Utility targets
 clean:
+	rm -f $(KERNEL_DEPS)
 	rm -f $(OBJS) kernel.bin $(ATA_IMAGE) hello_embed.c cat_embed.c fault_embed.c badptr_embed.c worker_embed.c spawner_embed.c orphan_embed.c sleeptest_embed.c fstest_embed.c echo_embed.c malloctest_embed.c wc_embed.c grep_embed.c head_embed.c tail_embed.c sort_embed.c sigtest_embed.c sigipc_embed.c forktest_embed.c execdemo_embed.c demandtest_embed.c sigchld_embed.c waitdemo_embed.c cwddemo_embed.c statdemo_embed.c cowstress_embed.c alarmdemo_embed.c pausedemo_embed.c pipedemo_embed.c jobctl_embed.c uptime_embed.c date_embed.c printenv_embed.c cputime_embed.c shmtest_embed.c semtest_embed.c mmaptest_embed.c threadtest_embed.c threadexit_embed.c execguard_embed.c ramgrow_embed.c pathlim_embed.c redirref_embed.c fatref_embed.c fatgrow_embed.c forkredir_embed.c sigretguard_embed.c sigflags_embed.c killthread_embed.c killwait_embed.c bigseek_embed.c stress_embed.c ush_embed.c fat16.img fat16_image_embed.c
 	rm -rf isodir miniOS.iso
 	rm -f $(UNIT_BINS) $(BENCH_BINS)
