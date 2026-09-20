@@ -55,7 +55,7 @@ enum syscall_number {
     SYS_SEM_POST    = 47,  /* V: increment and wake a waiter */
     SYS_MMAP        = 48,  /* allocate demand-paged pages in the mmap region */
     SYS_THREAD_CREATE = 49, /* spawn a thread sharing this address space */
-    SYS_THREAD_JOIN   = 50, /* block until all threads have exited */
+    SYS_THREAD_JOIN   = 50, /* main joins all workers; 0 on success, else -1 */
     SYS_MUNMAP        = 51, /* release pages previously obtained from SYS_MMAP */
     SYS_DUP           = 52, /* duplicate a descriptor into the lowest free fd */
 };

@@ -1102,8 +1102,7 @@ static void syscall_handler(registers_t *regs) {
             regs->eax = (uint32_t)sys_thread_create(regs->ebx, regs->ecx);
             break;
         case SYS_THREAD_JOIN:
-            process_thread_join();
-            regs->eax = 0;
+            regs->eax = (uint32_t)process_thread_join();
             break;
         case SYS_TIME:
             regs->eax = (uint32_t)sys_time((void *)regs->ebx);

@@ -544,3 +544,45 @@ Status: complete
 | 突變 pattern 對不上（CRLF 樹用 `\n`） | Python 字面替換 + LF 正規化後依原行尾寫回 |
 | `bigseek` 誤用 API 導致節點數飄移（Session 25） | `sys_create` 已回傳開啟的 fd；測試改為**斷言**清理成功 |
 | 往返測試沒模型化 handler 的 `ret`，在正確程式上也因錯的理由通過（Session 33） | 突變測試逼出來；補上 `useresp += 4` 才是真的往返 |
+
+## 2026-09-19: Reject worker self-wait in thread_join
+Status: implementation and local verification complete; full CI results recorded in the pull request
+
+- Refreshed main (`e63d4218`), recent commits, issues, PRs, CI, roadmap and TODOs.
+  There were no open issues. PR #36 (interrupt DF) and #37 (timer slot lifetime)
+  remained open and green; neither implements the join contract. Based this
+  independent change on main rather than either unmerged patch.
+- The all-worker count includes a worker caller. Unchanged main reproduced
+  three named native failures (a self-wait reached the model's stuck-block
+  limit). With the new ring-3 workload, unchanged production code also failed
+  `[stress thread join caller liveness FAIL]`; its watchdog killed/reaped the
+  deadlocked child instead of relying on a QEMU timeout.
+- Only the process main task may join all workers. It retains the killable
+  condition loop and returns 0; other callers return -1 without blocking or
+  altering ownership. Syscall 50 and the user wrapper expose that result.
+  Existing callers that ignore the result remain source compatible.
+- Expanded the existing process suite to 532 checks: absent/kernel callers,
+  one/two workers before/after main exit, a main joining two workers through
+  spurious wakes, repeated empty joins, and kill before/after blocking.
+- The ring-3 child creates two worker join callers, checks errors, waits for
+  completion from main, repeats an empty join and frees both stacks. The
+  separate parent bounds and reaps a deadlock. Both stress rounds require the
+  new success marker and retain the existing exact resource snapshots.
+- Local native and ASan/UBSan process builds passed all 532 checks. Three
+  isolated native mutants (missing caller guard, early return with one worker
+  live, and unkillable wait) each failed the corresponding named assertion.
+  Added permanent QEMU caller-guard and lost-result mutants (nine total).
+- Fixed-kernel QEMU stress passed twice in one boot with stable PMM/heap
+  snapshots and zero user spaces, zombies, blocked tasks or sleeping slots.
+  Both new QEMU mutants produced their required liveness/result failures.
+  Kernel build, 39 Python checker tests, inventory/syscall ABI/test owner/
+  GNU-stack checks, incremental user build, cppcheck and diff checks passed.
+- The scratch QEMU adapter changes only the monitor transport to stdio;
+  this runtime cannot create Unix monitor sockets or execute hosted i386
+  binaries. Standard make test/sanitize/static-analysis/mutation gates
+  run unchanged in GitHub Actions; consult the PR for their final results.
+- Findings/progress are recorded here because the base findings.md and
+  progress.md contain non-UTF-8 binary data; those files were not rewritten.
+- Limits: join remains a main-only all-worker barrier, without a target TID,
+  per-worker exit statuses, or EINTR. Signal delivery and thread creation
+  semantics are unchanged.

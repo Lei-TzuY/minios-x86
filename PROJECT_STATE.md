@@ -130,6 +130,11 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   （**注意**：這也是 F20/F21/CAP12 之所以必要的原因——威脅模型因此改變。）
 - **FEAT2**：新增 `dup()` 系統呼叫，配置最低可用 fd；檔案與 pipe end 都取得獨立
   參照，並保留來源描述子的目前 offset。所有權語意由 hosted fd regression 守護。
+- **2026-09-19 thread join caller 修正**：`thread_count` 只計 worker；原版允許
+  worker 呼叫 join-all，會永遠等自己的 exit。現在只有主 task 可等待所有 worker，
+  完成回傳 0；worker／無 process 呼叫者立即回傳 -1，syscall 與 wrapper 傳遞結果。
+  原生測試涵蓋雙 worker、main 已退出、偽喚醒與 kill；ring-3 使用獨立父行程 watchdog
+  驗證 liveness、回傳值與回收，另有 caller guard／syscall result 兩個永久 mutant。
 - **FAIR1**：blocked 串列改 FIFO 喚醒。
 - **PERF1**：memcpy/memset 4-byte 批次（對齊時 3–5x；**來源/目的相對未對齊時
   無改善**，已誠實記錄）。
@@ -187,8 +192,8 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   scheduler/context switch、帶著 heap/mmap/fd/pipe 輪流遭 #PF/#DE/#UD/#GP 的異常退出、
   syscall pointer validation、RAMFS/DiskFS/FAT16、threads/processes、fd/pipe/process/node
   exhaustion 與反覆 fork/exec/create/destroy。monitor-driven harness 在同次開機跑兩輪，
-  要求十個具名階段各通過兩次，並逐欄比較 PMM、heap、user spaces、process/task/timer、
-  RAMFS 快照；另有 ASan/UBSan、cppcheck 與 7 個具名 QEMU capacity/leak/exception mutants
+  要求十一個具名階段各通過兩次，並逐欄比較 PMM、heap、user spaces、process/task/timer、
+  RAMFS 快照；另有 ASan/UBSan、cppcheck 與 9 個具名 QEMU capacity/leak/exception/join mutants
   的 CI gate。
 
 目前 25 套件，`make unit` <1 秒：
@@ -197,7 +202,7 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37455 /
 diskfs 979 / pipe 89 / sem 38 / timer 63 / task 82 / rtc 35 /
 process-env 47 / syscall-valid 46 / paging-cow 31 / elf 146 / ramfs 4335 /
-kb 1675 / procfs 183 / vga 4769 / ata 8995 / fdtable 489 / process 419 /
+kb 1675 / procfs 183 / vga 4769 / ata 8995 / fdtable 489 / process 532 /
 signal 103 / vm-lifecycle 36
 ```
 
@@ -207,6 +212,7 @@ signal 103 / vm-lifecycle 36
 
 | 決策 | 理由 |
 |---|---|
+| `thread_join` 只允許 main task | join-all 的 worker 計數包含呼叫者本身，worker 等歸零會自我死鎖。 |
 | 全域 cli 併發模型 | 單核教學系統的簡化選擇。「沒上鎖」多為設計而非 bug。 |
 | 執行檔解析**不**相對 cwd | 否則 ush `cd fat` 後跑 `cat` 會壞（`cat` 在 `/cat`）。 |
 | kill 不做 EINTR 上拋 | 終止不需回到使用者空間，`task_exit` 即可；EINTR 會動到 ABI。 |

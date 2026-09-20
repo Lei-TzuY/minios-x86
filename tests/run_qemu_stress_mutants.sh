@@ -101,4 +101,16 @@ run_mutant \
     '        task_exit(-2); /* mutant: corrupt generic exception status */' \
     '[stress fault isolation status FAIL]'
 
-echo "QEMU stress mutations killed (7/7)"
+run_mutant \
+    process.c \
+    '    if (!process || task_get_current() != process->task) {' \
+    '    if (!process) { /* mutant: let workers wait for their own exit */' \
+    '[stress thread join caller liveness FAIL]'
+
+run_mutant \
+    syscall.c \
+    '            regs->eax = (uint32_t)process_thread_join();' \
+    '            process_thread_join(); regs->eax = 0; /* mutant: hide rejection */' \
+    '[stress thread join result FAIL]'
+
+echo "QEMU stress mutations killed (9/9)"

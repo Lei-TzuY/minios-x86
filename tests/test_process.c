@@ -1611,6 +1611,158 @@ static void test_two_threads_only_the_last_finishes(void) {
     expect_no_underflow();
 }
 
+/* Each join owns its escape target so a regression becomes a named failure,
+ * even when the worker would stay parked waiting for itself forever. */
+static int run_join(int32_t *result) {
+    int escaped = setjmp(g_exit_jmp);
+
+    if (escaped == 0) *result = process_thread_join();
+    return escaped;
+}
+
+static void test_join_requires_a_process(void) {
+    int32_t result = 123;
+
+    TEST("join rejects callers without a process");
+    reset_world();
+    CHECK_EQ(run_join(&result), 0);
+    CHECK_EQ(result, -1);
+    g_current_task = create_task(NULL, NULL, NULL, NULL, 0, 0);
+    CHECK(g_current_task != NULL);
+    result = 123;
+    CHECK_EQ(run_join(&result), 0);
+    CHECK_EQ(result, -1);
+    CHECK_EQ(g_block_calls, 0);
+}
+
+static void test_join_rejects_workers(void) {
+    for (int workers = 1; workers <= 2; workers++) {
+        for (int main_exited = 0; main_exited <= 1; main_exited++) {
+            process_t *p;
+
+            TEST("worker join rejects self-wait without changing ownership");
+            reset_world();
+            p = launch("join", 0);
+            CHECK(p != NULL);
+            if (!p) return;
+            p->parent_pid = 42;
+            g_current_task = p->task;
+            for (int i = 0; i < workers; i++) {
+                CHECK(process_thread_create(0x4000, 0x5000) > 0);
+            }
+            if (main_exited) exit_task(p->task, 23);
+
+            for (int i = 0; i < workers; i++) {
+                int32_t result = 123;
+
+                g_current_task = &g_tasks[i + 1];
+                CHECK_EQ(run_join(&result), 0);
+                CHECK_EQ(result, -1);
+                CHECK_EQ(g_block_calls, 0);
+                CHECK_EQ(p->thread_count, workers);
+                CHECK_EQ(p->main_exited, main_exited);
+                CHECK_EQ(p->state, PROCESS_RUNNING);
+                CHECK(p->address_space == &g_spaces[0]);
+                CHECK_EQ(g_space_destroyed[0], 0);
+                CHECK_EQ(g_close_files_calls, 0);
+            }
+        }
+    }
+}
+
+typedef struct join_script {
+    process_t *process;
+    task_t *workers[2];
+    int step;
+} join_script_t;
+
+static void join_progress(void *arg) {
+    join_script_t *script = (join_script_t *)arg;
+
+    CHECK(g_last_block_task == script->process->task);
+    CHECK(g_last_block_channel == &script->process->thread_count);
+    if (script->step == 0 || script->step == 2) {
+        /* A signal can wake main even though no worker has finished. */
+        task_wake_task(script->process->task);
+    } else {
+        exit_task(script->workers[script->step / 2], 0);
+    }
+    script->step++;
+}
+
+static void test_join_waits_for_all_workers(void) {
+    process_t *p;
+    join_script_t script;
+    int32_t result = 123;
+
+    TEST("main join waits for every worker and rechecks spurious wakes");
+    reset_world();
+    p = launch("join", 0);
+    CHECK(p != NULL);
+    if (!p) return;
+    g_current_task = p->task;
+    CHECK_EQ(run_join(&result), 0);
+    CHECK_EQ(result, 0);
+    CHECK_EQ(g_block_calls, 0);
+
+    for (int i = 0; i < 2; i++) {
+        CHECK(process_thread_create(0x4000, 0x5000) > 0);
+        script.workers[i] = &g_tasks[i + 1];
+    }
+    script.process = p;
+    script.step = 0;
+    g_on_block = join_progress;
+    g_on_block_arg = &script;
+    g_on_block_remaining = 4;
+    CHECK_EQ(run_join(&result), 0);
+    CHECK_EQ(result, 0);
+    CHECK_EQ(script.step, 4);
+    CHECK_EQ(g_block_calls, 4);
+    CHECK_EQ(g_stuck_blocks, 0);
+    CHECK_EQ(p->thread_count, 0);
+    CHECK_EQ(p->state, PROCESS_RUNNING);
+    CHECK_EQ(g_space_destroyed[0], 0);
+    CHECK_EQ(g_close_files_calls, 0);
+    CHECK_EQ(run_join(&result), 0);  /* Repeated joins are successful no-ops. */
+    CHECK_EQ(result, 0);
+    CHECK_EQ(g_block_calls, 4);
+}
+
+static void kill_joiner(void *arg) {
+    process_t *p = (process_t *)arg;
+
+    p->task->kill_pending = 1;
+    task_wake_task(p->task);
+}
+
+static void test_join_remains_killable(void) {
+    for (int while_blocked = 0; while_blocked <= 1; while_blocked++) {
+        process_t *p;
+        int32_t result = 123;
+
+        TEST("main join honours kill before and after blocking");
+        reset_world();
+        p = launch("join", 0);
+        CHECK(p != NULL);
+        if (!p) return;
+        g_current_task = p->task;
+        CHECK(process_thread_create(0x4000, 0x5000) > 0);
+        if (while_blocked) {
+            g_on_block = kill_joiner;
+            g_on_block_arg = p;
+            g_on_block_remaining = 1;
+        } else {
+            p->task->kill_pending = 1;
+        }
+        CHECK_EQ(run_join(&result), 1);
+        CHECK_EQ(g_task_exit_status, TASK_KILL_STATUS);
+        CHECK_EQ(result, 123);  /* Termination never returns to user mode. */
+        CHECK_EQ(g_block_calls, while_blocked);
+        CHECK_EQ(p->thread_count, 1);
+        CHECK_EQ(g_space_destroyed[0], 0);
+    }
+}
+
 static void test_multiple_kill_requests_are_independent(void) {
     process_t *first, *second;
     int escaped;
@@ -1706,7 +1858,11 @@ int main(void) {
     test_alarm_deadline_at_zero_fires();
     test_exit_signals_the_parent();
 
-    /* Uses g_exit_jmp for expected task exits, so keep it last. */
+    /* These install their own g_exit_jmp targets, so keep them last. */
+    test_join_requires_a_process();
+    test_join_rejects_workers();
+    test_join_waits_for_all_workers();
+    test_join_remains_killable();
     test_multiple_kill_requests_are_independent();
 
     TEST_REPORT("process");
