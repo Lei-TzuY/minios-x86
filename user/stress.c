@@ -491,6 +491,75 @@ static int test_threads_and_context_switches(void) {
     return 0;
 }
 
+static volatile int disk_workers_done[2];
+
+static void disk_operation_worker(int id) {
+    const char *path = id ? "/disk/op-right" : "/disk/op-left";
+    unsigned char data[96], readback[96];
+    int shared = sys_open("/disk/op-shared");
+    int offset = id ? 97 : 17;
+
+    if (shared < 0) sys_exit(94);
+    for (int round = 0; round < 6; round++) {
+        for (int j = 0; j < 96; j++)
+            data[j] = (unsigned char)(0x80 + id * 16 + round + j);
+        int fd = sys_create(path);
+        if (fd < 0 || sys_seek(fd, 450, 0) != 450 ||
+            sys_write_file(fd, (const char *)data, 96) != 96 ||
+            sys_seek(shared, offset, 0) != offset ||
+            sys_write_file(shared, (const char *)data, 7) != 7)
+            sys_exit(95);
+        sys_yield();
+        if (sys_seek(fd, 450, 0) != 450 ||
+            sys_read_file(fd, (char *)readback, 96) != 96 ||
+            !bytes_equal(data, readback, 96) || sys_close(fd) != 0 ||
+            sys_unlink(path) != 0)
+            sys_exit(96);
+        sys_yield();
+    }
+    if (sys_close(shared) != 0) sys_exit(97);
+    disk_workers_done[id] = 1;
+    sys_exit(0);
+}
+
+static void disk_left_worker(void) { disk_operation_worker(0); }
+static void disk_right_worker(void) { disk_operation_worker(1); }
+
+/* Real syscall/VFS/PIO regression with independent descriptors, namespace
+ * churn, sector-spanning writes, and both workers patching one shared sector.
+ * Suspended-I/O contention itself is covered by the hosted operation suite. */
+static int test_diskfs_operations(void) {
+    unsigned char expected[512], actual[512];
+    char *left = (char *)sys_mmap(THREAD_STACK_PAGES);
+    char *right = (char *)sys_mmap(THREAD_STACK_PAGES);
+    int fd = sys_create("/disk/op-shared");
+
+    if (!left || !right || fd < 0) return fail("diskfs operation setup");
+    for (int i = 0; i < 512; i++) expected[i] = (unsigned char)(i * 13 + 7);
+    if (sys_write_file(fd, (const char *)expected, 512) != 512)
+        return fail("diskfs operation seed");
+    disk_workers_done[0] = disk_workers_done[1] = 0;
+    if (sys_thread_create(disk_left_worker, left + THREAD_STACK_PAGES * PAGE_SIZE) < 0 ||
+        sys_thread_create(disk_right_worker, right + THREAD_STACK_PAGES * PAGE_SIZE) < 0)
+        return fail("diskfs operation workers");
+    sys_thread_join();
+    for (int id = 0; id < 2; id++) {
+        if (!disk_workers_done[id]) return fail("diskfs operation worker result");
+        for (int j = 0; j < 7; j++)
+            expected[(id ? 97 : 17) + j] = (unsigned char)(0x80 + id * 16 + 5 + j);
+    }
+    if (sys_seek(fd, 0, 0) != 0 ||
+        sys_read_file(fd, (char *)actual, 512) != 512 ||
+        !bytes_equal(expected, actual, 512))
+        return fail("diskfs operation contents");
+    if (sys_close(fd) != 0 || sys_unlink("/disk/op-shared") != 0 ||
+        sys_munmap(left, THREAD_STACK_PAGES) != 0 ||
+        sys_munmap(right, THREAD_STACK_PAGES) != 0)
+        return fail("diskfs operation cleanup");
+    pass("diskfs operations");
+    return 0;
+}
+
 static int test_process_exhaustion(void) {
     int children[15];
 
@@ -589,6 +658,7 @@ int main(void) {
         test_filesystems() != 0 ||
         test_interrupts_and_preemption() != 0 ||
         test_threads_and_context_switches() != 0 ||
+        test_diskfs_operations() != 0 ||
         test_process_exhaustion() != 0 ||
         test_repeated_lifecycle() != 0) {
         write_str("[stress FAILED]\n");

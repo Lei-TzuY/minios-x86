@@ -15,6 +15,7 @@ sanitizer_bins=(
     tests/test_heap
     tests/test_fat16
     tests/test_diskfs
+    tests/test_diskfs_operations
     tests/test_pipe
     tests/test_sem
     tests/test_timer

@@ -1,5 +1,54 @@
 # Task Plan — miniOS 全面審查與持續改善
 
+## DiskFS operation serialization run
+
+- Freshly inspected main `e63d4218ea91069506b05944ead5a9198bf8568a`, recent
+  storage/process commits, open PRs #36–#39 and their successful CI, current
+  roadmap, DiskFS/VFS/syscall/ATA code, scheduler and teardown paths, and tests.
+  No open non-PR issues. Re-fetched main before delivery; the base is unchanged.
+- Confirmed the distinction between implicit syscall serialization (IF=0,
+  nonblocking PIO) and preemptible kernel-shell callers. The latter can already
+  interleave sector read/modify/write and metadata publication. Blocking ATA
+  would expose the same gap inside syscalls.
+- Implemented one private sleepable volume gate with one release path per public
+  entry; internal helpers do not reacquire it. Reference callbacks remain IRQ-only
+  because `task_exit` invokes process teardown after changing `current_task`.
+  VFS read/write pins cover gate wait and I/O; node publication is IRQ-atomic
+  because generic VFS dispatch reads callback pointers before entering DiskFS.
+- Write errors take the volume offline; retained VFS nodes reject further I/O
+  while still permitting close/recovery. Physical sector rollback is not claimed.
+  Architecture, source evidence, cancellation and future-driver requirements are
+  in `docs/DISKFS_SERIALIZATION.md`.
+- Added a 1,486-check suspended-stack DiskFS/VFS suite to `make unit` and the
+  ASan/UBSan selection. It exercises PIO-return preemption and future device
+  sleeps, both partial-write orders, coherent reads, namespace persistence,
+  mount/format, spurious/kill wakeups, reference cleanup and overtaking callers,
+  and failures at every data/directory/superblock write plus RMW reads.
+- The unchanged main implementation fails actual byte comparisons (lost updates,
+  mixed read versions, lost directory entry and slot-reuse corruption). Five
+  isolated mutants are rejected by named assertions: missing ownership, missing
+  wakeup, missing queued-read pin, missing offline-read check, and a killable gate
+  wait. Mutants run in temporary copies; the reviewed source stays unchanged.
+- Added a ring-3 two-worker filesystem test to the existing stress workload and
+  required its success marker twice. Local QEMU stress passed twice with stable
+  resources using a scratch stdio-monitor adapter and unchanged workload/assertions.
+- Local clean kernel build passed without warnings. ATA-absent, disk boot and
+  real GRUB/ISO boot gates passed. The focused operation suite passed ASan/UBSan
+  on the 64-bit host; all Python regressions, inventory/ABI/registration/ownership/
+  GNU-stack checks, shell syntax, user incremental build and cppcheck passed.
+- The container cannot execute hosted i386 binaries or create AF_UNIX sockets.
+  Standard `make test`, `make sanitize` and `make static-analysis` encounter that
+  runtime constraint; exact full gates, shell regression and existing seven
+  QEMU mutants must run in GitHub Actions. Final hosted results are recorded
+  in the PR rather than claiming local i386 success here.
+- Self-review checked gate scope, all error exits, non-reentrancy, wakeup and
+  cancellation, retired-stack close, node publication, and in-flight references.
+  No VFS ABI, scheduler, ATA hardware protocol, on-disk format or existing check
+  was rewritten. Future targets: ATA IRQ request lifecycle, shared descriptor
+  offset/lifetime contracts across sleep, and DiskFS crash-consistent metadata.
+- Existing `findings.md` and `progress.md` contain non-UTF-8 binary data on main;
+  this section records this run's findings/progress without overwriting them.
+
 ## Goal
 對 miniOS（32-bit x86 教學型作業系統，~33K LOC C/ASM，位於本專案根目錄）進行全面程式碼審查，
 找出未完成項目、Bug、競態條件、記憶體安全問題、效能瓶頸、架構缺陷與技術債，依優先級修復、

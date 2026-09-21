@@ -104,6 +104,10 @@ A unified VFS over:
 
 Programs can be executed from mounted filesystems rather than only from the built-in RAMFS.
 
+DiskFS serializes complete volume operations with a sleepable gate and keeps
+VFS reference cleanup nonblocking. See [the storage synchronization contract](docs/DISKFS_SERIALIZATION.md)
+for ownership, failure handling, tests, and the remaining blocking-ATA work.
+
 ### User land
 - 52 system calls
 - 53 user programs / demos
