@@ -492,6 +492,7 @@ static int test_threads_and_context_switches(void) {
 }
 
 static volatile int disk_workers_done[2];
+static int disk_shared_descriptor;
 
 static void disk_operation_worker(int id) {
     const char *path = id ? "/disk/op-right" : "/disk/op-left";
@@ -515,6 +516,12 @@ static void disk_operation_worker(int id) {
             !bytes_equal(data, readback, 96) || sys_close(fd) != 0 ||
             sys_unlink(path) != 0)
             sys_exit(96);
+        /* Both threads use this exact fd, so the running offset belongs to
+         * the descriptor, not to either worker. Each 3-byte record is one
+         * operation; arbitrary worker order must retain all twelve records. */
+        char record[3] = { (char)('L' + id), (char)('0' + round), '\n' };
+        if (sys_write_file(disk_shared_descriptor, record, sizeof(record)) !=
+            (int)sizeof(record)) sys_exit(98);
         sys_yield();
     }
     if (sys_close(shared) != 0) sys_exit(97);
@@ -526,8 +533,8 @@ static void disk_left_worker(void) { disk_operation_worker(0); }
 static void disk_right_worker(void) { disk_operation_worker(1); }
 
 /* Real syscall/VFS/PIO regression with independent descriptors, namespace
- * churn, sector-spanning writes, and both workers patching one shared sector.
- * Suspended-I/O contention itself is covered by the hosted operation suite. */
+ * churn, sector-spanning writes, shared-sector patches, and an exact shared
+ * descriptor. Suspended-I/O contention is covered by the hosted suites. */
 static int test_diskfs_operations(void) {
     unsigned char expected[512], actual[512];
     char *left = (char *)sys_mmap(THREAD_STACK_PAGES);
@@ -538,6 +545,8 @@ static int test_diskfs_operations(void) {
     for (int i = 0; i < 512; i++) expected[i] = (unsigned char)(i * 13 + 7);
     if (sys_write_file(fd, (const char *)expected, 512) != 512)
         return fail("diskfs operation seed");
+    disk_shared_descriptor = sys_create("/disk/op-records");
+    if (disk_shared_descriptor < 0) return fail("shared descriptor setup");
     disk_workers_done[0] = disk_workers_done[1] = 0;
     if (sys_thread_create(disk_left_worker, left + THREAD_STACK_PAGES * PAGE_SIZE) < 0 ||
         sys_thread_create(disk_right_worker, right + THREAD_STACK_PAGES * PAGE_SIZE) < 0)
@@ -552,6 +561,27 @@ static int test_diskfs_operations(void) {
         sys_read_file(fd, (char *)actual, 512) != 512 ||
         !bytes_equal(expected, actual, 512))
         return fail("diskfs operation contents");
+    {
+        char records[36];
+        int seen[2][6] = {{0}};
+        int duplicate = sys_dup(disk_shared_descriptor);
+        if (sys_seek(disk_shared_descriptor, 0, 1) != 36 || duplicate < 0 ||
+            sys_seek(duplicate, 0, 1) != 36 ||
+            sys_seek(disk_shared_descriptor, 0, 0) != 0 ||
+            sys_read_file(disk_shared_descriptor, records, sizeof(records)) != 36)
+            return fail("shared descriptor offset");
+        for (int i = 0; i < 36; i += 3) {
+            int id = records[i] - 'L', round = records[i + 1] - '0';
+            if (id < 0 || id > 1 || round < 0 || round >= 6 ||
+                records[i + 2] != '\n' || seen[id][round]++)
+                return fail("shared descriptor records");
+        }
+        if (sys_close(disk_shared_descriptor) != 0 ||
+            sys_unlink("/disk/op-records") != -1 || sys_close(duplicate) != 0 ||
+            sys_unlink("/disk/op-records") != 0)
+            return fail("shared descriptor cleanup");
+        pass("shared descriptor operations");
+    }
     if (sys_close(fd) != 0 || sys_unlink("/disk/op-shared") != 0 ||
         sys_munmap(left, THREAD_STACK_PAGES) != 0 ||
         sys_munmap(right, THREAD_STACK_PAGES) != 0)

@@ -39,7 +39,7 @@ UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_fs tests/test_pmm \
             tests/test_process_env tests/test_syscall_valid \
             tests/test_paging_cow tests/test_elf tests/test_ramfs \
             tests/test_kb tests/test_procfs tests/test_vga tests/test_ata \
-            tests/test_fdtable tests/test_process tests/test_signal \
+            tests/test_fdtable tests/test_fd_operations tests/test_process tests/test_signal \
             tests/test_vm_lifecycle
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
@@ -151,6 +151,17 @@ tests/test_fdtable: tests/test_fdtable.c tests/test.h syscall.c syscall.h \
                     process.h fs.h pipe.h paging.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
 	    -Wl,--gc-sections tests/test_fdtable.c -o $@
+
+# Suspended syscall stacks exercise real VFS/DiskFS and pipe lifetime behavior.
+# Only hardware, scheduler switching, user mapping queries and allocation are
+# modeled. Real user buffers live at USER_EXT_BASE (32 MiB), below the ASan
+# shadow mapping on both hosted architectures; run UBSan in the normal gate too.
+tests/test_fd_operations: tests/test_fd_operations.c tests/test.h syscall.c \
+                          syscall.h diskfs.c diskfs.h fs.c fs.h ramfs.c ramfs.h \
+                          pipe.c pipe.h irq.h task.h process.h utils.c utils.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -pthread -ffunction-sections -fdata-sections \
+	    -fsanitize=undefined -fno-sanitize-recover=all -Wl,--gc-sections \
+	    tests/test_fd_operations.c fs.c ramfs.c pipe.c utils.c -o $@
 
 # The process lifecycle state machine. process.c is included directly to reach
 # its statics and the three internal exit paths; the scheduler is MODELLED

@@ -94,8 +94,10 @@ still need driver-level serialization when requests become blocking.
 The VFS still returns borrowed pointers; kernel clients must retain references
 across later node use. This change does not make whole path traversals, `stat`
 snapshots, descriptor offsets or caller user buffers into transactions. Shared
-descriptor close/reuse and user-buffer lifetime across a blocking syscall need
-their own syscall-layer contracts before a general blocking-I/O rollout. The
+descriptor close/reuse for fd 3–10 is now covered by the syscall-layer gates
+in [descriptor serialization](DESCRIPTOR_SERIALIZATION.md). Standard streams
+and user-buffer lifetime during VFS/device sleep still need their own contracts
+before a general blocking-I/O rollout. The
 gate is single-core and does not promise strict fairness or SMP support.
 
 ## Executable evidence

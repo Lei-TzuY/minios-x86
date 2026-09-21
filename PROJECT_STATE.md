@@ -17,7 +17,7 @@
 | `tests/` 原生單元測試 | ~12,700 行 |
 | 系統呼叫 | 52 |
 | 使用者程式 | 53 |
-| 單元測試套件 | 26 |
+| 單元測試套件 | 27 |
 
 ### 子系統
 
@@ -191,7 +191,7 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   RAMFS 快照；另有 ASan/UBSan、cppcheck 與 7 個具名 QEMU capacity/leak/exception mutants
   的 CI gate。
 
-目前 26 套件，`make unit` <1 秒；DiskFS operation suite 另以 suspended pthread stacks 驗證 I/O 交錯：
+目前 27 套件，`make unit` <1 秒；DiskFS operation suite 另以 suspended pthread stacks 驗證 I/O 交錯：
 
 ```
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37455 /
@@ -229,7 +229,10 @@ signal 103 / vm-lifecycle 36
    metadata publication；open/close 保持不阻塞，read/write 在等待前取得暫時參照。
    native interleaving suite 與 ring-3 stress 覆蓋資料一致性及 cleanup。
    ATA 仍為 polling；下一步需要 driver request ownership、IRQ completion/timeout、
-   boot polling fallback，以及 syscall descriptor/buffer 的阻塞生命週期契約。
+   boot polling fallback，以及 standard streams/user buffers 的阻塞生命週期契約。
+   fd 3–10 的 descriptor gate 已涵蓋 I/O/offset commit、seek、fstat、close、dup/dup2、
+   fork copy；pipe 在阻塞前釋放 gate，最終 process cleanup 保持不阻塞。
+   詳見 `docs/DESCRIPTOR_SERIALIZATION.md`。
    詳見 `docs/DISKFS_SERIALIZATION.md`。
 
 2. **訊號遞送無法觸及阻塞中的 thread**（終止的部分已由 F19 修好）：

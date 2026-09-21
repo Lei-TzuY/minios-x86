@@ -593,3 +593,24 @@ Status: complete
 | 突變 pattern 對不上（CRLF 樹用 `\n`） | Python 字面替換 + LF 正規化後依原行尾寫回 |
 | `bigseek` 誤用 API 導致節點數飄移（Session 25） | `sys_create` 已回傳開啟的 fd；測試改為**斷言**清理成功 |
 | 往返測試沒模型化 handler 的 `ret`，在正確程式上也因錯的理由通過（Session 33） | 突變測試逼出來；補上 `useresp += 4` 才是真的往返 |
+
+
+## 2026-09-21 follow-up: indexed descriptor operations
+
+- Re-fetched main e63d4218 and PR #40 head e74d8875; all three PR workflows green.
+  PRs #36–#39 remain independent; no new code reviews or open non-PR issues.
+- Confirmed a caller-side gap with real syscall/VFS/DiskFS tests: serialized
+  DiskFS requests still receive stale shared descriptor offsets; completion can
+  also update a closed/reused slot. Current kernel PIO preemption reproduces it.
+- Added per-indexed-descriptor gates across file I/O and offset commit, seek,
+  fstat, close, dup/dup2 and fork copying. Sorted dup2 locking, empty destination
+  reservations and explicit payload copying preserve ownership without copying
+  lock state. Pipe waits and final process teardown remain outside the gate.
+- Added real suspended-stack tests, actual unmapping during descriptor wait,
+  and ring-3 shared-fd records. See docs/DESCRIPTOR_SERIALIZATION.md for evidence,
+  lookup semantics, lock order, cleanup and deliberately bounded scope.
+- Isolated previous-head and six targeted mutant checks fail named assertions;
+  the working source is never mutated in place. Native/ASan/UBSan, QEMU, static,
+  build and hosted CI results are recorded in the PR after final verification.
+- Existing findings.md/progress.md remain non-UTF-8 binary data, so this entry
+  records this run's findings and progress rather than rewriting those files.

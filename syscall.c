@@ -2,6 +2,7 @@
 #include "elf_loader.h"
 #include "fs.h"
 #include "kb.h"
+#include "irq.h"
 #include "paging.h"
 #include "pipe.h"
 #include "process.h"
@@ -28,9 +29,48 @@ typedef struct {
     fs_node_t *node;    /* OF_FILE */
     uint32_t   offset;  /* OF_FILE */
     pipe_t    *pipe;    /* OF_PIPE_* */
+    uint8_t    busy;    /* Slot ownership; never copied to another descriptor. */
 } open_file_t;
 
 static open_file_t open_files[MAX_PROCESSES][MAX_OPEN_FILES];
+
+/* A filesystem may sleep after receiving the offset. Keep the slot, node and
+ * offset together until that I/O commits; the volume gate cannot do this for
+ * its caller. Lookup happens AFTER acquiring ownership, including after every
+ * wake: a concurrent close/dup2 may have changed the slot while we waited.
+ *
+ * Callers enter through the IF=0 syscall gate. Short IRQ sections also make
+ * wait enrollment/wakeup atomic. Do not use task_block_killable here: fork may
+ * already own a child address space, and dup2 may hold its first slot lock.
+ * Filesystem waits must return through cleanup (see DiskFS's contract). */
+static void fd_operation_begin(open_file_t *entry) {
+    uint32_t flags = save_irq_disable();
+    while (entry->busy) task_block_current(&entry->busy);
+    entry->busy = 1;
+    restore_irq(flags);
+}
+
+static void fd_operation_end(open_file_t *entry) {
+    uint32_t flags = save_irq_disable();
+    entry->busy = 0;
+    task_wake_all(&entry->busy);
+    restore_irq(flags);
+}
+
+/* Copy ownership and the committed offset, never the source's lock state.
+ * The source is locked; dst is either locked or unpublished (dup/fork). */
+static void copy_fd_entry(open_file_t *dst, const open_file_t *src) {
+    dst->kind = src->kind;
+    dst->node = src->node;
+    dst->offset = src->offset;
+    dst->pipe = src->pipe;
+    switch (src->kind) {
+        case OF_FILE:   if (src->node) open_fs(src->node); break;
+        case OF_PIPE_R: pipe_ref_read(src->pipe); break;
+        case OF_PIPE_W: pipe_ref_write(src->pipe); break;
+        default: break;
+    }
+}
 
 static open_file_t *current_open_files(void) {
     process_t *process = process_get_current();
@@ -52,7 +92,7 @@ static int32_t alloc_fd(open_file_t *files, of_kind_t kind,
                         fs_node_t *node, pipe_t *pipe) {
     if (!files) return -1;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (files[i].kind == OF_NONE) {
+        if (files[i].kind == OF_NONE && !files[i].busy) {
             files[i].kind = kind;
             files[i].node = node;
             files[i].offset = 0;
@@ -210,48 +250,59 @@ int32_t sys_create(const char *name) {
     return fd;
 }
 
+/* Pipe I/O owns an endpoint reference internally, including kill cleanup.
+ * Release the slot before entering it: a full pipe must not prevent another
+ * thread from closing/replacing the descriptor. IF remains clear until the
+ * pipe takes its reference, so the saved endpoint cannot disappear between. */
 int32_t sys_read_file(int32_t fd, char *buffer, size_t count) {
     int index = user_fd_index(fd);
     open_file_t *files = current_open_files();
-    uint32_t bytes_read;
+    int32_t result = -1;
 
-    if (index < 0 || !files) return -1;
-    if (!user_buffer_valid(buffer, count)) return -1;
-
-    if (files[index].kind == OF_PIPE_R)
-        return (int32_t)pipe_read(files[index].pipe, (uint8_t *)buffer, count);
-    if (files[index].kind != OF_FILE) return -1;
-
-    bytes_read = read_fs(files[index].node,
-                         files[index].offset,
-                         count,
-                         (uint8_t *)buffer);
-    files[index].offset += bytes_read;
-    return (int32_t)bytes_read;
+    if (index < 0 || !files || !user_buffer_valid(buffer, count)) return -1;
+    open_file_t *entry = &files[index];
+    fd_operation_begin(entry);
+    /* A sibling can unmap while we wait for the descriptor. */
+    if (user_buffer_valid(buffer, count)) {
+        if (entry->kind == OF_PIPE_R) {
+            pipe_t *pipe = entry->pipe;
+            fd_operation_end(entry);
+            return (int32_t)pipe_read(pipe, (uint8_t *)buffer, count);
+        }
+        if (entry->kind == OF_FILE) {
+            uint32_t bytes = read_fs(entry->node, entry->offset, count,
+                                     (uint8_t *)buffer);
+            entry->offset += bytes;
+            result = (int32_t)bytes;
+        }
+    }
+    fd_operation_end(entry);
+    return result;
 }
 
 int32_t sys_write_file(int32_t fd, const char *buffer, size_t count) {
     int index = user_fd_index(fd);
     open_file_t *files = current_open_files();
-    uint32_t bytes_written;
+    int32_t result = -1;
 
-    if (index < 0 || !files) return -1;
-    if (!user_buffer_valid(buffer, count)) return -1;
-
-    if (files[index].kind == OF_PIPE_W)
-        return (int32_t)pipe_write(files[index].pipe,
-                                   (const uint8_t *)buffer, count);
-    if (files[index].kind != OF_FILE || !files[index].node->write) return -1;
-    if (count == 0) return 0;
-
-    bytes_written = write_fs(files[index].node,
-                             files[index].offset,
-                             count,
-                             (uint8_t *)buffer);
-    if (bytes_written == 0) return -1;
-
-    files[index].offset += bytes_written;
-    return (int32_t)bytes_written;
+    if (index < 0 || !files || !user_buffer_valid(buffer, count)) return -1;
+    open_file_t *entry = &files[index];
+    fd_operation_begin(entry);
+    if (user_buffer_valid(buffer, count)) {
+        if (entry->kind == OF_PIPE_W) {
+            pipe_t *pipe = entry->pipe;
+            fd_operation_end(entry);
+            return (int32_t)pipe_write(pipe, (const uint8_t *)buffer, count);
+        }
+        if (entry->kind == OF_FILE && entry->node->write) {
+            uint32_t bytes = count ? write_fs(entry->node, entry->offset, count,
+                                              (uint8_t *)buffer) : 0;
+            entry->offset += bytes;
+            result = bytes || count == 0 ? (int32_t)bytes : -1;
+        }
+    }
+    fd_operation_end(entry);
+    return result;
 }
 
 int32_t sys_unlink(const char *name) {
@@ -325,7 +376,7 @@ int32_t sys_readdir(const char *path, uint32_t index, char *buffer) {
     return 1;
 }
 
-int32_t sys_seek(int32_t fd, int32_t offset, int32_t whence) {
+static int32_t sys_seek_locked(int32_t fd, int32_t offset, int32_t whence) {
     int index = user_fd_index(fd);
     open_file_t *files = current_open_files();
     int64_t base;
@@ -355,6 +406,16 @@ int32_t sys_seek(int32_t fd, int32_t offset, int32_t whence) {
     return (int32_t)position;
 }
 
+int32_t sys_seek(int32_t fd, int32_t offset, int32_t whence) {
+    int index = user_fd_index(fd);
+    open_file_t *files = current_open_files();
+    if (index < 0 || !files) return -1;
+    fd_operation_begin(&files[index]);
+    int32_t result = sys_seek_locked(fd, offset, whence);
+    fd_operation_end(&files[index]);
+    return result;
+}
+
 /* Fill the user stat buffer (size, type, inode) from a VFS node. */
 static void fill_stat(uint32_t *out, const fs_node_t *node) {
     out[0] = node->length;
@@ -375,7 +436,7 @@ int32_t sys_stat(const char *path, void *statbuf) {
     return 0;
 }
 
-int32_t sys_fstat(int32_t fd, void *statbuf) {
+static int32_t sys_fstat_locked(int32_t fd, void *statbuf) {
     int index = user_fd_index(fd);
     open_file_t *files = current_open_files();
 
@@ -385,6 +446,16 @@ int32_t sys_fstat(int32_t fd, void *statbuf) {
 
     fill_stat((uint32_t *)statbuf, files[index].node);
     return 0;
+}
+
+int32_t sys_fstat(int32_t fd, void *statbuf) {
+    int index = user_fd_index(fd);
+    open_file_t *files = current_open_files();
+    if (index < 0 || !files || !user_buffer_valid(statbuf, 12)) return -1;
+    fd_operation_begin(&files[index]);
+    int32_t result = sys_fstat_locked(fd, statbuf);
+    fd_operation_end(&files[index]);
+    return result;
 }
 
 /* Create a pipe; write the read fd to fds[0] and the write fd to fds[1]. */
@@ -419,7 +490,7 @@ static int32_t sys_pipe(int32_t *user_fds) {
 /* Duplicate oldfd into the lowest-numbered free descriptor slot. The duplicate
  * gets its own ownership reference and starts with the source descriptor's
  * current file offset. Pipe read/write ends retain the matching end only. */
-static int32_t sys_dup(int32_t oldfd) {
+static int32_t sys_dup_locked(int32_t oldfd) {
     open_file_t *files = current_open_files();
     int oidx;
     open_file_t src;
@@ -431,22 +502,26 @@ static int32_t sys_dup(int32_t oldfd) {
     src = files[oidx];
 
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (files[i].kind != OF_NONE) continue;
-        files[i] = src;
-        switch (src.kind) {
-            case OF_FILE:   if (src.node) open_fs(src.node); break;
-            case OF_PIPE_R: pipe_ref_read(src.pipe); break;
-            case OF_PIPE_W: pipe_ref_write(src.pipe); break;
-            default: break;
-        }
+        if (files[i].kind != OF_NONE || files[i].busy) continue;
+        copy_fd_entry(&files[i], &src);
         return FIRST_USER_FD + i;
     }
     return -1;
 }
 
+static int32_t sys_dup(int32_t oldfd) {
+    int index = user_fd_index(oldfd);
+    open_file_t *files = current_open_files();
+    if (index < 0 || !files) return -1;
+    fd_operation_begin(&files[index]);
+    int32_t result = sys_dup_locked(oldfd);
+    fd_operation_end(&files[index]);
+    return result;
+}
+
 /* Duplicate descriptor oldfd onto newfd. A pipe end may be placed on stdin (0)
  * or stdout (1); any descriptor may be copied to another table slot (>= 3). */
-static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
+static int32_t sys_dup2_locked(int32_t oldfd, int32_t newfd) {
     process_t *process = process_get_current();
     open_file_t *files = current_open_files();
     int oidx = user_fd_index(oldfd);
@@ -505,16 +580,28 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
         if (nidx < 0) return -1;
         if (newfd == oldfd) return newfd;
         close_fd_entry(&files[nidx]);
-        files[nidx] = src;
-        switch (src.kind) {
-            case OF_FILE:   if (src.node) open_fs(src.node); break;
-            case OF_PIPE_R: pipe_ref_read(src.pipe); break;
-            case OF_PIPE_W: pipe_ref_write(src.pipe); break;
-            default: break;
-        }
+        copy_fd_entry(&files[nidx], &src);
         return newfd;
     }
     return -1;
+}
+
+static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
+    int source = user_fd_index(oldfd), target = user_fd_index(newfd);
+    open_file_t *files = current_open_files();
+    if (!files || source < 0 || (target < 0 && newfd != 0 && newfd != 1))
+        return -1;
+
+    /* Opposite-direction dup2 calls must acquire in the same order. Neither
+     * reference nor offset is sampled until both slots belong to this call. */
+    int first = source, second = target;
+    if (target >= 0 && target < source) { first = target; second = source; }
+    fd_operation_begin(&files[first]);
+    if (second >= 0 && second != first) fd_operation_begin(&files[second]);
+    int32_t result = sys_dup2_locked(oldfd, newfd);
+    if (second >= 0 && second != first) fd_operation_end(&files[second]);
+    fd_operation_end(&files[first]);
+    return result;
 }
 
 int32_t sys_close(int32_t fd) {
@@ -522,10 +609,16 @@ int32_t sys_close(int32_t fd) {
     open_file_t *files = current_open_files();
 
     if (index < 0) return -1;
-    if (!files || files[index].kind == OF_NONE) return -1;
+    if (!files) return -1;
 
-    close_fd_entry(&files[index]);
-    return 0;
+    fd_operation_begin(&files[index]);
+    int32_t result = -1;
+    if (files[index].kind != OF_NONE) {
+        close_fd_entry(&files[index]);
+        result = 0;
+    }
+    fd_operation_end(&files[index]);
+    return result;
 }
 
 void syscall_close_user_files(process_t *process) {
@@ -534,6 +627,9 @@ void syscall_close_user_files(process_t *process) {
     if (!process || process->slot >= MAX_PROCESSES) return;
     files = open_files[process->slot];
 
+    /* Called only after the last task has exited (or before a failed child's
+     * first run). No operation can still own a slot. Never wait on a retired
+     * task's stack: task_exit has already changed the scheduler context. */
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (files[i].kind != OF_NONE) close_fd_entry(&files[i]);
     }
@@ -550,13 +646,9 @@ void syscall_copy_user_files(process_t *parent, process_t *child) {
     dst = open_files[child->slot];
 
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        dst[i] = src[i];
-        switch (dst[i].kind) {                    /* bump each shared reference */
-            case OF_FILE:   if (dst[i].node) open_fs(dst[i].node); break;
-            case OF_PIPE_R: pipe_ref_read(dst[i].pipe); break;
-            case OF_PIPE_W: pipe_ref_write(dst[i].pipe); break;
-            default: break;
-        }
+        fd_operation_begin(&src[i]);
+        copy_fd_entry(&dst[i], &src[i]);
+        fd_operation_end(&src[i]);
     }
 }
 
