@@ -590,6 +590,73 @@ static int test_diskfs_operations(void) {
     return 0;
 }
 
+static volatile int stream_workers_done[2], stream_seen[12];
+
+static void stream_worker(int id) {
+    for (int round = 0; round < 6; round++) {
+        char in[3], out[3] = { (char)('L' + id), (char)('0' + round), '\n' };
+        if (sys_read(in, sizeof(in)) != 3 || in[0] != 'I' ||
+            in[1] < 'a' || in[1] >= 'm' || in[2] != '\n') sys_exit(101);
+        stream_seen[in[1] - 'a']++;
+        if (sys_write(out, sizeof(out)) != 3) sys_exit(102);
+        sys_yield();
+    }
+    stream_workers_done[id] = 1;
+    sys_exit(0);
+}
+static void stream_left(void) { stream_worker(0); }
+static void stream_right(void) { stream_worker(1); }
+
+/* Redirect in a child so the stress controller keeps its console. Its two
+ * threads share fd 0/1; final exit must release their last stream references. */
+static int test_standard_streams(void) {
+    char input[36], records[36];
+    int in = sys_create("/disk/stream-in");
+    int out = sys_create("/disk/stream-out");
+    if (in < 0 || out < 0) return fail("standard stream setup");
+    for (int i = 0; i < 12; i++) {
+        input[3 * i] = 'I';
+        input[3 * i + 1] = (char)('a' + i);
+        input[3 * i + 2] = '\n';
+    }
+    if (sys_write_file(in, input, sizeof(input)) != 36 || sys_seek(in, 0, 0) != 0)
+        return fail("standard stream seed");
+    int pid = sys_fork();
+    if (pid < 0) return fail("standard stream fork");
+    if (pid == 0) {
+        char *left = (char *)sys_mmap(THREAD_STACK_PAGES);
+        char *right = (char *)sys_mmap(THREAD_STACK_PAGES);
+        if (!left || !right || sys_dup2(in, 0) != 0 || sys_dup2(out, 1) != 1 ||
+            sys_close(in) != 0 || sys_close(out) != 0) sys_exit(103);
+        if (sys_thread_create(stream_left, left + THREAD_STACK_PAGES * PAGE_SIZE) < 0 ||
+            sys_thread_create(stream_right, right + THREAD_STACK_PAGES * PAGE_SIZE) < 0)
+            sys_exit(104);
+        sys_thread_join();
+        if (!stream_workers_done[0] || !stream_workers_done[1]) sys_exit(105);
+        for (int i = 0; i < 12; i++) if (stream_seen[i] != 1) sys_exit(106);
+        if (sys_read(input, 1) != 0 ||
+            sys_munmap(left, THREAD_STACK_PAGES) != 0 ||
+            sys_munmap(right, THREAD_STACK_PAGES) != 0) sys_exit(107);
+        sys_exit(0);
+    }
+    int status = -1, seen[2][6] = {{0}};
+    if (sys_waitpid(pid, &status, 0) != pid || status != 0 ||
+        sys_read_file(out, records, sizeof(records)) != 36 ||
+        sys_read_file(out, input, 1) != 0)
+        return fail("standard stream child result");
+    for (int i = 0; i < 36; i += 3) {
+        int id = records[i] - 'L', round = records[i + 1] - '0';
+        if (id < 0 || id > 1 || round < 0 || round >= 6 ||
+            records[i + 2] != '\n' || seen[id][round]++)
+            return fail("standard stream records");
+    }
+    if (sys_close(in) != 0 || sys_close(out) != 0 ||
+        sys_unlink("/disk/stream-in") != 0 || sys_unlink("/disk/stream-out") != 0)
+        return fail("standard stream cleanup");
+    pass("standard stream operations");
+    return 0;
+}
+
 static int test_process_exhaustion(void) {
     int children[15];
 
@@ -689,6 +756,7 @@ int main(void) {
         test_interrupts_and_preemption() != 0 ||
         test_threads_and_context_switches() != 0 ||
         test_diskfs_operations() != 0 ||
+        test_standard_streams() != 0 ||
         test_process_exhaustion() != 0 ||
         test_repeated_lifecycle() != 0) {
         write_str("[stress FAILED]\n");

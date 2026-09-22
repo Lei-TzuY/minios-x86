@@ -33,6 +33,10 @@ typedef struct {
 } open_file_t;
 
 static open_file_t open_files[MAX_PROCESSES][MAX_OPEN_FILES];
+/* Standard-stream payload lives in process_t; ownership stays here beside the
+ * indexed descriptor gates. A final process exit has no active operations, so
+ * these gates are already clear when its slot is reused. */
+static uint8_t stdio_busy[MAX_PROCESSES][2];
 
 /* A filesystem may sleep after receiving the offset. Keep the slot, node and
  * offset together until that I/O commits; the volume gate cannot do this for
@@ -43,19 +47,22 @@ static open_file_t open_files[MAX_PROCESSES][MAX_OPEN_FILES];
  * wait enrollment/wakeup atomic. Do not use task_block_killable here: fork may
  * already own a child address space, and dup2 may hold its first slot lock.
  * Filesystem waits must return through cleanup (see DiskFS's contract). */
-static void fd_operation_begin(open_file_t *entry) {
+static void operation_begin(uint8_t *busy) {
     uint32_t flags = save_irq_disable();
-    while (entry->busy) task_block_current(&entry->busy);
-    entry->busy = 1;
+    while (*busy) task_block_current(busy);
+    *busy = 1;
     restore_irq(flags);
 }
 
-static void fd_operation_end(open_file_t *entry) {
+static void operation_end(uint8_t *busy) {
     uint32_t flags = save_irq_disable();
-    entry->busy = 0;
-    task_wake_all(&entry->busy);
+    *busy = 0;
+    task_wake_all(busy);
     restore_irq(flags);
 }
+
+static void fd_operation_begin(open_file_t *entry) { operation_begin(&entry->busy); }
+static void fd_operation_end(open_file_t *entry) { operation_end(&entry->busy); }
 
 /* Copy ownership and the committed offset, never the source's lock state.
  * The source is locked; dst is either locked or unpublished (dup/fork). */
@@ -179,46 +186,69 @@ int32_t sys_write(const char *buffer, size_t count) {
     process_t *process = process_get_current();
 
     if (!user_buffer_valid(buffer, count)) return -1;
-
-    /* stdout connected to a pipeline: write into the pipe (may block). */
-    if (process && process->stdout_pipe) {
-        return (int32_t)pipe_write(process->stdout_pipe,
-                                   (const uint8_t *)buffer, count);
+    if (!process) {
+        terminal_write(buffer, count);
+        return (int32_t)count;
     }
+    if (process->slot >= MAX_PROCESSES) return -1;
 
-    /* stdout redirected to a file: append at the running offset. */
-    if (process && process->stdout_node) {
+    uint8_t *busy = &stdio_busy[process->slot][1];
+    int32_t result = -1;
+    operation_begin(busy);
+    if (!user_buffer_valid(buffer, count)) {
+        operation_end(busy);
+        return -1;
+    }
+    if (process->stdout_pipe) {
+        pipe_t *pipe = process->stdout_pipe;
+        /* As for indexed pipes, hand off to pipe.c's own lifetime pin before
+         * any scheduling point. Never hold the stream over a killable wait. */
+        operation_end(busy);
+        return (int32_t)pipe_write(pipe, (const uint8_t *)buffer, count);
+    }
+    if (process->stdout_node) {
         uint32_t written = write_fs(process->stdout_node,
                                     process->stdout_offset,
                                     count, (uint8_t *)buffer);
         process->stdout_offset += written;
-        return (int32_t)written;
+        result = (int32_t)written;
+    } else {
+        terminal_write(buffer, count);
+        result = (int32_t)count;
     }
-
-    terminal_write(buffer, count);
-    return (int32_t)count;
+    operation_end(busy);
+    return result;
 }
 
 int32_t sys_read(char *buffer, size_t count) {
     process_t *process = process_get_current();
 
     if (!user_buffer_valid(buffer, count)) return -1;
+    if (!process) return (int32_t)keyboard_read(buffer, count);
+    if (process->slot >= MAX_PROCESSES) return -1;
 
-    /* stdin connected to a pipeline: read from the pipe (may block, 0 = EOF). */
-    if (process && process->stdin_pipe) {
-        return (int32_t)pipe_read(process->stdin_pipe,
-                                  (uint8_t *)buffer, count);
+    uint8_t *busy = &stdio_busy[process->slot][0];
+    operation_begin(busy);
+    if (!user_buffer_valid(buffer, count)) {
+        operation_end(busy);
+        return -1;
     }
-
-    /* stdin redirected from a file: read sequentially, 0 means EOF. */
-    if (process && process->stdin_node) {
+    if (process->stdin_pipe) {
+        pipe_t *pipe = process->stdin_pipe;
+        operation_end(busy);
+        return (int32_t)pipe_read(pipe, (uint8_t *)buffer, count);
+    }
+    if (process->stdin_node) {
         uint32_t bytes = read_fs(process->stdin_node,
                                  process->stdin_offset,
                                  count, (uint8_t *)buffer);
         process->stdin_offset += bytes;
+        operation_end(busy);
         return (int32_t)bytes;
     }
-
+    /* Keyboard waits can terminate a task. They own no stream state and must
+     * not strand the gate or prevent a sibling from redirecting stdin. */
+    operation_end(busy);
     return (int32_t)keyboard_read(buffer, count);
 }
 
@@ -592,6 +622,11 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
     if (!files || source < 0 || (target < 0 && newfd != 0 && newfd != 1))
         return -1;
 
+    /* fd 0/1 precede every indexed descriptor in the lock order. Do not read
+     * the source before this wait: a sibling may close/reuse it meanwhile. */
+    uint8_t *stream = target < 0 ?
+        &stdio_busy[process_get_current()->slot][newfd] : NULL;
+    if (stream) operation_begin(stream);
     /* Opposite-direction dup2 calls must acquire in the same order. Neither
      * reference nor offset is sampled until both slots belong to this call. */
     int first = source, second = target;
@@ -601,6 +636,7 @@ static int32_t sys_dup2(int32_t oldfd, int32_t newfd) {
     int32_t result = sys_dup2_locked(oldfd, newfd);
     if (second >= 0 && second != first) fd_operation_end(&files[second]);
     fd_operation_end(&files[first]);
+    if (stream) operation_end(stream);
     return result;
 }
 
@@ -650,6 +686,25 @@ void syscall_copy_user_files(process_t *parent, process_t *child) {
         copy_fd_entry(&dst[i], &src[i]);
         fd_operation_end(&src[i]);
     }
+
+    /* Fork snapshots each standard stream after any active file I/O commits.
+     * The child is unpublished and keeps independent offsets, as before.
+     * Only payload/references are copied, never either process's gate state. */
+    operation_begin(&stdio_busy[parent->slot][0]);
+    child->stdin_node = parent->stdin_node;
+    child->stdin_offset = parent->stdin_offset;
+    if (child->stdin_node) open_fs(child->stdin_node);
+    child->stdin_pipe = parent->stdin_pipe;
+    if (child->stdin_pipe) pipe_ref_read(child->stdin_pipe);
+    operation_end(&stdio_busy[parent->slot][0]);
+
+    operation_begin(&stdio_busy[parent->slot][1]);
+    child->stdout_node = parent->stdout_node;
+    child->stdout_offset = parent->stdout_offset;
+    if (child->stdout_node) open_fs(child->stdout_node);
+    child->stdout_pipe = parent->stdout_pipe;
+    if (child->stdout_pipe) pipe_ref_write(child->stdout_pipe);
+    operation_end(&stdio_busy[parent->slot][1]);
 }
 
 /* Grow or query the current process's heap (Unix sbrk semantics):

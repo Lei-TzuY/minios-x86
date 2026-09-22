@@ -229,9 +229,12 @@ signal 103 / vm-lifecycle 36
    metadata publication；open/close 保持不阻塞，read/write 在等待前取得暫時參照。
    native interleaving suite 與 ring-3 stress 覆蓋資料一致性及 cleanup。
    ATA 仍為 polling；下一步需要 driver request ownership、IRQ completion/timeout、
-   boot polling fallback，以及 standard streams/user buffers 的阻塞生命週期契約。
+   boot polling fallback，以及 user buffers 的阻塞生命週期契約。
    fd 3–10 的 descriptor gate 已涵蓋 I/O/offset commit、seek、fstat、close、dup/dup2、
    fork copy；pipe 在阻塞前釋放 gate，最終 process cleanup 保持不阻塞。
+   runtime stdin/stdout 也已有各自的 gate，涵蓋 I/O、offset、dup2 與 fork snapshot；
+   pipe/keyboard 等待前釋放 gate。shell 的「先 publish task、後設定串流」仍需改成
+   初始化完成後才發布；使用者緩衝區在真正 I/O 等待中的生命週期也仍未完成。
    詳見 `docs/DESCRIPTOR_SERIALIZATION.md`。
    詳見 `docs/DISKFS_SERIALIZATION.md`。
 

@@ -147,8 +147,20 @@ void syscall_close_user_files(struct process *p) {
     if (p) g_last_closed_pid = p->pid;
 }
 void syscall_copy_user_files(struct process *parent, struct process *child) {
-    (void)parent; (void)child;
     g_copy_files_calls++;
+    /* Model the descriptor subsystem's retained standard streams so these
+     * lifecycle tests still check fork failure/exit rollback. The real copy
+     * and its scheduling boundary run in test_fd_operations and QEMU. */
+    child->stdin_node = parent->stdin_node;
+    child->stdin_offset = parent->stdin_offset;
+    child->stdout_node = parent->stdout_node;
+    child->stdout_offset = parent->stdout_offset;
+    child->stdin_pipe = parent->stdin_pipe;
+    child->stdout_pipe = parent->stdout_pipe;
+    if (child->stdin_node) open_fs(child->stdin_node);
+    if (child->stdout_node) open_fs(child->stdout_node);
+    if (child->stdin_pipe) pipe_ref_read(child->stdin_pipe);
+    if (child->stdout_pipe) pipe_ref_write(child->stdout_pipe);
 }
 
 /* --- the scheduler --------------------------------------------------------- */

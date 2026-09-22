@@ -1,4 +1,4 @@
-# Indexed descriptor operations across filesystem waits
+# Descriptor and standard-stream operations across filesystem waits
 
 This follow-up uses main `e63d4218ea91069506b05944ead5a9198bf8568a` and
 PR #40 head `e74d8875032e6bc7d3ba68ce5fb500a3e8b53b36`, freshly fetched.
@@ -78,6 +78,60 @@ their no-backend-I/O behavior; failed writes do not advance the offset. User
 buffers are revalidated after descriptor acquisition, because mappings can
 change while waiting for that gate.
 
+## Standard streams: runtime operation ownership
+
+The next live inspection found main unchanged and PR #40 at
+`84150abaf7d7624e0ac81b20350e4b7c4908c5de`, with all three workflows passing.
+`sys_read`/`sys_write` still sampled `process_t`'s stdin/stdout node and offset
+before a filesystem wait, and `dup2` could replace them during that wait.
+Tests on that exact head reproduce overlapping stdout records, repeated stdin
+bytes and completion advancing a replacement stream's offset. The existing
+preemptible kernel/PIO boundary also reproduces the lost stdout record.
+
+Two private gates per process slot now protect runtime fd 0/1 independently.
+They use the indexed table's IRQ-protected check/enroll/wake mechanism, and
+cover binding lookup, file I/O and offset commit. `dup2(fd, 0/1)` owns the
+standard stream **before** its indexed source, then samples both bindings;
+an unrelated source can still close/reopen while dup2 waits for the stream.
+This extends the ascending descriptor order without a process-wide I/O lock.
+Waiting readers/writers resolve the winning binding only after acquisition.
+
+The existing fork hook `syscall_copy_user_files` now snapshots standard streams
+as well as indexed descriptors. It owns only one source at a time, retaining
+both file and pipe references and the committed offset before the child runs.
+`process_fork` no longer separately copies unlocked stream fields. The child's
+gate state is not inherited. Fork still supplies independent offsets and does
+not promise an atomic snapshot of the whole descriptor table or process memory.
+
+Pipe dispatch releases the stream gate before entering pipe.c, which takes its
+own endpoint pin before any wait. Keyboard dispatch releases it too: device
+waits may terminate the task and must not strand a stream gate. An operation
+already handed to a pipe/keyboard finishes on that device even if dup2 redirects
+the stream later. Future calls use the new binding. Terminal output remains
+nonblocking. User buffers are revalidated after acquiring a stream gate, but
+are not pinned across later device/filesystem waits.
+
+Final exit and failed-child teardown in process.c still release references
+without acquiring a gate. Every live operation has returned before the last
+task exits, so no gate survives process-slot reuse. Replacing a stream and
+fork failure use the existing reference-release paths. SYS_WRITE retains its
+existing zero-byte return on backend failure; no syscall ABI or errno mapping
+changes here.
+
+Suspended-stack tests cover both stream directions, current PIO preemption,
+replacement, fork offsets/references, pipe inheritance, source reuse while
+dup2 waits, late binding to a pipe, independent streams/processes, spurious and
+kill wakeups, actual unmapping during gate wait, write failure and default
+device dispatch. Eight isolated mutants fail named data/progress assertions:
+missing ownership/wakeup, unlocked replacement/fork, killable ownership wait,
+holding the stream over pipe/keyboard waits, and locking dup2's source first.
+
+The QEMU stress controller forks a child with DiskFS stdin/stdout. Two threads
+consume twelve uniquely numbered input records and produce twelve output
+records in arbitrary order. The parent verifies every output record once and
+unlinks both files after child exit. The validator requires the new success
+marker twice, in addition to all existing stress/resource checks.
+
 ## Executable coverage and remaining work
 
 `tests/test_fd_operations.c` uses real syscall, VFS, DiskFS, RAMFS and pipe code.
@@ -98,11 +152,16 @@ uniquely identified records in arbitrary worker order. They verify every
 record exactly once, final and duplicated offsets, and final-reference cleanup.
 The QEMU validator requires the success marker twice with stable resources.
 
-This bounded change covers the indexed table. Standard streams (fd 0/1) still
-live separately in `process_t`; their offsets and runtime replacement need an
-equivalent contract before general blocking file I/O. User-buffer lifetime
-*during* VFS/device sleep, and borrowed path/stat pointers, also remain separate
-integration work. Revalidation at this new descriptor wait is not a general
-buffer pinning solution. ATA still polls and DiskFS still has no journal or
+The guarantees cover indexed descriptors and runtime standard-stream
+syscalls/fork. `process_redirect` and `process_pipe` remain initialization APIs
+whose documented precondition is "before the child's first run". Inspection
+found that kernel-shell spawn publishes a runnable task before these setup
+calls, with IF enabled. Enforcing initialization before task publication is a
+separate existing launch-order gap; this change does not make arbitrary
+cross-process redirection safe. Those APIs must not be used as runtime setters.
+
+User-buffer lifetime *during* VFS/device sleep, and borrowed path/stat pointers,
+also remain separate integration work. Revalidation at descriptor/stream gate
+acquisition is not a general buffer pinning solution. ATA still polls and DiskFS still has no journal or
 crash-atomic metadata transaction. This gate assumes the existing single CPU
 and IF=0 syscall ABI; it is not an SMP synchronization primitive.

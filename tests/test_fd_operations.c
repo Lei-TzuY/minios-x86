@@ -46,6 +46,31 @@ static worker_t workers[WORKERS];
 
 static char *buffer(int id) { return user_pages + id * USER_PAGE + 256; }
 static char *path(const char *value) { strcpy(user_pages, value); return user_pages; }
+/* Default devices cannot do real terminal/keyboard I/O on the host. Keep their
+ * dispatch observable; redirected operations use the real filesystems/pipes. */
+static int terminal_bytes, keyboard_calls, keyboard_wait;
+void terminal_write(const char *data, size_t count) {
+    (void)data;
+    terminal_bytes += (int)count;
+}
+size_t keyboard_read(char *data, size_t count) {
+    keyboard_calls++;
+    if (!count) return 0;
+    if (keyboard_wait) task_block_current(&keyboard_wait);
+    data[0] = 'K';
+    return 1;
+}
+
+/* Model the nonblocking standard-stream part of final process cleanup. The
+ * indexed table cleanup below is the real syscall lifecycle hook. */
+static void close_streams(process_t *p) {
+    if (p->stdin_node) close_fs(p->stdin_node);
+    if (p->stdout_node) close_fs(p->stdout_node);
+    if (p->stdin_pipe) pipe_close_read(p->stdin_pipe);
+    if (p->stdout_pipe) pipe_close_write(p->stdout_pipe);
+    p->stdin_node = p->stdout_node = NULL;
+    p->stdin_pipe = p->stdout_pipe = NULL;
+}
 static void wait_event(void) {
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
@@ -66,10 +91,13 @@ process_t *process_get_current(void) {
     return &procs[actor < 0 ? controller_process : workers[actor].process];
 }
 int paging_user_range_mapped(uint32_t address, uint32_t size) {
-    (void)size;
     if (address < USER_EXT_BASE || address >= USER_EXT_BASE + WORKERS * USER_PAGE)
         return 0;
-    return mapped[(address - USER_EXT_BASE) / USER_PAGE];
+    uint32_t offset = address - USER_EXT_BASE;
+    if (size > WORKERS * USER_PAGE - offset) return 0;
+    for (uint32_t i = offset / USER_PAGE; size && i <= (offset + size - 1) / USER_PAGE; i++)
+        if (!mapped[i]) return 0;
+    return 1;
 }
 void *kmalloc(size_t size) {
     void *result = malloc(size);
@@ -81,7 +109,7 @@ void kfree(void *ptr) { if (ptr) live_allocs--; free(ptr); }
 void task_block_current(const void *channel) {
     CHECK_EQ(irq_flags, 0);
     if (actor < 0) {
-        CHECK(0 && "retired-task descriptor cleanup must not block");
+        CHECK(0 && "controller operation must make progress without blocking");
         exit(1);
     }
     worker_t *w = &workers[actor];
@@ -172,6 +200,8 @@ static void first(void (*run)(int), int writing) {
 static void fresh(void) {
     pause_actor = -2;
     controller_process = 0;
+    close_streams(&procs[0]);
+    close_streams(&procs[1]);
     syscall_close_user_files(&procs[0]);
     syscall_close_user_files(&procs[1]);
     memset(procs, 0, sizeof(procs));
@@ -181,6 +211,7 @@ static void fresh(void) {
     memset(user_pages, 0, WORKERS * USER_PAGE);
     for (int i = 0; i < WORKERS; i++) mapped[i] = 1;
     paused = resume_io = preempt = write_calls = fail_write = 0;
+    terminal_bytes = keyboard_calls = keyboard_wait = 0;
     irq_flags = 0;
     diskfs_install();
     CHECK(diskfs_format());
@@ -536,6 +567,302 @@ static void test_independent_operations(void) {
     CHECK_EQ(live_allocs, baseline);
     CHECK_EQ(sys_close(pipe_write_fd), 0);
 }
+
+static void stdout_write(int id) { workers[id].result = sys_write(buffer(id), 7); }
+static void stdin_read(int id) { workers[id].result = sys_read(buffer(id), 7); }
+static void replace_stdout(int id) { workers[id].result = sys_dup2(fd_b, 1); }
+static void replace_stdin(int id) { workers[id].result = sys_dup2(fd_b, 0); }
+static void fork_streams(int id) {
+    syscall_copy_user_files(&procs[0], &procs[1]);
+    workers[id].result = 0;
+}
+static void test_stdio_offsets(void) {
+    for (int reverse = 0; reverse < 2; reverse++) {
+        TEST("stdout writes commit consecutive records in either worker order");
+        fresh();
+        CHECK_EQ(sys_dup2(fd_a, 1), 1);
+        memset(buffer(0), reverse ? 'B' : 'A', 7);
+        memset(buffer(1), reverse ? 'A' : 'B', 7);
+        first(stdout_write, 1);
+        start(1, stdout_write);
+        stopped(1);
+        finish(2);
+        uint8_t expected[14];
+        memcpy(expected, buffer(0), 7);
+        memcpy(expected + 7, buffer(1), 7);
+        check_bytes("a", expected, sizeof(expected));
+        CHECK_EQ(workers[0].result, 7);
+        CHECK_EQ(workers[1].result, 7);
+        CHECK_EQ(sys_seek(fd_a, 0, SYS_SEEK_CUR), 0); /* independent dup offset */
+    }
+    TEST("stdin readers consume distinct consecutive bytes after device sleep");
+    fresh();
+    CHECK_EQ(sys_dup2(fd_a, 0), 0);
+    first(stdin_read, 0);
+    start(1, stdin_read);
+    stopped(1);
+    finish(2);
+    CHECK(memcmp(buffer(0), seed, 7) == 0);
+    CHECK(memcmp(buffer(1), seed + 7, 7) == 0);
+    CHECK_EQ(sys_read(buffer(2), 7), 7);
+    CHECK(memcmp(buffer(2), seed + 14, 7) == 0);
+}
+static void test_stdio_pio(void) {
+    TEST("current kernel PIO preemption queues two stdout writers safely");
+    fresh();
+    CHECK_EQ(sys_dup2(fd_a, 1), 1);
+    preempt = 1;
+    workers[0].flags = IF_FLAG;
+    first(kernel_write, 1);
+    start(1, stdout_write);
+    stopped(1);
+    start(2, stdout_write);
+    stopped(2);
+    finish(3);
+    uint8_t expected[14];
+    memcpy(expected, buffer(1), 7);
+    memcpy(expected + 7, buffer(2), 7);
+    check_bytes("a", expected, sizeof(expected));
+}
+static void test_stdio_replacement(void) {
+    for (int output = 0; output < 2; output++) {
+        TEST("dup2 cannot apply completed standard-stream I/O to a new binding");
+        fresh();
+        CHECK_EQ(sys_dup2(fd_a, output), output);
+        CHECK_EQ(sys_close(fd_a), 0); /* stream is the sole persistent owner */
+        CHECK_EQ(sys_seek(fd_b, 30, SYS_SEEK_SET), 30);
+        first(output ? stdout_write : stdin_read, output);
+        start(1, output ? replace_stdout : replace_stdin);
+        stopped(1);
+        finish(2);
+        CHECK_EQ(workers[1].result, output);
+        CHECK_EQ(unlink_fs("/disk/a"), 0); /* old reference released exactly once */
+        if (output) {
+            CHECK_EQ(sys_write(buffer(2), 7), 7);
+            uint8_t expected[37];
+            memcpy(expected, seed, sizeof(expected));
+            memcpy(expected + 30, buffer(2), 7);
+            check_bytes("b", expected, sizeof(expected));
+        } else {
+            CHECK_EQ(sys_read(buffer(2), 7), 7);
+            CHECK(memcmp(buffer(2), seed + 30, 7) == 0);
+        }
+        CHECK_EQ(sys_seek(fd_b, 0, SYS_SEEK_CUR), 30);
+    }
+}
+static void test_stdio_fork(void) {
+    for (int output = 0; output < 2; output++) {
+        TEST("fork inherits committed stream offsets and independent references");
+        fresh();
+        CHECK_EQ(sys_dup2(fd_a, output), output);
+        CHECK_EQ(sys_close(fd_a), 0);
+        first(output ? stdout_write : stdin_read, output);
+        start(1, fork_streams);
+        stopped(1);
+        finish(2);
+        CHECK_EQ(workers[1].result, 0);
+        controller_process = 1;
+        close_streams(&procs[0]); /* cleanup while another process is current */
+        syscall_close_user_files(&procs[0]);
+        CHECK_EQ(unlink_fs("/disk/a"), -1);
+        if (output) {
+            CHECK_EQ(sys_write(buffer(2), 7), 7);
+            uint8_t expected[14];
+            memcpy(expected, buffer(0), 7);
+            memcpy(expected + 7, buffer(2), 7);
+            check_bytes("a", expected, sizeof(expected));
+        } else {
+            CHECK_EQ(sys_read(buffer(2), 7), 7);
+            CHECK(memcmp(buffer(2), seed + 7, 7) == 0);
+        }
+        close_streams(&procs[1]);
+        syscall_close_user_files(&procs[1]);
+        CHECK_EQ(unlink_fs("/disk/a"), 0);
+        controller_process = 0;
+    }
+    for (int output = 0; output < 2; output++) {
+        TEST("fork retains each standard pipe end through parent cleanup");
+        fresh();
+        int baseline = live_allocs;
+        CHECK_EQ(sys_pipe((int32_t *)buffer(2)), 0);
+        int rfd = ((int32_t *)buffer(2))[0], wfd = ((int32_t *)buffer(2))[1];
+        CHECK_EQ(sys_dup2(output ? wfd : rfd, output), output);
+        CHECK_EQ(sys_close(output ? wfd : rfd), 0);
+        syscall_copy_user_files(&procs[0], &procs[1]);
+        controller_process = 1;
+        close_streams(&procs[0]);
+        syscall_close_user_files(&procs[0]);
+        CHECK_EQ(output ? sys_write(buffer(0), 7) :
+                 sys_write_file(wfd, buffer(0), 7), 7);
+        CHECK_EQ(output ? sys_read_file(rfd, buffer(1), 7) :
+                 sys_read(buffer(1), 7), 7);
+        CHECK(memcmp(buffer(0), buffer(1), 7) == 0);
+        close_streams(&procs[1]);
+        syscall_close_user_files(&procs[1]);
+        CHECK_EQ(live_allocs, baseline);
+        controller_process = 0;
+    }
+}
+static void test_stdio_waits(void) {
+    TEST("stdin gate rechecks spurious and kill wakes before consuming bytes");
+    fresh();
+    CHECK_EQ(sys_dup2(fd_a, 0), 0);
+    first(stdin_read, 0);
+    start(1, stdin_read);
+    stopped(1);
+    int blocks = workers[1].blocks;
+    workers[1].killed = 1;
+    workers[1].blocked = 0;
+    pthread_cond_broadcast(&event);
+    while (workers[1].blocks == blocks && !workers[1].done) wait_event();
+    CHECK(!workers[1].done);
+    finish(2);
+    CHECK(memcmp(buffer(1), seed + 7, 7) == 0);
+
+    for (int output = 0; output < 2; output++) {
+        TEST("standard I/O rejects a buffer unmapped during stream-gate waiting");
+        fresh();
+        CHECK_EQ(sys_dup2(fd_a, output), output);
+        first(output ? stdout_write : stdin_read, output);
+        start(1, output ? stdout_write : stdin_read);
+        stopped(1);
+        CHECK_EQ(munmap(user_pages + USER_PAGE, USER_PAGE), 0);
+        mapped[1] = 0;
+        finish(2);
+        CHECK_EQ(workers[1].result, -1);
+        CHECK(mmap(user_pages + USER_PAGE, USER_PAGE, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) ==
+              user_pages + USER_PAGE);
+        mapped[1] = 1;
+        /* A new valid call succeeds, proving the rejected call released. */
+        CHECK_EQ(output ? sys_write(buffer(2), 1) : sys_read(buffer(2), 1), 1);
+        if (!output) CHECK_EQ((uint8_t)buffer(2)[0], seed[7]);
+    }
+
+    TEST("failed stdout I/O releases ownership for redirection and preserves ABI");
+    fresh();
+    CHECK_EQ(sys_dup2(fd_a, 1), 1);
+    CHECK_EQ(sys_close(fd_b), 0);
+    fd_b = sys_open(path("/ram"));
+    CHECK(fd_b >= 0);
+    fail_write = 1;
+    first(stdout_write, 1);
+    start(1, replace_stdout);
+    stopped(1);
+    finish(2);
+    CHECK_EQ(workers[0].result, 0); /* SYS_WRITE historically returns zero here */
+    CHECK_EQ(workers[1].result, 1);
+    CHECK_EQ(sys_write(buffer(2), 7), 7);
+    CHECK_EQ(sys_read_file(fd_b, buffer(1), 7), 7);
+    CHECK(memcmp(buffer(1), buffer(2), 7) == 0);
+}
+static void test_stdio_lookup(void) {
+    TEST("waiting dup2 samples a reused source only after owning the stream");
+    fresh();
+    CHECK_EQ(sys_dup2(fd_a, 1), 1);
+    first(stdout_write, 1);
+    start(1, replace_stdout);
+    stopped(1);
+    /* dup2 must not hold its source while waiting on a lower-numbered stream.
+     * The source can change; lookup must then use its new node AND offset. */
+    CHECK_EQ(sys_close(fd_b), 0);
+    CHECK_EQ(sys_open(path("/ram")), fd_b);
+    CHECK_EQ(sys_seek(fd_b, 3, SYS_SEEK_SET), 3);
+    finish(2);
+    CHECK_EQ(sys_write(buffer(2), 7), 7);
+    CHECK_EQ(sys_read_file(fd_b, buffer(1), 7), 7);
+    CHECK(memcmp(buffer(1), buffer(2), 7) == 0);
+
+    TEST("queued stdin read resolves a replacement pipe after acquiring stream");
+    fresh();
+    CHECK_EQ(sys_dup2(fd_a, 0), 0);
+    first(stdin_read, 0);
+    workers[1].delay = 1;
+    start(1, stdin_read);
+    stopped(1);
+    resume_io = 1;
+    pthread_cond_broadcast(&event);
+    while (!workers[0].done) wait_event();
+    CHECK_EQ(sys_pipe((int32_t *)buffer(2)), 0);
+    int rfd = ((int32_t *)buffer(2))[0], wfd = ((int32_t *)buffer(2))[1];
+    CHECK_EQ(sys_dup2(rfd, 0), 0);
+    buffer(0)[0] = 'Z';
+    CHECK_EQ(sys_write_file(wfd, buffer(0), 1), 1);
+    workers[1].delay = 0;
+    pthread_cond_broadcast(&event);
+    finish(2);
+    CHECK_EQ(workers[1].result, 1);
+    CHECK_EQ(buffer(1)[0], 'Z');
+}
+static void test_stdio_devices(void) {
+    TEST("blocked stdout does not serialize independent stdin or another process");
+    fresh();
+    CHECK_EQ(sys_dup2(fd_a, 1), 1);
+    int ram = sys_open(path("/ram"));
+    CHECK_EQ(sys_dup2(ram, 0), 0);
+    first(stdout_write, 1);
+    CHECK_EQ(sys_read(buffer(1), 7), 7);
+    CHECK(memcmp(buffer(1), seed + 17, 7) == 0);
+    controller_process = 1;
+    CHECK_EQ(sys_write(buffer(2), 7), 7);
+    CHECK_EQ(terminal_bytes, 7);
+    controller_process = 0;
+    finish(1);
+
+    for (int output = 0; output < 2; output++) {
+        TEST("blocked standard pipe releases stream so replacement and EOF progress");
+        fresh();
+        int baseline = live_allocs;
+        CHECK_EQ(sys_pipe((int32_t *)buffer(2)), 0);
+        int rfd = ((int32_t *)buffer(2))[0], wfd = ((int32_t *)buffer(2))[1];
+        CHECK_EQ(sys_dup2(output ? wfd : rfd, output), output);
+        if (output) {
+            /* PIPE_BUF_SIZE spans two fixture pages; leave one after it. */
+            memset(buffer(1), 'P', PIPE_BUF_SIZE);
+            CHECK_EQ(sys_write_file(wfd, buffer(1), PIPE_BUF_SIZE), PIPE_BUF_SIZE);
+        }
+        start(0, output ? stdout_write : stdin_read);
+        stopped(0);
+        CHECK(!workers[0].done);
+        CHECK_EQ(sys_dup2(fd_b, output), output);
+        CHECK_EQ(sys_close(rfd), 0);
+        CHECK_EQ(sys_close(wfd), 0);
+        finish(1);
+        CHECK_EQ(workers[0].result, 0);
+        CHECK_EQ(live_allocs, baseline);
+        CHECK_EQ(output ? sys_write(buffer(1), 7) : sys_read(buffer(1), 7), 7);
+        if (!output) CHECK(memcmp(buffer(1), seed, 7) == 0);
+    }
+
+    TEST("keyboard wait releases stdin so a sibling can redirect it");
+    fresh();
+    keyboard_wait = 1;
+    start(0, stdin_read);
+    stopped(0);
+    CHECK_EQ(sys_dup2(fd_b, 0), 0);
+    task_wake_all(&keyboard_wait);
+    finish(1);
+    CHECK_EQ(workers[0].result, 1);
+    CHECK_EQ(buffer(0)[0], 'K');
+    CHECK_EQ(sys_read(buffer(1), 7), 7);
+    CHECK(memcmp(buffer(1), seed, 7) == 0);
+    CHECK_EQ(keyboard_calls, 1);
+
+    TEST("zero and invalid stream operations leave locks and bindings usable");
+    fresh();
+    CHECK_EQ(sys_dup2(fd_a, 0), 0);
+    CHECK_EQ(sys_dup2(fd_a, 1), 1);
+    CHECK_EQ(sys_read(NULL, 0), 0);
+    CHECK_EQ(sys_write(NULL, 0), 0);
+    CHECK_EQ(write_calls, 0);
+    CHECK_EQ(sys_pipe((int32_t *)buffer(2)), 0);
+    int rfd = ((int32_t *)buffer(2))[0], wfd = ((int32_t *)buffer(2))[1];
+    CHECK_EQ(sys_dup2(rfd, 1), -1);
+    CHECK_EQ(sys_dup2(wfd, 0), -1);
+    CHECK_EQ(sys_read(buffer(0), 1), 1);
+    CHECK_EQ((uint8_t)buffer(0)[0], seed[0]);
+    CHECK_EQ(sys_write(buffer(1), 1), 1);
+}
 int main(int argc, char **argv) {
     void *want = (void *)(uintptr_t)USER_EXT_BASE;
     user_pages = mmap(want, WORKERS * USER_PAGE, PROT_READ | PROT_WRITE,
@@ -553,7 +880,11 @@ int main(int argc, char **argv) {
         {"offsets", test_shared_offsets}, {"pio", test_current_pio_boundary},
         {"observers", test_offset_observers}, {"replacement", test_replacement},
         {"reservation", test_reserved_destination}, {"lookup", test_queued_lookup},
-        {"errors", test_wakes_and_errors}, {"independent", test_independent_operations}
+        {"errors", test_wakes_and_errors}, {"independent", test_independent_operations},
+        {"stdio-offsets", test_stdio_offsets}, {"stdio-pio", test_stdio_pio},
+        {"stdio-replacement", test_stdio_replacement}, {"stdio-fork", test_stdio_fork},
+        {"stdio-waits", test_stdio_waits}, {"stdio-lookup", test_stdio_lookup},
+        {"stdio-devices", test_stdio_devices}
     };
     int selected = 0;
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -562,6 +893,8 @@ int main(int argc, char **argv) {
         selected++;
     }
     CHECK(selected != 0);
+    close_streams(&procs[0]);
+    close_streams(&procs[1]);
     syscall_close_user_files(&procs[0]);
     syscall_close_user_files(&procs[1]);
     CHECK(diskfs_format());

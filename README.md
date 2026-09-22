@@ -108,7 +108,8 @@ DiskFS serializes complete volume operations with a sleepable gate and keeps
 VFS reference cleanup nonblocking. See [the storage synchronization contract](docs/DISKFS_SERIALIZATION.md)
 for ownership, failure handling, tests, and the remaining blocking-ATA work.
 Indexed file descriptors also serialize I/O, offsets, seek, close and duplication
-across filesystem waits. See [descriptor ownership](docs/DESCRIPTOR_SERIALIZATION.md)
+across filesystem waits. Runtime stdin/stdout file I/O, redirection and fork snapshots
+now share that ownership model. See [descriptor ownership](docs/DESCRIPTOR_SERIALIZATION.md)
 for the operation order, pipe/teardown boundaries and remaining blocking-I/O work.
 
 ### User land

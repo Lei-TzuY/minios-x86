@@ -614,3 +614,38 @@ Status: complete
   build and hosted CI results are recorded in the PR after final verification.
 - Existing findings.md/progress.md remain non-UTF-8 binary data, so this entry
   records this run's findings and progress rather than rewriting those files.
+
+## 2026-09-22 follow-up: standard-stream operations
+
+- Re-inspected live main e63d4218, recent commits, PRs #36–#40, CI, issues,
+  reviews, roadmap and source. PR40 head 84150ab was green and unchanged;
+  no open non-PR issues or overlapping changes appeared.
+- Prior-head tests reproduce lost stdout records, repeated stdin bytes, and
+  completion advancing a replacement stream. Current kernel PIO preemption
+  also reproduces the lost write, without assuming syscall timer preemption.
+- Added two private per-process stream gates beside indexed descriptor gates.
+  Runtime file I/O/offset commit, dup2 replacement and fork snapshots acquire
+  ownership; stream-before-indexed-source order preserves independent progress.
+  Pipe/keyboard waits release the gate; final/failed-child cleanup stays
+  nonblocking. Existing offsets, reference ownership and return codes remain.
+- Extended the real suspended-stack suite and QEMU stress with both streams,
+  fork, late lookup, pipes, unmapping, errors and independent progress. The
+  new fixture initially filled a pipe from the last mapped page; ASan caught
+  that test-only overrun. The fill now has sufficient mapped capacity, and the
+  fake page query checks every page in the entire requested range.
+- Eight isolated mutations fail named assertions, plus three prior-head
+  behavioral failures. All mutations use scratch copies and verify that the
+  source tree is unchanged. The existing process lifecycle assertions are
+  preserved; its copy-hook stub now models the hook's added stream ownership.
+- Local native/ASan/UBSan, QEMU, build/static checks and hosted CI results are
+  recorded in PR40 after final verification. The environment still cannot run
+  i386 hosted binaries or AF_UNIX monitor sockets; hosted gates remain intact.
+- Self-review: no nested stream gates; fork releases each source before the
+  next; all error returns release; no gate over killable device waits; no lock
+  state copied; process slot reuse follows last-task cleanup. The kernel shell
+  still assumes redirection precedes a child's first run despite publishing
+  its task earlier. This existing initialization/publication gap is explicitly
+  documented rather than claiming runtime gates solve it. User buffers during
+  actual I/O sleep, IRQ ATA and crash consistency remain separate work.
+- findings.md/progress.md remain non-UTF-8 binary data; this entry records
+  findings and progress without overwriting their contents.

@@ -199,6 +199,7 @@ def validate(log: str) -> None:
         "[stress scheduling and context switches ok]",
         "[stress diskfs operations ok]",
         "[stress shared descriptor operations ok]",
+        "[stress standard stream operations ok]",
         "[stress process exhaustion ok]",
         "[stress repeated lifecycle ok]",
         "[stress PASS]",
