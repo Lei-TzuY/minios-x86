@@ -200,6 +200,7 @@ def validate(log: str) -> None:
         "[stress diskfs operations ok]",
         "[stress shared descriptor operations ok]",
         "[stress standard stream operations ok]",
+        "[stress file buffer mappings ok]",
         "[stress process exhaustion ok]",
         "[stress repeated lifecycle ok]",
         "[stress PASS]",

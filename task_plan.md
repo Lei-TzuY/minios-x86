@@ -649,3 +649,33 @@ Status: complete
   actual I/O sleep, IRQ ATA and crash consistency remain separate work.
 - findings.md/progress.md remain non-UTF-8 binary data; this entry records
   findings and progress without overwriting their contents.
+
+
+## Follow-up: file read/write buffer mappings
+
+- Rechecked main e63d421, PR #40 head 636be97, open PRs #36–#39, recent commits,
+  successful CI, roadmap and current syscall/VFS/DiskFS/ATA/process/paging code.
+  Confirmed revalidation does not retain mappings during later volume/device
+  waits; the real munmap path could remove an active file buffer.
+- Added private per-process active ranges owned by syscall stacks around file
+  read/write callbacks. Munmap rejects overlap atomically before reservation/PTE
+  changes; unrelated pages/processes proceed. No extra allocation, I/O lock,
+  scheduler/VFS rewrite, or syscall number. Errors and kill wakeups return through
+  the one range-removal path. Completion order is independent of registration.
+- Expanded the real suspended-stack integration suite to include process.c mmap
+  reservation behavior. 3,462 checks passed local 64-bit ASan/UBSan; VM lifecycle
+  passed 36. Tests cover cross-page and overlapping ranges, either completion
+  order, PIO/device waits, independent mappings, read/RMW/write failure, kill/
+  spurious wakes, EOF/zero/invalid I/O, deferred validation and reuse.
+- Prior head plus seven isolated mutants fail named assertions; no crash/timeout
+  alone counts as proof. Added ring-3 mmap/COW file I/O and cleanup to stress,
+  retaining all existing assertions and requiring its marker twice.
+- Source/lifetime review checked every PTE teardown caller, last-task/exec/sbrk
+  behavior, descriptor ordering, IF preservation, zero-size and cleanup paths.
+  Contract and limitations are in docs/FILE_IO_BUFFERS.md and user_syscall.h.
+- Local standard gates encounter missing i386 execution / AF_UNIX support.
+  Full unmodified hosted regression/sanitizer/mutation results are recorded in
+  the PR after CI; local fallback results are identified separately there.
+- Scope remains file read/write buffers. Pipe/keyboard cancellation, borrowed
+  metadata/exec pointers, DMA pins, IRQ-driven ATA and crash consistency remain
+  distinct follow-ups. Existing non-UTF-8 findings/progress files are preserved.

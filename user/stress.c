@@ -657,6 +657,46 @@ static int test_standard_streams(void) {
     return 0;
 }
 
+/* Exercise real mmap PTEs and COW writes through indexed and redirected file
+ * I/O. The hosted suspended-stack suite controls the overlapping munmap order;
+ * here the kernel must preserve fork isolation and release every completed
+ * operation's mapping ownership before munmap/reuse and final process exit. */
+static int test_file_buffer_mappings(void) {
+    char *pages = (char *)sys_mmap(2);
+    int fd = sys_create("/disk/buffer-map");
+    if (!pages || fd < 0) return fail("file buffer setup");
+    char *buf = pages + PAGE_SIZE - 3;
+    for (int i = 0; i < 7; i++) buf[i] = (char)('A' + i);
+    if (sys_write_file(fd, buf, 7) != 7 || sys_seek(fd, 0, 0) != 0)
+        return fail("file buffer seed");
+    for (int i = 0; i < 7; i++) buf[i] = 'z';
+    int pid = sys_fork();
+    if (pid < 0) return fail("file buffer fork");
+    if (pid == 0) {
+        if (sys_read_file(fd, buf, 7) != 7) sys_exit(111);
+        for (int i = 0; i < 7; i++) if (buf[i] != 'A' + i) sys_exit(112);
+        if (sys_seek(fd, 0, 0) != 0 || sys_dup2(fd, 0) != 0 ||
+            sys_dup2(fd, 1) != 1 || sys_read(buf, 7) != 7 ||
+            sys_write(buf, 7) != 7 || sys_munmap(pages, 2) != 0 ||
+            sys_close(fd) != 0) sys_exit(113);
+        sys_exit(0);
+    }
+    int status = -1;
+    if (sys_waitpid(pid, &status, 0) != pid || status != 0)
+        return fail("file buffer child cleanup");
+    for (int i = 0; i < 7; i++) if (buf[i] != 'z') return fail("file buffer COW");
+    if (sys_read_file(fd, buf, 7) != 7) return fail("file buffer parent read");
+    for (int i = 0; i < 7; i++) if (buf[i] != 'A' + i) return fail("file buffer bytes");
+    if (sys_munmap(pages, 2) != 0 || sys_mmap(2) != pages)
+        return fail("file buffer mapping reuse");
+    if (pages[0] != 0 || pages[PAGE_SIZE] != 0 ||
+        sys_munmap(pages, 2) != 0 || sys_close(fd) != 0 ||
+        sys_unlink("/disk/buffer-map") != 0)
+        return fail("file buffer cleanup");
+    pass("file buffer mappings");
+    return 0;
+}
+
 static int test_process_exhaustion(void) {
     int children[15];
 
@@ -757,6 +797,7 @@ int main(void) {
         test_threads_and_context_switches() != 0 ||
         test_diskfs_operations() != 0 ||
         test_standard_streams() != 0 ||
+        test_file_buffer_mappings() != 0 ||
         test_process_exhaustion() != 0 ||
         test_repeated_lifecycle() != 0) {
         write_str("[stress FAILED]\n");

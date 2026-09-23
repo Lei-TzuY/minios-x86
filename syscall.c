@@ -38,6 +38,39 @@ static open_file_t open_files[MAX_PROCESSES][MAX_OPEN_FILES];
  * these gates are already clear when its slot is reused. */
 static uint8_t stdio_busy[MAX_PROCESSES][2];
 
+/* A filesystem may sleep after validation, while a sibling calls munmap.
+ * Keep its user virtual range mapped until the callback returns. Each record
+ * lives on the owning syscall stack; operations can finish in any order.
+ * This is mapping ownership, not a physical/DMA pin or a lock on buffer bytes.
+ * Like the descriptor tables, the lists are private to the IF=0 syscall path. */
+typedef struct file_io_range {
+    uint32_t start, end;
+    struct file_io_range *next;
+} file_io_range_t;
+static file_io_range_t *file_io_ranges[MAX_PROCESSES];
+
+/* Call only after descriptor acquisition and user-buffer validation. The
+ * nonkillable filesystem wait contract must return here on every error/kill
+ * wake so the stack record is removed before the task can exit. Pipe/keyboard
+ * waits have different cancellation ownership and do not enter this scope. */
+static uint32_t file_io(fs_node_t *node, uint32_t offset, uint32_t size,
+                        uint8_t *buffer, int writing) {
+    process_t *process = process_get_current();
+    file_io_range_t **head = &file_io_ranges[process->slot];
+    file_io_range_t range = { (uint32_t)buffer, (uint32_t)buffer + size, *head };
+    if (size) *head = &range;
+
+    uint32_t result = writing ? write_fs(node, offset, size, buffer) :
+                               read_fs(node, offset, size, buffer);
+
+    if (size) {
+        file_io_range_t **link = head;
+        while (*link != &range) link = &(*link)->next;
+        *link = range.next;
+    }
+    return result;
+}
+
 /* A filesystem may sleep after receiving the offset. Keep the slot, node and
  * offset together until that I/O commits; the volume gate cannot do this for
  * its caller. Lookup happens AFTER acquiring ownership, including after every
@@ -207,9 +240,9 @@ int32_t sys_write(const char *buffer, size_t count) {
         return (int32_t)pipe_write(pipe, (const uint8_t *)buffer, count);
     }
     if (process->stdout_node) {
-        uint32_t written = write_fs(process->stdout_node,
+        uint32_t written = file_io(process->stdout_node,
                                     process->stdout_offset,
-                                    count, (uint8_t *)buffer);
+                                    count, (uint8_t *)buffer, 1);
         process->stdout_offset += written;
         result = (int32_t)written;
     } else {
@@ -239,9 +272,9 @@ int32_t sys_read(char *buffer, size_t count) {
         return (int32_t)pipe_read(pipe, (uint8_t *)buffer, count);
     }
     if (process->stdin_node) {
-        uint32_t bytes = read_fs(process->stdin_node,
+        uint32_t bytes = file_io(process->stdin_node,
                                  process->stdin_offset,
-                                 count, (uint8_t *)buffer);
+                                 count, (uint8_t *)buffer, 0);
         process->stdin_offset += bytes;
         operation_end(busy);
         return (int32_t)bytes;
@@ -300,8 +333,8 @@ int32_t sys_read_file(int32_t fd, char *buffer, size_t count) {
             return (int32_t)pipe_read(pipe, (uint8_t *)buffer, count);
         }
         if (entry->kind == OF_FILE) {
-            uint32_t bytes = read_fs(entry->node, entry->offset, count,
-                                     (uint8_t *)buffer);
+            uint32_t bytes = file_io(entry->node, entry->offset, count,
+                                     (uint8_t *)buffer, 0);
             entry->offset += bytes;
             result = (int32_t)bytes;
         }
@@ -325,8 +358,8 @@ int32_t sys_write_file(int32_t fd, const char *buffer, size_t count) {
             return (int32_t)pipe_write(pipe, (const uint8_t *)buffer, count);
         }
         if (entry->kind == OF_FILE && entry->node->write) {
-            uint32_t bytes = count ? write_fs(entry->node, entry->offset, count,
-                                              (uint8_t *)buffer) : 0;
+            uint32_t bytes = count ? file_io(entry->node, entry->offset, count,
+                                             (uint8_t *)buffer, 1) : 0;
             entry->offset += bytes;
             result = bytes || count == 0 ? (int32_t)bytes : -1;
         }
@@ -890,11 +923,20 @@ static int32_t sys_mmap(int npages) {
 /* Release a run of pages previously obtained from sys_mmap: the reservation is
  * dropped (so the addresses can be handed out again) and any frames that were
  * demand-mapped are returned to the physical allocator. Freeing part of a
- * chunk is fine, but every page in the range must currently be reserved. */
+ * chunk is fine, but every page in the range must currently be reserved.
+ * Reject overlap with an active filesystem buffer before changing either the
+ * bitmap or PTEs. Never wait for I/O here: callers can retry after it completes. */
 static int32_t sys_munmap(uint32_t addr, int npages) {
     process_t *proc = process_get_current();
 
-    if (!proc || npages <= 0) return -1;
+    if (!proc || proc->slot >= MAX_PROCESSES || npages <= 0 ||
+        addr < USER_EXT_BASE || addr >= USER_EXT_TOP ||
+        (uint32_t)npages > (USER_EXT_TOP - addr) / 0x1000U) return -1;
+    uint32_t end = addr + (uint32_t)npages * 0x1000U;
+    for (file_io_range_t *range = file_io_ranges[proc->slot]; range;
+         range = range->next) {
+        if (addr < range->end && range->start < end) return -1;
+    }
     if (process_ext_free(proc, addr, (uint32_t)npages) < 0) return -1;
     for (int i = 0; i < npages; i++)
         paging_unmap_user_page(proc->address_space,

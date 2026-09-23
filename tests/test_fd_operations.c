@@ -15,6 +15,7 @@ static uint32_t save_irq_disable(void);
 static void restore_irq(uint32_t flags);
 #include "../syscall.c"
 #include "../diskfs.c"
+#include "../process.c"
 #include "../ramfs.h"
 
 #define WORKERS 3
@@ -26,12 +27,14 @@ static pthread_cond_t event = PTHREAD_COND_INITIALIZER;
 static __thread int actor = -1;
 static __thread uint32_t irq_flags;
 static process_t procs[2];
+static task_t model_tasks[2];
+static address_space_t model_spaces[2];
 static int controller_process;
 static uint8_t media[SECTORS][ATA_SECTOR_SIZE];
 static char *user_pages;
-static int mapped[WORKERS];
+static int mapped[2][WORKERS], unmap_calls[2];
 static int fd_a, fd_b, pause_actor, pause_write, paused, resume_io, preempt;
-static int fail_write, write_calls, live_allocs;
+static int fail_write, write_calls, fail_read, read_calls, live_allocs;
 static uint8_t seed[1024];
 
 typedef struct {
@@ -87,8 +90,10 @@ static uint32_t save_irq_disable(void) {
 }
 static void restore_irq(uint32_t flags) { irq_flags = flags; }
 
-process_t *process_get_current(void) {
-    return &procs[actor < 0 ? controller_process : workers[actor].process];
+task_t *task_get_current(void) {
+    int process = actor < 0 ? controller_process : workers[actor].process;
+    model_tasks[process].process = &procs[process];
+    return &model_tasks[process];
 }
 int paging_user_range_mapped(uint32_t address, uint32_t size) {
     if (address < USER_EXT_BASE || address >= USER_EXT_BASE + WORKERS * USER_PAGE)
@@ -96,8 +101,18 @@ int paging_user_range_mapped(uint32_t address, uint32_t size) {
     uint32_t offset = address - USER_EXT_BASE;
     if (size > WORKERS * USER_PAGE - offset) return 0;
     for (uint32_t i = offset / USER_PAGE; size && i <= (offset + size - 1) / USER_PAGE; i++)
-        if (!mapped[i]) return 0;
+        if (!mapped[process_get_current()->slot][i]) return 0;
     return 1;
+}
+/* PTEs are modeled per address space; the reservation allocator and munmap
+ * syscall are real. Retain the host backing so a failed ownership assertion
+ * diagnoses an invalid unmap without relying on a host segmentation fault. */
+void paging_unmap_user_page(address_space_t *space, uint32_t address) {
+    int process = space == &model_spaces[1];
+    CHECK(space == &model_spaces[process]);
+    CHECK(address >= USER_EXT_BASE && address < USER_EXT_BASE + WORKERS * USER_PAGE);
+    mapped[process][(address - USER_EXT_BASE) / USER_PAGE] = 0;
+    unmap_calls[process]++;
 }
 void *kmalloc(size_t size) {
     void *result = malloc(size);
@@ -149,9 +164,10 @@ static void device_pause(int writing) {
 }
 int ata_read_sector(uint32_t lba, uint8_t *out) {
     CHECK(lba < SECTORS);
+    read_calls++;
     memcpy(out, media[lba], ATA_SECTOR_SIZE);
     device_pause(0);
-    return 1;
+    return read_calls != fail_read;
 }
 int ata_write_sector(uint32_t lba, const uint8_t *in) {
     CHECK(lba < SECTORS);
@@ -209,8 +225,14 @@ static void fresh(void) {
     memset(workers, 0, sizeof(workers));
     memset(media, 0, sizeof(media));
     memset(user_pages, 0, WORKERS * USER_PAGE);
-    for (int i = 0; i < WORKERS; i++) mapped[i] = 1;
+    for (int p = 0; p < 2; p++) {
+        procs[p].address_space = &model_spaces[p];
+        CHECK_EQ(process_ext_alloc(&procs[p], WORKERS), USER_EXT_BASE);
+        for (int i = 0; i < WORKERS; i++) mapped[p][i] = 1;
+        unmap_calls[p] = 0;
+    }
     paused = resume_io = preempt = write_calls = fail_write = 0;
+    read_calls = fail_read = 0;
     terminal_bytes = keyboard_calls = keyboard_wait = 0;
     irq_flags = 0;
     diskfs_install();
@@ -226,7 +248,7 @@ static void fresh(void) {
     CHECK_EQ(fd_b, 4);
     for (int i = 0; i < WORKERS; i++) memset(buffer(i), 'A' + i, 32);
     CHECK_EQ(write_fs(ramfs_find_file("/ram"), 0, 32, seed + 17), 32);
-    write_calls = 0;
+    write_calls = read_calls = 0;
 }
 static void read_a(int id) { workers[id].result = sys_read_file(fd_a, buffer(id), 7); }
 static void write_a(int id) { workers[id].result = sys_write_file(fd_a, buffer(id), 7); }
@@ -478,8 +500,9 @@ static void test_wakes_and_errors(void) {
     first(read_a, 0);
     start(1, read_a);
     stopped(1);
+    CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 1), 0);
     CHECK_EQ(munmap(user_pages + USER_PAGE, USER_PAGE), 0);
-    mapped[1] = 0;
+    mapped[0][1] = 0;
     finish(2);
     CHECK_EQ(workers[1].result, -1);
     CHECK_EQ(sys_seek(fd_a, 0, SYS_SEEK_CUR), 7);
@@ -726,14 +749,16 @@ static void test_stdio_waits(void) {
         first(output ? stdout_write : stdin_read, output);
         start(1, output ? stdout_write : stdin_read);
         stopped(1);
+        CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 1), 0);
         CHECK_EQ(munmap(user_pages + USER_PAGE, USER_PAGE), 0);
-        mapped[1] = 0;
+        mapped[0][1] = 0;
         finish(2);
         CHECK_EQ(workers[1].result, -1);
         CHECK(mmap(user_pages + USER_PAGE, USER_PAGE, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) ==
               user_pages + USER_PAGE);
-        mapped[1] = 1;
+        mapped[0][1] = 1;
+        CHECK_EQ(sys_mmap(1), USER_EXT_BASE + USER_PAGE);
         /* A new valid call succeeds, proving the rejected call released. */
         CHECK_EQ(output ? sys_write(buffer(2), 1) : sys_read(buffer(2), 1), 1);
         if (!output) CHECK_EQ((uint8_t)buffer(2)[0], seed[7]);
@@ -863,6 +888,162 @@ static void test_stdio_devices(void) {
     CHECK_EQ((uint8_t)buffer(0)[0], seed[0]);
     CHECK_EQ(sys_write(buffer(1), 1), 1);
 }
+static int io_writing, io_standard, io_fds[WORKERS];
+static char *io_buffers[WORKERS];
+static void mapped_file_io(int id) {
+    workers[id].result = io_standard ?
+        (io_writing ? sys_write(io_buffers[id], 7) : sys_read(io_buffers[id], 7)) :
+        (io_writing ? sys_write_file(io_fds[id], io_buffers[id], 7) :
+                      sys_read_file(io_fds[id], io_buffers[id], 7));
+}
+static void io_setup(int writing, int standard) {
+    fresh();
+    io_writing = writing;
+    io_standard = standard;
+    for (int i = 0; i < WORKERS; i++) {
+        io_buffers[i] = buffer(i);
+        io_fds[i] = fd_a;
+    }
+    if (standard) CHECK_EQ(sys_dup2(fd_a, writing), writing);
+}
+static void expect_reserved(int page) {
+    uint32_t address = USER_EXT_BASE + page * USER_PAGE;
+    CHECK_EQ(process_ext_reserved(&procs[0], address), 1);
+    CHECK_EQ(paging_user_range_mapped(address, USER_PAGE), 1);
+    /* Stop on lost ownership before resuming a stack whose mapping was freed.
+     * Mutation failures must be named contract assertions, not later faults. */
+    if (test_failures) exit(1);
+}
+static void test_file_buffer_lifetime(void) {
+    for (int standard = 0; standard < 2; standard++) {
+        for (int writing = 0; writing < 2; writing++) {
+            for (int queued = 0; queued < 2; queued++) {
+                TEST("file buffer pages survive device sleep and current PIO volume waiting");
+                io_setup(writing, standard);
+                /* An unaligned buffer crosses two pages. Neighbouring pages
+                 * must remain independently reclaimable. */
+                int id = queued ? 1 : 0;
+                io_buffers[id] = user_pages + 2 * USER_PAGE - 3;
+                memset(io_buffers[id], 'X', 7);
+                if (queued) {
+                    preempt = 1;
+                    workers[0].flags = IF_FLAG;
+                    first(kernel_write, 1);
+                    start(1, mapped_file_io);
+                    stopped(1);
+                } else {
+                    first(mapped_file_io, writing);
+                }
+                CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 1), -1);
+                CHECK_EQ(sys_munmap(USER_EXT_BASE + 2 * USER_PAGE, 1), -1);
+                CHECK_EQ(sys_munmap(USER_EXT_BASE, WORKERS), -1);
+                CHECK_EQ(unmap_calls[0], 0);
+                for (int p = 0; p < WORKERS; p++) expect_reserved(p);
+                CHECK_EQ(sys_munmap(USER_EXT_BASE, 1), 0);
+                /* The same virtual addresses in another process are not owned
+                 * by this I/O. Its reservation/PTE teardown must proceed. */
+                controller_process = 1;
+                CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 2), 0);
+                CHECK_EQ(unmap_calls[1], 2);
+                controller_process = 0;
+                CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 2), -1);
+                finish(queued ? 2 : 1);
+                CHECK_EQ(workers[id].result, 7);
+                if (writing) check_bytes("a", (uint8_t *)"XXXXXXX", 7);
+                else CHECK(memcmp(io_buffers[id], seed, 7) == 0);
+                CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 2), 0);
+                CHECK_EQ(unmap_calls[0], WORKERS);
+                CHECK_EQ(sys_mmap(WORKERS), USER_EXT_BASE);
+            }
+        }
+    }
+}
+static void test_overlapping_file_buffers(void) {
+    for (int last = 1; last < WORKERS; last++) {
+        TEST("overlapping buffers retain every owner through different completion orders");
+        io_setup(0, 0);
+        io_fds[1] = fd_b;
+        io_fds[2] = sys_open(path("/disk/a"));
+        CHECK(io_fds[2] >= 0);
+        io_buffers[2] = buffer(1) + 16; /* two operations on the same page */
+        first(mapped_file_io, 0);
+        start(1, mapped_file_io);
+        stopped(1);
+        start(2, mapped_file_io);
+        stopped(2);
+        workers[last].delay = 1;
+        CHECK_EQ(sys_munmap(USER_EXT_BASE, 2), -1);
+        CHECK_EQ(sys_munmap(USER_EXT_BASE + 2 * USER_PAGE, 1), 0);
+        resume_io = 1;
+        pthread_cond_broadcast(&event);
+        int next = 3 - last;
+        while (!workers[0].done) wait_event();
+        /* DiskFS wakes one waiter. A signal/spurious wake may also make the
+         * other runnable before that waiter is scheduled; either may win. */
+        workers[next].blocked = 0;
+        pthread_cond_broadcast(&event);
+        while (!workers[next].done) wait_event();
+        CHECK_EQ(sys_munmap(USER_EXT_BASE, 1), 0);
+        CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 1), -1);
+        expect_reserved(1);
+        workers[last].delay = 0;
+        pthread_cond_broadcast(&event);
+        finish(WORKERS);
+        for (int i = 0; i < WORKERS; i++) {
+            CHECK_EQ(workers[i].result, 7);
+            CHECK(memcmp(io_buffers[i], seed, 7) == 0);
+            CHECK_EQ(sys_seek(io_fds[i], 0, SYS_SEEK_CUR), 7);
+        }
+        CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 1), 0);
+        CHECK_EQ(sys_mmap(WORKERS), USER_EXT_BASE);
+    }
+}
+static void test_file_buffer_cleanup(void) {
+    for (int standard = 0; standard < 2; standard++) {
+        for (int failure = 0; failure < 3; failure++) {
+            TEST("read, RMW-read and write errors release the complete buffer mapping");
+            io_setup(failure != 0, standard);
+            io_buffers[0] = buffer(1);
+            if (failure == 2) fail_write = 1;
+            else fail_read = 1;
+            first(mapped_file_io, failure == 2);
+            CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 1), -1);
+            finish(1);
+            CHECK_EQ(workers[0].result, failure && !standard ? -1 : 0);
+            CHECK_EQ(sys_seek(fd_a, 0, SYS_SEEK_CUR), 0);
+            CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 1), 0);
+            CHECK_EQ(process_ext_reserved(&procs[0], USER_EXT_BASE + USER_PAGE), 0);
+            CHECK_EQ(paging_user_range_mapped(USER_EXT_BASE + USER_PAGE, 1), 0);
+        }
+        TEST("kill and spurious wakes retain the mapping until filesystem cleanup returns");
+        io_setup(0, standard);
+        preempt = 1;
+        workers[0].flags = IF_FLAG;
+        first(kernel_write, 1);
+        start(1, mapped_file_io);
+        stopped(1);
+        int blocks = workers[1].blocks;
+        workers[1].killed = 1;
+        workers[1].blocked = 0;
+        pthread_cond_broadcast(&event);
+        while (workers[1].blocks == blocks && !workers[1].done) wait_event();
+        CHECK(!workers[1].done);
+        CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 1), -1);
+        finish(2);
+        CHECK_EQ(workers[1].result, 7);
+        CHECK(memcmp(io_buffers[1], seed, 7) == 0);
+        CHECK_EQ(sys_munmap(USER_EXT_BASE + USER_PAGE, 1), 0);
+    }
+    TEST("EOF, rejected ranges and zero-length I/O leave no mapping ownership");
+    io_setup(0, 0);
+    CHECK_EQ(sys_seek(fd_a, sizeof(seed), SYS_SEEK_SET), sizeof(seed));
+    CHECK_EQ(sys_read_file(fd_a, buffer(1), 7), 0);
+    CHECK_EQ(sys_read_file(fd_a, buffer(1), 0), 0);
+    CHECK_EQ(sys_write_file(fd_a, buffer(1), 0), 0);
+    CHECK_EQ(sys_read_file(fd_a, user_pages + WORKERS * USER_PAGE - 3, 7), -1);
+    CHECK_EQ(sys_munmap(USER_EXT_BASE, WORKERS), 0);
+    CHECK_EQ(sys_mmap(WORKERS), USER_EXT_BASE);
+}
 int main(int argc, char **argv) {
     void *want = (void *)(uintptr_t)USER_EXT_BASE;
     user_pages = mmap(want, WORKERS * USER_PAGE, PROT_READ | PROT_WRITE,
@@ -884,7 +1065,10 @@ int main(int argc, char **argv) {
         {"stdio-offsets", test_stdio_offsets}, {"stdio-pio", test_stdio_pio},
         {"stdio-replacement", test_stdio_replacement}, {"stdio-fork", test_stdio_fork},
         {"stdio-waits", test_stdio_waits}, {"stdio-lookup", test_stdio_lookup},
-        {"stdio-devices", test_stdio_devices}
+        {"stdio-devices", test_stdio_devices},
+        {"buffer-lifetime", test_file_buffer_lifetime},
+        {"buffer-overlap", test_overlapping_file_buffers},
+        {"buffer-cleanup", test_file_buffer_cleanup}
     };
     int selected = 0;
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {

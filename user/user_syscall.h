@@ -247,7 +247,10 @@ static inline void *sys_mmap(int npages) {
 /* Release `npages` starting at `addr` back to the mmap region (SYS_MUNMAP = 51).
  * The physical memory is freed and a later sys_mmap may hand the same addresses
  * out again; touching the pages after munmap kills the program. Every page in
- * the range must have come from sys_mmap and still be mapped. Returns 0 or -1. */
+ * the range must still be reserved by sys_mmap. Returns -1 without freeing any
+ * page if the range overlaps an active file read/write buffer in this process;
+ * retry after that operation completes. Otherwise returns 0 (or -1 on invalid
+ * arguments). Pipe/keyboard buffer ownership is not covered by this contract. */
 static inline int sys_munmap(void *addr, int npages) {
     int ret;
     __asm__ volatile("int $0x80"

@@ -153,12 +153,13 @@ tests/test_fdtable: tests/test_fdtable.c tests/test.h syscall.c syscall.h \
 	    -Wl,--gc-sections tests/test_fdtable.c -o $@
 
 # Suspended syscall stacks exercise real VFS/DiskFS and pipe lifetime behavior.
-# Only hardware, scheduler switching, user mapping queries and allocation are
-# modeled. Real user buffers live at USER_EXT_BASE (32 MiB), below the ASan
+# Includes the real process mmap allocator; only hardware, scheduler switching,
+# page tables and allocation are modeled. User buffers live at 32 MiB, below ASan's
 # shadow mapping on both hosted architectures; run UBSan in the normal gate too.
 tests/test_fd_operations: tests/test_fd_operations.c tests/test.h syscall.c \
                           syscall.h diskfs.c diskfs.h fs.c fs.h ramfs.c ramfs.h \
-                          pipe.c pipe.h irq.h task.h process.h utils.c utils.h
+                          pipe.c pipe.h irq.h task.h process.c process.h paging.h \
+                          utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -pthread -ffunction-sections -fdata-sections \
 	    -fsanitize=undefined -fno-sanitize-recover=all -Wl,--gc-sections \
 	    tests/test_fd_operations.c fs.c ramfs.c pipe.c utils.c -o $@

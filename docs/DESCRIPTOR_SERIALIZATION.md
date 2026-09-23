@@ -108,8 +108,9 @@ own endpoint pin before any wait. Keyboard dispatch releases it too: device
 waits may terminate the task and must not strand a stream gate. An operation
 already handed to a pipe/keyboard finishes on that device even if dup2 redirects
 the stream later. Future calls use the new binding. Terminal output remains
-nonblocking. User buffers are revalidated after acquiring a stream gate, but
-are not pinned across later device/filesystem waits.
+nonblocking. User buffers are revalidated after acquiring a stream gate.
+File read/write now retains their virtual mappings across subsequent filesystem
+waits; see [FILE_IO_BUFFERS.md](FILE_IO_BUFFERS.md).
 
 Final exit and failed-child teardown in process.c still release references
 without acquiring a gate. Every live operation has returned before the last
@@ -160,8 +161,9 @@ calls, with IF enabled. Enforcing initialization before task publication is a
 separate existing launch-order gap; this change does not make arbitrary
 cross-process redirection safe. Those APIs must not be used as runtime setters.
 
-User-buffer lifetime *during* VFS/device sleep, and borrowed path/stat pointers,
-also remain separate integration work. Revalidation at descriptor/stream gate
-acquisition is not a general buffer pinning solution. ATA still polls and DiskFS still has no journal or
-crash-atomic metadata transaction. This gate assumes the existing single CPU
+File read/write buffers now have mapping ownership across VFS/device sleep,
+as described in [FILE_IO_BUFFERS.md](FILE_IO_BUFFERS.md). Pipe/keyboard buffer
+cancellation and borrowed path/stat pointers remain separate integration work.
+This is not DMA frame pinning. ATA still polls and DiskFS still has no journal
+or crash-atomic metadata transaction. This gate assumes the existing single CPU
 and IF=0 syscall ABI; it is not an SMP synchronization primitive.
