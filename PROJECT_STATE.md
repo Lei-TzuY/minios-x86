@@ -17,7 +17,7 @@
 | `tests/` 原生單元測試 | ~12,700 行 |
 | 系統呼叫 | 52 |
 | 使用者程式 | 53 |
-| 單元測試套件 | 25 |
+| 單元測試套件 | 27 |
 
 ### 子系統
 
@@ -191,7 +191,7 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   RAMFS 快照；另有 ASan/UBSan、cppcheck 與 7 個具名 QEMU capacity/leak/exception mutants
   的 CI gate。
 
-目前 25 套件，`make unit` <1 秒：
+目前 27 套件，`make unit` <1 秒；DiskFS operation suite 另以 suspended pthread stacks 驗證 I/O 交錯：
 
 ```
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37455 /
@@ -225,10 +225,18 @@ signal 103 / vm-lifecycle 36
    體感卡頓。
    **Session 30 重新評估（見 findings.md 的 ASSESS1）：測試安全網已經足夠**
    （CAP18 的假裝置能編寫任意 BSY/DRQ/ERR/逾時序列，28 個突變證明有牙齒），
-   **但阻礙不在驅動**：`ata_read_sector` 目前永不阻塞，而 `diskfs.c` **完全沒有
-   序列化**（整個檔案沒有鎖、沒有 cli），它的狀態全靠「syscall 全程關中斷」這個從
-   interrupt gate 繼承來的假設。改成阻塞式 = 先替儲存堆疊引入併發模型，與下面第 2
-   項同一性質的架構決定。
+   **DiskFS operation serialization 已實作**：volume gate 橫跨所有 sector I/O、
+   metadata publication；open/close 保持不阻塞，read/write 在等待前取得暫時參照。
+   native interleaving suite 與 ring-3 stress 覆蓋資料一致性及 cleanup。
+   ATA 仍為 polling；下一步需要 driver request ownership、IRQ completion/timeout、
+   boot polling fallback，以及 user buffers 的阻塞生命週期契約。
+   fd 3–10 的 descriptor gate 已涵蓋 I/O/offset commit、seek、fstat、close、dup/dup2、
+   fork copy；pipe 在阻塞前釋放 gate，最終 process cleanup 保持不阻塞。
+   runtime stdin/stdout 也已有各自的 gate，涵蓋 I/O、offset、dup2 與 fork snapshot；
+   pipe/keyboard 等待前釋放 gate。shell 的「先 publish task、後設定串流」仍需改成
+   初始化完成後才發布；使用者緩衝區在真正 I/O 等待中的生命週期也仍未完成。
+   詳見 `docs/DESCRIPTOR_SERIALIZATION.md`。
+   詳見 `docs/DISKFS_SERIALIZATION.md`。
 
 2. **訊號遞送無法觸及阻塞中的 thread**（終止的部分已由 F19 修好）：
    `process_send_signal` 只喚醒 `process->task`，且訊號只在返回使用者模式時遞送

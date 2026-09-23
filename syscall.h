@@ -90,7 +90,10 @@ int32_t sys_fstat(int32_t fd, void *statbuf);
 int32_t sys_readdir(const char *path, uint32_t index, char *buffer);
 void sys_exit(int32_t status) __attribute__((noreturn));
 void syscall_close_user_files(struct process *process);
-/* Duplicate an open file table from one process to another (used by fork). */
+/* Fork into an unpublished child: snapshot indexed descriptors AND standard
+ * streams, waiting for each active operation and retaining its references.
+ * Final/failed-child cleanup releases streams in process.c and the table via
+ * syscall_close_user_files; neither cleanup path may wait. */
 void syscall_copy_user_files(struct process *parent, struct process *child);
 void syscall_install(void);
 

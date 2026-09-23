@@ -30,6 +30,7 @@ tests/test_pmm
 tests/test_heap
 tests/test_fat16
 tests/test_diskfs
+tests/test_diskfs_operations
 tests/bench_mem
 tests/bench_ramfs
 tests/test_pipe
@@ -50,3 +51,5 @@ tests/test_fdtable
 tests/test_process
 tests/test_signal
 tests/test_vm_lifecycle
+
+tests/test_fd_operations

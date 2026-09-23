@@ -491,6 +491,212 @@ static int test_threads_and_context_switches(void) {
     return 0;
 }
 
+static volatile int disk_workers_done[2];
+static int disk_shared_descriptor;
+
+static void disk_operation_worker(int id) {
+    const char *path = id ? "/disk/op-right" : "/disk/op-left";
+    unsigned char data[96], readback[96];
+    int shared = sys_open("/disk/op-shared");
+    int offset = id ? 97 : 17;
+
+    if (shared < 0) sys_exit(94);
+    for (int round = 0; round < 6; round++) {
+        for (int j = 0; j < 96; j++)
+            data[j] = (unsigned char)(0x80 + id * 16 + round + j);
+        int fd = sys_create(path);
+        if (fd < 0 || sys_seek(fd, 450, 0) != 450 ||
+            sys_write_file(fd, (const char *)data, 96) != 96 ||
+            sys_seek(shared, offset, 0) != offset ||
+            sys_write_file(shared, (const char *)data, 7) != 7)
+            sys_exit(95);
+        sys_yield();
+        if (sys_seek(fd, 450, 0) != 450 ||
+            sys_read_file(fd, (char *)readback, 96) != 96 ||
+            !bytes_equal(data, readback, 96) || sys_close(fd) != 0 ||
+            sys_unlink(path) != 0)
+            sys_exit(96);
+        /* Both threads use this exact fd, so the running offset belongs to
+         * the descriptor, not to either worker. Each 3-byte record is one
+         * operation; arbitrary worker order must retain all twelve records. */
+        char record[3] = { (char)('L' + id), (char)('0' + round), '\n' };
+        if (sys_write_file(disk_shared_descriptor, record, sizeof(record)) !=
+            (int)sizeof(record)) sys_exit(98);
+        sys_yield();
+    }
+    if (sys_close(shared) != 0) sys_exit(97);
+    disk_workers_done[id] = 1;
+    sys_exit(0);
+}
+
+static void disk_left_worker(void) { disk_operation_worker(0); }
+static void disk_right_worker(void) { disk_operation_worker(1); }
+
+/* Real syscall/VFS/PIO regression with independent descriptors, namespace
+ * churn, sector-spanning writes, shared-sector patches, and an exact shared
+ * descriptor. Suspended-I/O contention is covered by the hosted suites. */
+static int test_diskfs_operations(void) {
+    unsigned char expected[512], actual[512];
+    char *left = (char *)sys_mmap(THREAD_STACK_PAGES);
+    char *right = (char *)sys_mmap(THREAD_STACK_PAGES);
+    int fd = sys_create("/disk/op-shared");
+
+    if (!left || !right || fd < 0) return fail("diskfs operation setup");
+    for (int i = 0; i < 512; i++) expected[i] = (unsigned char)(i * 13 + 7);
+    if (sys_write_file(fd, (const char *)expected, 512) != 512)
+        return fail("diskfs operation seed");
+    disk_shared_descriptor = sys_create("/disk/op-records");
+    if (disk_shared_descriptor < 0) return fail("shared descriptor setup");
+    disk_workers_done[0] = disk_workers_done[1] = 0;
+    if (sys_thread_create(disk_left_worker, left + THREAD_STACK_PAGES * PAGE_SIZE) < 0 ||
+        sys_thread_create(disk_right_worker, right + THREAD_STACK_PAGES * PAGE_SIZE) < 0)
+        return fail("diskfs operation workers");
+    sys_thread_join();
+    for (int id = 0; id < 2; id++) {
+        if (!disk_workers_done[id]) return fail("diskfs operation worker result");
+        for (int j = 0; j < 7; j++)
+            expected[(id ? 97 : 17) + j] = (unsigned char)(0x80 + id * 16 + 5 + j);
+    }
+    if (sys_seek(fd, 0, 0) != 0 ||
+        sys_read_file(fd, (char *)actual, 512) != 512 ||
+        !bytes_equal(expected, actual, 512))
+        return fail("diskfs operation contents");
+    {
+        char records[36];
+        int seen[2][6] = {{0}};
+        int duplicate = sys_dup(disk_shared_descriptor);
+        if (sys_seek(disk_shared_descriptor, 0, 1) != 36 || duplicate < 0 ||
+            sys_seek(duplicate, 0, 1) != 36 ||
+            sys_seek(disk_shared_descriptor, 0, 0) != 0 ||
+            sys_read_file(disk_shared_descriptor, records, sizeof(records)) != 36)
+            return fail("shared descriptor offset");
+        for (int i = 0; i < 36; i += 3) {
+            int id = records[i] - 'L', round = records[i + 1] - '0';
+            if (id < 0 || id > 1 || round < 0 || round >= 6 ||
+                records[i + 2] != '\n' || seen[id][round]++)
+                return fail("shared descriptor records");
+        }
+        if (sys_close(disk_shared_descriptor) != 0 ||
+            sys_unlink("/disk/op-records") != -1 || sys_close(duplicate) != 0 ||
+            sys_unlink("/disk/op-records") != 0)
+            return fail("shared descriptor cleanup");
+        pass("shared descriptor operations");
+    }
+    if (sys_close(fd) != 0 || sys_unlink("/disk/op-shared") != 0 ||
+        sys_munmap(left, THREAD_STACK_PAGES) != 0 ||
+        sys_munmap(right, THREAD_STACK_PAGES) != 0)
+        return fail("diskfs operation cleanup");
+    pass("diskfs operations");
+    return 0;
+}
+
+static volatile int stream_workers_done[2], stream_seen[12];
+
+static void stream_worker(int id) {
+    for (int round = 0; round < 6; round++) {
+        char in[3], out[3] = { (char)('L' + id), (char)('0' + round), '\n' };
+        if (sys_read(in, sizeof(in)) != 3 || in[0] != 'I' ||
+            in[1] < 'a' || in[1] >= 'm' || in[2] != '\n') sys_exit(101);
+        stream_seen[in[1] - 'a']++;
+        if (sys_write(out, sizeof(out)) != 3) sys_exit(102);
+        sys_yield();
+    }
+    stream_workers_done[id] = 1;
+    sys_exit(0);
+}
+static void stream_left(void) { stream_worker(0); }
+static void stream_right(void) { stream_worker(1); }
+
+/* Redirect in a child so the stress controller keeps its console. Its two
+ * threads share fd 0/1; final exit must release their last stream references. */
+static int test_standard_streams(void) {
+    char input[36], records[36];
+    int in = sys_create("/disk/stream-in");
+    int out = sys_create("/disk/stream-out");
+    if (in < 0 || out < 0) return fail("standard stream setup");
+    for (int i = 0; i < 12; i++) {
+        input[3 * i] = 'I';
+        input[3 * i + 1] = (char)('a' + i);
+        input[3 * i + 2] = '\n';
+    }
+    if (sys_write_file(in, input, sizeof(input)) != 36 || sys_seek(in, 0, 0) != 0)
+        return fail("standard stream seed");
+    int pid = sys_fork();
+    if (pid < 0) return fail("standard stream fork");
+    if (pid == 0) {
+        char *left = (char *)sys_mmap(THREAD_STACK_PAGES);
+        char *right = (char *)sys_mmap(THREAD_STACK_PAGES);
+        if (!left || !right || sys_dup2(in, 0) != 0 || sys_dup2(out, 1) != 1 ||
+            sys_close(in) != 0 || sys_close(out) != 0) sys_exit(103);
+        if (sys_thread_create(stream_left, left + THREAD_STACK_PAGES * PAGE_SIZE) < 0 ||
+            sys_thread_create(stream_right, right + THREAD_STACK_PAGES * PAGE_SIZE) < 0)
+            sys_exit(104);
+        sys_thread_join();
+        if (!stream_workers_done[0] || !stream_workers_done[1]) sys_exit(105);
+        for (int i = 0; i < 12; i++) if (stream_seen[i] != 1) sys_exit(106);
+        if (sys_read(input, 1) != 0 ||
+            sys_munmap(left, THREAD_STACK_PAGES) != 0 ||
+            sys_munmap(right, THREAD_STACK_PAGES) != 0) sys_exit(107);
+        sys_exit(0);
+    }
+    int status = -1, seen[2][6] = {{0}};
+    if (sys_waitpid(pid, &status, 0) != pid || status != 0 ||
+        sys_read_file(out, records, sizeof(records)) != 36 ||
+        sys_read_file(out, input, 1) != 0)
+        return fail("standard stream child result");
+    for (int i = 0; i < 36; i += 3) {
+        int id = records[i] - 'L', round = records[i + 1] - '0';
+        if (id < 0 || id > 1 || round < 0 || round >= 6 ||
+            records[i + 2] != '\n' || seen[id][round]++)
+            return fail("standard stream records");
+    }
+    if (sys_close(in) != 0 || sys_close(out) != 0 ||
+        sys_unlink("/disk/stream-in") != 0 || sys_unlink("/disk/stream-out") != 0)
+        return fail("standard stream cleanup");
+    pass("standard stream operations");
+    return 0;
+}
+
+/* Exercise real mmap PTEs and COW writes through indexed and redirected file
+ * I/O. The hosted suspended-stack suite controls the overlapping munmap order;
+ * here the kernel must preserve fork isolation and release every completed
+ * operation's mapping ownership before munmap/reuse and final process exit. */
+static int test_file_buffer_mappings(void) {
+    char *pages = (char *)sys_mmap(2);
+    int fd = sys_create("/disk/buffer-map");
+    if (!pages || fd < 0) return fail("file buffer setup");
+    char *buf = pages + PAGE_SIZE - 3;
+    for (int i = 0; i < 7; i++) buf[i] = (char)('A' + i);
+    if (sys_write_file(fd, buf, 7) != 7 || sys_seek(fd, 0, 0) != 0)
+        return fail("file buffer seed");
+    for (int i = 0; i < 7; i++) buf[i] = 'z';
+    int pid = sys_fork();
+    if (pid < 0) return fail("file buffer fork");
+    if (pid == 0) {
+        if (sys_read_file(fd, buf, 7) != 7) sys_exit(111);
+        for (int i = 0; i < 7; i++) if (buf[i] != 'A' + i) sys_exit(112);
+        if (sys_seek(fd, 0, 0) != 0 || sys_dup2(fd, 0) != 0 ||
+            sys_dup2(fd, 1) != 1 || sys_read(buf, 7) != 7 ||
+            sys_write(buf, 7) != 7 || sys_munmap(pages, 2) != 0 ||
+            sys_close(fd) != 0) sys_exit(113);
+        sys_exit(0);
+    }
+    int status = -1;
+    if (sys_waitpid(pid, &status, 0) != pid || status != 0)
+        return fail("file buffer child cleanup");
+    for (int i = 0; i < 7; i++) if (buf[i] != 'z') return fail("file buffer COW");
+    if (sys_read_file(fd, buf, 7) != 7) return fail("file buffer parent read");
+    for (int i = 0; i < 7; i++) if (buf[i] != 'A' + i) return fail("file buffer bytes");
+    if (sys_munmap(pages, 2) != 0 || sys_mmap(2) != pages)
+        return fail("file buffer mapping reuse");
+    if (pages[0] != 0 || pages[PAGE_SIZE] != 0 ||
+        sys_munmap(pages, 2) != 0 || sys_close(fd) != 0 ||
+        sys_unlink("/disk/buffer-map") != 0)
+        return fail("file buffer cleanup");
+    pass("file buffer mappings");
+    return 0;
+}
+
 static int test_process_exhaustion(void) {
     int children[15];
 
@@ -589,6 +795,9 @@ int main(void) {
         test_filesystems() != 0 ||
         test_interrupts_and_preemption() != 0 ||
         test_threads_and_context_switches() != 0 ||
+        test_diskfs_operations() != 0 ||
+        test_standard_streams() != 0 ||
+        test_file_buffer_mappings() != 0 ||
         test_process_exhaustion() != 0 ||
         test_repeated_lifecycle() != 0) {
         write_str("[stress FAILED]\n");

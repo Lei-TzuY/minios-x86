@@ -7,7 +7,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 |---|---:|
 | System calls | 52 |
 | User programs | 53 |
-| Native unit suites | 25 |
+| Native unit suites | 27 |
 | Standalone native gates | 3 |
 | QEMU regression targets in `make test` | 5 |
 | QEMU stress mutants | 7 |
@@ -132,6 +132,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 - `tests/test_heap`
 - `tests/test_fat16`
 - `tests/test_diskfs`
+- `tests/test_diskfs_operations`
 - `tests/test_pipe`
 - `tests/test_sem`
 - `tests/test_timer`
@@ -147,6 +148,7 @@ This file is derived from build metadata and kernel registrations. CI regenerate
 - `tests/test_vga`
 - `tests/test_ata`
 - `tests/test_fdtable`
+- `tests/test_fd_operations`
 - `tests/test_process`
 - `tests/test_signal`
 - `tests/test_vm_lifecycle`

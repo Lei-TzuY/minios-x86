@@ -1,5 +1,54 @@
 # Task Plan — miniOS 全面審查與持續改善
 
+## DiskFS operation serialization run
+
+- Freshly inspected main `e63d4218ea91069506b05944ead5a9198bf8568a`, recent
+  storage/process commits, open PRs #36–#39 and their successful CI, current
+  roadmap, DiskFS/VFS/syscall/ATA code, scheduler and teardown paths, and tests.
+  No open non-PR issues. Re-fetched main before delivery; the base is unchanged.
+- Confirmed the distinction between implicit syscall serialization (IF=0,
+  nonblocking PIO) and preemptible kernel-shell callers. The latter can already
+  interleave sector read/modify/write and metadata publication. Blocking ATA
+  would expose the same gap inside syscalls.
+- Implemented one private sleepable volume gate with one release path per public
+  entry; internal helpers do not reacquire it. Reference callbacks remain IRQ-only
+  because `task_exit` invokes process teardown after changing `current_task`.
+  VFS read/write pins cover gate wait and I/O; node publication is IRQ-atomic
+  because generic VFS dispatch reads callback pointers before entering DiskFS.
+- Write errors take the volume offline; retained VFS nodes reject further I/O
+  while still permitting close/recovery. Physical sector rollback is not claimed.
+  Architecture, source evidence, cancellation and future-driver requirements are
+  in `docs/DISKFS_SERIALIZATION.md`.
+- Added a 1,486-check suspended-stack DiskFS/VFS suite to `make unit` and the
+  ASan/UBSan selection. It exercises PIO-return preemption and future device
+  sleeps, both partial-write orders, coherent reads, namespace persistence,
+  mount/format, spurious/kill wakeups, reference cleanup and overtaking callers,
+  and failures at every data/directory/superblock write plus RMW reads.
+- The unchanged main implementation fails actual byte comparisons (lost updates,
+  mixed read versions, lost directory entry and slot-reuse corruption). Five
+  isolated mutants are rejected by named assertions: missing ownership, missing
+  wakeup, missing queued-read pin, missing offline-read check, and a killable gate
+  wait. Mutants run in temporary copies; the reviewed source stays unchanged.
+- Added a ring-3 two-worker filesystem test to the existing stress workload and
+  required its success marker twice. Local QEMU stress passed twice with stable
+  resources using a scratch stdio-monitor adapter and unchanged workload/assertions.
+- Local clean kernel build passed without warnings. ATA-absent, disk boot and
+  real GRUB/ISO boot gates passed. The focused operation suite passed ASan/UBSan
+  on the 64-bit host; all Python regressions, inventory/ABI/registration/ownership/
+  GNU-stack checks, shell syntax, user incremental build and cppcheck passed.
+- The container cannot execute hosted i386 binaries or create AF_UNIX sockets.
+  Standard `make test`, `make sanitize` and `make static-analysis` encounter that
+  runtime constraint; exact full gates, shell regression and existing seven
+  QEMU mutants must run in GitHub Actions. Final hosted results are recorded
+  in the PR rather than claiming local i386 success here.
+- Self-review checked gate scope, all error exits, non-reentrancy, wakeup and
+  cancellation, retired-stack close, node publication, and in-flight references.
+  No VFS ABI, scheduler, ATA hardware protocol, on-disk format or existing check
+  was rewritten. Future targets: ATA IRQ request lifecycle, shared descriptor
+  offset/lifetime contracts across sleep, and DiskFS crash-consistent metadata.
+- Existing `findings.md` and `progress.md` contain non-UTF-8 binary data on main;
+  this section records this run's findings/progress without overwriting them.
+
 ## Goal
 對 miniOS（32-bit x86 教學型作業系統，~33K LOC C/ASM，位於本專案根目錄）進行全面程式碼審查，
 找出未完成項目、Bug、競態條件、記憶體安全問題、效能瓶頸、架構缺陷與技術債，依優先級修復、
@@ -544,3 +593,89 @@ Status: complete
 | 突變 pattern 對不上（CRLF 樹用 `\n`） | Python 字面替換 + LF 正規化後依原行尾寫回 |
 | `bigseek` 誤用 API 導致節點數飄移（Session 25） | `sys_create` 已回傳開啟的 fd；測試改為**斷言**清理成功 |
 | 往返測試沒模型化 handler 的 `ret`，在正確程式上也因錯的理由通過（Session 33） | 突變測試逼出來；補上 `useresp += 4` 才是真的往返 |
+
+
+## 2026-09-21 follow-up: indexed descriptor operations
+
+- Re-fetched main e63d4218 and PR #40 head e74d8875; all three PR workflows green.
+  PRs #36–#39 remain independent; no new code reviews or open non-PR issues.
+- Confirmed a caller-side gap with real syscall/VFS/DiskFS tests: serialized
+  DiskFS requests still receive stale shared descriptor offsets; completion can
+  also update a closed/reused slot. Current kernel PIO preemption reproduces it.
+- Added per-indexed-descriptor gates across file I/O and offset commit, seek,
+  fstat, close, dup/dup2 and fork copying. Sorted dup2 locking, empty destination
+  reservations and explicit payload copying preserve ownership without copying
+  lock state. Pipe waits and final process teardown remain outside the gate.
+- Added real suspended-stack tests, actual unmapping during descriptor wait,
+  and ring-3 shared-fd records. See docs/DESCRIPTOR_SERIALIZATION.md for evidence,
+  lookup semantics, lock order, cleanup and deliberately bounded scope.
+- Isolated previous-head and six targeted mutant checks fail named assertions;
+  the working source is never mutated in place. Native/ASan/UBSan, QEMU, static,
+  build and hosted CI results are recorded in the PR after final verification.
+- Existing findings.md/progress.md remain non-UTF-8 binary data, so this entry
+  records this run's findings and progress rather than rewriting those files.
+
+## 2026-09-22 follow-up: standard-stream operations
+
+- Re-inspected live main e63d4218, recent commits, PRs #36–#40, CI, issues,
+  reviews, roadmap and source. PR40 head 84150ab was green and unchanged;
+  no open non-PR issues or overlapping changes appeared.
+- Prior-head tests reproduce lost stdout records, repeated stdin bytes, and
+  completion advancing a replacement stream. Current kernel PIO preemption
+  also reproduces the lost write, without assuming syscall timer preemption.
+- Added two private per-process stream gates beside indexed descriptor gates.
+  Runtime file I/O/offset commit, dup2 replacement and fork snapshots acquire
+  ownership; stream-before-indexed-source order preserves independent progress.
+  Pipe/keyboard waits release the gate; final/failed-child cleanup stays
+  nonblocking. Existing offsets, reference ownership and return codes remain.
+- Extended the real suspended-stack suite and QEMU stress with both streams,
+  fork, late lookup, pipes, unmapping, errors and independent progress. The
+  new fixture initially filled a pipe from the last mapped page; ASan caught
+  that test-only overrun. The fill now has sufficient mapped capacity, and the
+  fake page query checks every page in the entire requested range.
+- Eight isolated mutations fail named assertions, plus three prior-head
+  behavioral failures. All mutations use scratch copies and verify that the
+  source tree is unchanged. The existing process lifecycle assertions are
+  preserved; its copy-hook stub now models the hook's added stream ownership.
+- Local native/ASan/UBSan, QEMU, build/static checks and hosted CI results are
+  recorded in PR40 after final verification. The environment still cannot run
+  i386 hosted binaries or AF_UNIX monitor sockets; hosted gates remain intact.
+- Self-review: no nested stream gates; fork releases each source before the
+  next; all error returns release; no gate over killable device waits; no lock
+  state copied; process slot reuse follows last-task cleanup. The kernel shell
+  still assumes redirection precedes a child's first run despite publishing
+  its task earlier. This existing initialization/publication gap is explicitly
+  documented rather than claiming runtime gates solve it. User buffers during
+  actual I/O sleep, IRQ ATA and crash consistency remain separate work.
+- findings.md/progress.md remain non-UTF-8 binary data; this entry records
+  findings and progress without overwriting their contents.
+
+
+## Follow-up: file read/write buffer mappings
+
+- Rechecked main e63d421, PR #40 head 636be97, open PRs #36–#39, recent commits,
+  successful CI, roadmap and current syscall/VFS/DiskFS/ATA/process/paging code.
+  Confirmed revalidation does not retain mappings during later volume/device
+  waits; the real munmap path could remove an active file buffer.
+- Added private per-process active ranges owned by syscall stacks around file
+  read/write callbacks. Munmap rejects overlap atomically before reservation/PTE
+  changes; unrelated pages/processes proceed. No extra allocation, I/O lock,
+  scheduler/VFS rewrite, or syscall number. Errors and kill wakeups return through
+  the one range-removal path. Completion order is independent of registration.
+- Expanded the real suspended-stack integration suite to include process.c mmap
+  reservation behavior. 3,462 checks passed local 64-bit ASan/UBSan; VM lifecycle
+  passed 36. Tests cover cross-page and overlapping ranges, either completion
+  order, PIO/device waits, independent mappings, read/RMW/write failure, kill/
+  spurious wakes, EOF/zero/invalid I/O, deferred validation and reuse.
+- Prior head plus seven isolated mutants fail named assertions; no crash/timeout
+  alone counts as proof. Added ring-3 mmap/COW file I/O and cleanup to stress,
+  retaining all existing assertions and requiring its marker twice.
+- Source/lifetime review checked every PTE teardown caller, last-task/exec/sbrk
+  behavior, descriptor ordering, IF preservation, zero-size and cleanup paths.
+  Contract and limitations are in docs/FILE_IO_BUFFERS.md and user_syscall.h.
+- Local standard gates encounter missing i386 execution / AF_UNIX support.
+  Full unmodified hosted regression/sanitizer/mutation results are recorded in
+  the PR after CI; local fallback results are identified separately there.
+- Scope remains file read/write buffers. Pipe/keyboard cancellation, borrowed
+  metadata/exec pointers, DMA pins, IRQ-driven ATA and crash consistency remain
+  distinct follow-ups. Existing non-UTF-8 findings/progress files are preserved.

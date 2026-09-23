@@ -24,6 +24,14 @@
 static uint8_t disk[STUB_SECTORS * ATA_SECTOR_SIZE];
 static int ata_present = 1;
 
+/* This suite is sequential; the separate operation suite suspends real
+ * hosted stacks at device/wait boundaries to exercise contention. */
+void task_block_current(const void *channel) {
+    (void)channel;
+    CHECK(0 && "sequential DiskFS operation must not block");
+}
+void task_wake_one(const void *channel) { (void)channel; }
+
 int ata_is_available(void) { return ata_present; }
 uint32_t ata_get_sector_count(void) { return ata_present ? STUB_SECTORS : 0; }
 

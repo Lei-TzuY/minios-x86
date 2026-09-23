@@ -135,6 +135,15 @@ int paging_user_range_mapped(uint32_t vaddr, uint32_t size) {
 
 #include "test.h"
 
+/* Sequential ownership tests must never contend. The suspended-stack suite
+ * test_fd_operations supplies real wakeups for the blocking paths. */
+void task_block_current(const void *channel) {
+    (void)channel;
+    CHECK(0 && "unexpected descriptor wait in sequential ownership test");
+    __builtin_trap();
+}
+void task_wake_all(const void *channel) { (void)channel; }
+
 /* --- harness -------------------------------------------------------------- */
 
 #ifndef MAP_FIXED_NOREPLACE

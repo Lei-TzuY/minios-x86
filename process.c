@@ -258,24 +258,9 @@ int32_t process_fork(process_t *parent, address_space_t *space,
         memcpy(child->env_vals[i], parent->env_vals[i], ENV_VAL_MAX);
     }
 
-    /* Duplicate the open file table before the child can run. */
+    /* Snapshot indexed descriptors and standard streams under their operation
+     * gates before the child can run. Each keeps its own offset/reference. */
     syscall_copy_user_files(parent, child);
-
-    /* Inherit the standard streams too. Unix fork duplicates the whole
-     * descriptor table, and syscall_copy_user_files only covers fds >= 3;
-     * without this a child of a process whose stdout was redirected would
-     * write to the terminal instead of the redirect target. Each stream takes
-     * its own reference / pipe-end count, released by process_finish_exit. */
-    child->stdout_node = parent->stdout_node;
-    child->stdout_offset = parent->stdout_offset;
-    if (child->stdout_node) open_fs(child->stdout_node);
-    child->stdin_node = parent->stdin_node;
-    child->stdin_offset = parent->stdin_offset;
-    if (child->stdin_node) open_fs(child->stdin_node);
-    child->stdout_pipe = parent->stdout_pipe;
-    if (child->stdout_pipe) pipe_ref_write(child->stdout_pipe);
-    child->stdin_pipe = parent->stdin_pipe;
-    if (child->stdin_pipe) pipe_ref_read(child->stdin_pipe);
 
     child->task = create_task(fork_child_entry, process_task_exit, space, child, 0, 0);
     if (!child->task) {

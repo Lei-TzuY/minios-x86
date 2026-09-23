@@ -33,12 +33,13 @@ OBJS = boot.o kernel.o vga.o gdt.o gdt_s.o idt.o isr.o interrupt.o \
 UNIT_CFLAGS = -m32 -std=gnu99 -O1 -g -Wall -Wextra -fno-builtin
 UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_fs tests/test_pmm \
             tests/test_heap \
-            tests/test_fat16 tests/test_diskfs tests/test_pipe tests/test_sem \
+            tests/test_fat16 tests/test_diskfs tests/test_diskfs_operations \
+            tests/test_pipe tests/test_sem \
             tests/test_timer tests/test_task tests/test_rtc \
             tests/test_process_env tests/test_syscall_valid \
             tests/test_paging_cow tests/test_elf tests/test_ramfs \
             tests/test_kb tests/test_procfs tests/test_vga tests/test_ata \
-            tests/test_fdtable tests/test_process tests/test_signal \
+            tests/test_fdtable tests/test_fd_operations tests/test_process tests/test_signal \
             tests/test_vm_lifecycle
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
@@ -77,8 +78,16 @@ tests/test_fat16: tests/test_fat16.c tests/test.h tests/fs_conformance.h \
 # ATA is stubbed with a RAM array by the test itself, so ata.c is not linked:
 # that is what lets the test hand diskfs a deliberately corrupt disk.
 tests/test_diskfs: tests/test_diskfs.c tests/test.h tests/fs_conformance.h \
-                   diskfs.c diskfs.h fs.c fs.h utils.c utils.h ata.h
-	$(CC) $(UNIT_CFLAGS) tests/test_diskfs.c diskfs.c fs.c utils.c -o $@
+                   diskfs.c diskfs.h fs.c fs.h utils.c utils.h ata.h irq.h task.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_diskfs.c diskfs.c fs.c utils.c -o $@
+
+# The real DiskFS/VFS call paths run on suspended pthread stacks. Only IRQ and
+# ATA/scheduler boundaries are modelled; a CPU mutex is dropped at every switch.
+tests/test_diskfs_operations: tests/test_diskfs_operations.c tests/test.h \
+                              diskfs.c diskfs.h fs.c fs.h utils.c utils.h \
+                              ata.h irq.h task.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -pthread \
+	    tests/test_diskfs_operations.c fs.c utils.c -o $@
 
 # pipe.c and sem.c guard their cli/sti behind HOSTED_TEST so the privileged
 # instructions compile out for these ring-3 tests (see pipe.c). The scheduler
@@ -142,6 +151,18 @@ tests/test_fdtable: tests/test_fdtable.c tests/test.h syscall.c syscall.h \
                     process.h fs.h pipe.h paging.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
 	    -Wl,--gc-sections tests/test_fdtable.c -o $@
+
+# Suspended syscall stacks exercise real VFS/DiskFS and pipe lifetime behavior.
+# Includes the real process mmap allocator; only hardware, scheduler switching,
+# page tables and allocation are modeled. User buffers live at 32 MiB, below ASan's
+# shadow mapping on both hosted architectures; run UBSan in the normal gate too.
+tests/test_fd_operations: tests/test_fd_operations.c tests/test.h syscall.c \
+                          syscall.h diskfs.c diskfs.h fs.c fs.h ramfs.c ramfs.h \
+                          pipe.c pipe.h irq.h task.h process.c process.h paging.h \
+                          utils.c utils.h
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -pthread -ffunction-sections -fdata-sections \
+	    -fsanitize=undefined -fno-sanitize-recover=all -Wl,--gc-sections \
+	    tests/test_fd_operations.c fs.c ramfs.c pipe.c utils.c -o $@
 
 # The process lifecycle state machine. process.c is included directly to reach
 # its statics and the three internal exit paths; the scheduler is MODELLED
