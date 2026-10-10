@@ -17,7 +17,7 @@
 | `tests/` 原生單元測試 | ~12,700 行 |
 | 系統呼叫 | 52 |
 | 使用者程式 | 53 |
-| 單元測試套件 | 26 |
+| 單元測試套件 | 28 |
 
 ### 子系統
 
@@ -126,10 +126,20 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
 
 ### 功能與效能
 
+- **BUILD1（2026-09-20）**：核心 C 物件新增編譯器產生的標頭依賴，修正只改
+  `task.h` 卻沿用舊 `timer.o`／`kernel.bin` 的增量建置錯誤。直接、間接標頭、
+  Makefile 更新、舊物件遷移、移除標頭與 clean 都由真實核心建置回歸守護；
+  增量核心須與乾淨重建位元組相同。命令列旗標／工具鏈變更仍需 clean。
+
 - **FEAT1**：可執行檔改走 VFS 查找，能從任何已掛載檔案系統執行程式。
   （**注意**：這也是 F20/F21/CAP12 之所以必要的原因——威脅模型因此改變。）
 - **FEAT2**：新增 `dup()` 系統呼叫，配置最低可用 fd；檔案與 pipe end 都取得獨立
   參照，並保留來源描述子的目前 offset。所有權語意由 hosted fd regression 守護。
+- **2026-09-19 thread join caller 修正**：`thread_count` 只計 worker；原版允許
+  worker 呼叫 join-all，會永遠等自己的 exit。現在只有主 task 可等待所有 worker，
+  完成回傳 0；worker／無 process 呼叫者立即回傳 -1，syscall 與 wrapper 傳遞結果。
+  原生測試涵蓋雙 worker、main 已退出、偽喚醒與 kill；ring-3 使用獨立父行程 watchdog
+  驗證 liveness、回傳值與回收，另有 caller guard／syscall result 兩個永久 mutant。
 - **FAIR1**：blocked 串列改 FIFO 喚醒。
 - **PERF1**：memcpy/memset 4-byte 批次（對齊時 3–5x；**來源/目的相對未對齊時
   無改善**，已誠實記錄）。
@@ -187,17 +197,17 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   scheduler/context switch、帶著 heap/mmap/fd/pipe 輪流遭 #PF/#DE/#UD/#GP 的異常退出、
   syscall pointer validation、RAMFS/DiskFS/FAT16、threads/processes、fd/pipe/process/node
   exhaustion 與反覆 fork/exec/create/destroy。monitor-driven harness 在同次開機跑兩輪，
-  要求十個具名階段各通過兩次，並逐欄比較 PMM、heap、user spaces、process/task/timer、
-  RAMFS 快照；另有 ASan/UBSan、cppcheck 與 7 個具名 QEMU capacity/leak/exception mutants
+  要求十一個具名階段各通過兩次，並逐欄比較 PMM、heap、user spaces、process/task/timer、
+  RAMFS 快照；另有 ASan/UBSan、cppcheck 與 9 個具名 QEMU capacity/leak/exception/join mutants
   的 CI gate。
 
-目前 26 套件，`make unit` <1 秒：
+目前 28 套件，`make unit` <1 秒；DiskFS operation suite 另以 suspended pthread stacks 驗證 I/O 交錯：
 
 ```
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37455 /
-diskfs 979 / pipe 89 / sem 38 / timer 63 / task 82 / rtc 35 /
+diskfs 979 / pipe 89 / sem 38 / timer 548 / task 82 / rtc 35 /
 process-env 47 / syscall-valid 46 / paging-cow 31 / elf 146 / ramfs 4335 /
-kb 1675 / procfs 183 / vga 4769 / ata 8995 / fdtable 489 / process 419 /
+kb 1675 / procfs 183 / vga 4769 / ata 8995 / fdtable 489 / process 532 /
 signal 103 / vm-lifecycle 36
 ```
 
@@ -207,6 +217,7 @@ signal 103 / vm-lifecycle 36
 
 | 決策 | 理由 |
 |---|---|
+| `thread_join` 只允許 main task | join-all 的 worker 計數包含呼叫者本身，worker 等歸零會自我死鎖。 |
 | 全域 cli 併發模型 | 單核教學系統的簡化選擇。「沒上鎖」多為設計而非 bug。 |
 | 執行檔解析**不**相對 cwd | 否則 ush `cd fat` 後跑 `cat` 會壞（`cat` 在 `/cat`）。 |
 | kill 不做 EINTR 上拋 | 終止不需回到使用者空間，`task_exit` 即可；EINTR 會動到 ABI。 |
@@ -225,10 +236,18 @@ signal 103 / vm-lifecycle 36
    體感卡頓。
    **Session 30 重新評估（見 findings.md 的 ASSESS1）：測試安全網已經足夠**
    （CAP18 的假裝置能編寫任意 BSY/DRQ/ERR/逾時序列，28 個突變證明有牙齒），
-   **但阻礙不在驅動**：`ata_read_sector` 目前永不阻塞，而 `diskfs.c` **完全沒有
-   序列化**（整個檔案沒有鎖、沒有 cli），它的狀態全靠「syscall 全程關中斷」這個從
-   interrupt gate 繼承來的假設。改成阻塞式 = 先替儲存堆疊引入併發模型，與下面第 2
-   項同一性質的架構決定。
+   **DiskFS operation serialization 已實作**：volume gate 橫跨所有 sector I/O、
+   metadata publication；open/close 保持不阻塞，read/write 在等待前取得暫時參照。
+   native interleaving suite 與 ring-3 stress 覆蓋資料一致性及 cleanup。
+   ATA 仍為 polling；下一步需要 driver request ownership、IRQ completion/timeout、
+   boot polling fallback，以及 user buffers 的阻塞生命週期契約。
+   fd 3–10 的 descriptor gate 已涵蓋 I/O/offset commit、seek、fstat、close、dup/dup2、
+   fork copy；pipe 在阻塞前釋放 gate，最終 process cleanup 保持不阻塞。
+   runtime stdin/stdout 也已有各自的 gate，涵蓋 I/O、offset、dup2 與 fork snapshot；
+   pipe/keyboard 等待前釋放 gate。shell 的「先 publish task、後設定串流」仍需改成
+   初始化完成後才發布；使用者緩衝區在真正 I/O 等待中的生命週期也仍未完成。
+   詳見 `docs/DESCRIPTOR_SERIALIZATION.md`。
+   詳見 `docs/DISKFS_SERIALIZATION.md`。
 
 2. **訊號遞送無法觸及阻塞中的 thread**（終止的部分已由 F19 修好）：
    `process_send_signal` 只喚醒 `process->task`，且訊號只在返回使用者模式時遞送
@@ -236,9 +255,11 @@ signal 103 / vm-lifecycle 36
    可捕捉的訊號。根治需要「可中斷睡眠 + EINTR 上拋」，牽涉所有阻塞點**以及使用者
    空間對「系統呼叫可能被中斷」的預期**，會動到 ABI。
 
-3. **`timer_sleep` 被訊號（非 kill）提早喚醒**時直接回傳 0，且 slot 佔到原到期
-   時間才被 `timer_callback` 清掉。提早返回符合 POSIX `sleep()` 語意，slot 滯留
-   有界且會自癒（不會被解參照）。修它需改動 `test_timer` 對「睡著」的建模。
+3. **2026-09-19 已修正：訊號提早喚醒的 sleep slot 滯留**。原版反覆中斷長睡眠
+   會耗盡 16 個全域槽位，第 17 次 sleep 回傳 -1；最長期限約 248 天，不能依賴
+   到期自癒。現在正常／kill 返回都先歸還仍屬於自己的槽位，保留既有提早回傳 0
+   語意。native 測試以序列化的 pthread 堆疊模型驗證真正暫停、到期、重用、kill
+   與提前釋放；ring-3 stress 另驗證連續 32 次 SIGALRM 中斷及後續 sleep 可用性。
 
 4. **`ramfs_write` 重用路徑的 memset 是冗餘防禦**（突變 R6 存活）：程式碼註解
    自承「already zero by the invariant, but make it explicit」。與成長路徑的

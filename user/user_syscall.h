@@ -218,7 +218,7 @@ static inline int sys_time(struct utime *buf) {
  * space) only becomes reapable once every thread -- main included -- has
  * exited: if main exits first, the kernel defers the actual teardown until
  * the last thread finishes, so a parent's wait()/waitpid() on this process
- * blocks for the full lifetime. Prefer sys_thread_join() before exiting
+ * blocks for the full lifetime. From main, prefer sys_thread_join() before exiting
  * anyway when you want a deterministic point at which all threads are known
  * to be done (see threadexit.c for a case that relies on the deferred path). */
 static inline int sys_thread_create(void (*entry)(void), void *stack_top) {
@@ -230,9 +230,13 @@ static inline int sys_thread_create(void (*entry)(void), void *stack_top) {
     return ret;
 }
 
-/* Block until every thread of this process has exited (SYS_THREAD_JOIN = 50). */
-static inline void sys_thread_join(void) {
-    __asm__ volatile("int $0x80" : : "a"(50) : "memory");
+/* Main waits until all workers exit (SYS_THREAD_JOIN = 50). Returns 0 on
+ * completion, including when no workers exist. A worker gets -1 immediately:
+ * joining all workers from a worker would wait for its own exit. */
+static inline int sys_thread_join(void) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(50) : "memory");
+    return ret;
 }
 
 /* Reserve `npages` of demand-paged memory in the mmap region (SYS_MMAP = 48),
@@ -247,7 +251,10 @@ static inline void *sys_mmap(int npages) {
 /* Release `npages` starting at `addr` back to the mmap region (SYS_MUNMAP = 51).
  * The physical memory is freed and a later sys_mmap may hand the same addresses
  * out again; touching the pages after munmap kills the program. Every page in
- * the range must have come from sys_mmap and still be mapped. Returns 0 or -1. */
+ * the range must still be reserved by sys_mmap. Returns -1 without freeing any
+ * page if the range overlaps an active file read/write buffer in this process;
+ * retry after that operation completes. Otherwise returns 0 (or -1 on invalid
+ * arguments). Pipe/keyboard buffer ownership is not covered by this contract. */
 static inline int sys_munmap(void *addr, int npages) {
     int ret;
     __asm__ volatile("int $0x80"

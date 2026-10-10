@@ -87,6 +87,10 @@ make test
 - per-process CPU-time accounting
 - threads and lifecycle handling
 
+`sys_thread_join()` lets the main task wait for all workers and returns 0,
+including when no workers remain. Worker callers return -1 immediately,
+avoiding a wait for their own exit. Existing callers may ignore the result.
+
 ### Signals & IPC
 - SIGINT / KILL / USR1 / ALRM / TERM / CHLD
 - SIGSTOP / SIGCONT job control
@@ -103,6 +107,14 @@ A unified VFS over:
 - synthetic `/proc`
 
 Programs can be executed from mounted filesystems rather than only from the built-in RAMFS.
+
+DiskFS serializes complete volume operations with a sleepable gate and keeps
+VFS reference cleanup nonblocking. See [the storage synchronization contract](docs/DISKFS_SERIALIZATION.md)
+for ownership, failure handling, tests, and the remaining blocking-ATA work.
+Indexed file descriptors also serialize I/O, offsets, seek, close and duplication
+across filesystem waits. Runtime stdin/stdout file I/O, redirection and fork snapshots
+now share that ownership model. See [descriptor ownership](docs/DESCRIPTOR_SERIALIZATION.md)
+for the operation order, pipe/teardown boundaries and remaining blocking-I/O work.
 
 ### User land
 - 52 system calls
@@ -149,17 +161,26 @@ sudo apt install -y grub-pc-bin grub-common xorriso mtools
 ## Build and run
 
 ```sh
-make              # build kernel.bin
+make all          # build kernel.bin
 make run          # run in QEMU with a test disk attached
 make unit         # native unit tests only
 make test         # native + QEMU / ISO validation
 make test-stress  # focused ring-3 stress run, twice in one QEMU boot
+make test-interrupt-entry  # real ISR/IRQ assembly: DF isolation and iret flags
 make sanitize     # hosted suites under AddressSanitizer + UBSan
 make static-analysis       # Python + inventory + shell syntax checks, then cppcheck
-make test-stress-mutants   # prove all seven capacity/leak/exception gates fire
+make test-stress-mutants   # prove all twelve entry/capacity/leak/exception/timer/join gates fire
 make iso          # produce miniOS.iso
 make run-iso      # boot the ISO through GRUB in QEMU
 ```
+
+Kernel C objects track direct and transitive project headers through compiler-generated
+dependency files. `make all` recompiles affected objects and relinks the kernel after
+a header edit; `make clean` also removes dependency files. Changing the root Makefile
+rebuilds all kernel objects, including older checkouts without dependency files.
+Run `make clean` when changing command-line compiler flags or toolchains.
+The real-build regression is `python3 tests/test_kernel_incremental_build.py` and
+runs in `make static-analysis`.
 
 On Windows, prefix commands with `wsl`.
 

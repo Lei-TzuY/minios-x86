@@ -75,7 +75,7 @@ typedef struct process {
     uint32_t        sig_trampoline;  /* user sigreturn trampoline address */
     uint8_t         in_signal;       /* a handler is currently running */
     uint8_t         stopped;         /* job control: suspended by SIGSTOP */
-    uint32_t        thread_count;    /* live threads sharing this address space */
+    uint32_t        thread_count;    /* live workers; excludes the main task */
     /* Set when the main task has called exit()/returned while extra threads
      * (SYS_THREAD_CREATE) are still running. Full teardown (address space,
      * open files, zombie transition) is deferred until thread_count reaches
@@ -173,8 +173,9 @@ void process_pause(void);
  * disappear out from under it. A parent's wait()/waitpid() on this process
  * blocks for that entire deferred period. */
 int32_t process_thread_create(uint32_t entry, uint32_t stack_top);
-/* Block until every thread of the current process has exited. */
-void process_thread_join(void);
+/* The main task waits until all workers exit, then returns 0. A worker or
+ * caller without a process returns -1 without blocking. */
+int32_t process_thread_join(void);
 
 /* Page-granular allocator for the process's mmap region (SYS_MMAP/SYS_MUNMAP).
  * Alloc reserves the first free run of `npages` and returns its base address

@@ -1,6 +1,8 @@
 #include "diskfs.h"
 #include "ata.h"
 #include "fs.h"
+#include "irq.h"
+#include "task.h"
 #include "utils.h"
 
 #define DISKFS_MAGIC            0x5346534DU
@@ -53,6 +55,36 @@ static fs_node_t diskfs_nodes[DISKFS_MAX_FILES];
 static uint32_t diskfs_open_refs[DISKFS_MAX_FILES];
 static dirent_t diskfs_dirent;
 static int diskfs_mounted = 0;
+
+/* One operation owns the volume, including every sector transfer and metadata
+ * publication. IRQ exclusion only protects the gate itself; it is NOT the
+ * operation lock. A task may sleep in ATA with this gate held. Keep the caller's
+ * IF state: syscall execution remains non-preemptible, kernel callers need not
+ * mask interrupts for a whole filesystem operation.
+ *
+ * These waits deliberately do not call task_exit: a caller may already own an
+ * ELF image, open reference, or other resource. Future blocking ATA must also
+ * return errors to its caller, never terminate a task inside an operation.
+ * Device waits must remain bounded and restore their incoming IF state.
+ * No IRQ handler may enter DiskFS. Internal helpers never acquire the gate. */
+static int diskfs_operation_active;
+
+static void diskfs_begin_operation(void) {
+    uint32_t flags = save_irq_disable();
+
+    while (diskfs_operation_active)
+        task_block_current(&diskfs_operation_active);
+    diskfs_operation_active = 1;
+    restore_irq(flags);
+}
+
+static void diskfs_end_operation(void) {
+    uint32_t flags = save_irq_disable();
+
+    diskfs_operation_active = 0;
+    task_wake_one(&diskfs_operation_active);
+    restore_irq(flags);
+}
 
 static uint32_t diskfs_vfs_read(fs_node_t *node, uint32_t offset,
                                 uint32_t size, uint8_t *buffer);
@@ -185,9 +217,15 @@ static int diskfs_has_open_files(void) {
 
 static void diskfs_refresh_node(uint32_t index) {
     fs_node_t *node = &diskfs_nodes[index];
+    /* VFS dispatch reads callback pointers before entering our gate. Publish
+     * the node atomically even for a preemptible kernel caller. */
+    uint32_t flags = save_irq_disable();
 
     memset(node, 0, sizeof(*node));
-    if (!diskfs_entries[index].used) return;
+    if (!diskfs_entries[index].used) {
+        restore_irq(flags);
+        return;
+    }
 
     strcpy(node->name, diskfs_entries[index].name);
     node->inode = index + 1;
@@ -208,6 +246,7 @@ static void diskfs_refresh_node(uint32_t index) {
         node->open = diskfs_vfs_open;
         node->close = diskfs_vfs_close;
     }
+    restore_irq(flags);
 }
 
 static void diskfs_refresh_nodes(void) {
@@ -279,17 +318,19 @@ static int diskfs_store_metadata(int increment_generation) {
     return 1;
 }
 
-void diskfs_install(void) {
+static int diskfs_mount_locked(void);
+
+static void diskfs_install_locked(void) {
     diskfs_mounted = 0;
     memset(&diskfs_superblock, 0, sizeof(diskfs_superblock));
     memset(diskfs_entries, 0, sizeof(diskfs_entries));
     memset(diskfs_open_refs, 0, sizeof(diskfs_open_refs));
     diskfs_init_root_node();
     diskfs_refresh_nodes();
-    if (ata_is_available()) diskfs_mount();
+    if (ata_is_available()) diskfs_mount_locked();
 }
 
-int diskfs_format(void) {
+static int diskfs_format_locked(void) {
     if (!ata_is_available() || diskfs_has_open_files() ||
         ata_get_sector_count() <
         DISKFS_DATA_LBA + DISKFS_MAX_FILES * DISKFS_FILE_SECTORS) {
@@ -317,7 +358,7 @@ int diskfs_format(void) {
     return 1;
 }
 
-int diskfs_mount(void) {
+static int diskfs_mount_locked(void) {
     diskfs_superblock_t superblock;
 
     if (!ata_is_available() || diskfs_has_open_files()) return 0;
@@ -375,13 +416,13 @@ static int diskfs_remove_entry(uint32_t index, uint8_t type) {
     return 1;
 }
 
-int diskfs_create_file(const char *name) {
+static int diskfs_create_file_locked(const char *name) {
     if (diskfs_create_entry(DISKFS_ROOT_PARENT, name, DISKFS_ENTRY_FILE) >= 0)
         return 1;
     return 0;
 }
 
-int diskfs_write_file(const char *name, const uint8_t *buffer, uint32_t size) {
+static int diskfs_write_file_locked(const char *name, const uint8_t *buffer, uint32_t size) {
     uint8_t sector[ATA_SECTOR_SIZE];
     uint32_t written = 0;
     int index = diskfs_find_file(name);
@@ -402,6 +443,9 @@ int diskfs_write_file(const char *name, const uint8_t *buffer, uint32_t size) {
         if (!ata_write_sector(DISKFS_DATA_LBA +
                               (uint32_t)index * DISKFS_FILE_SECTORS + i,
                               sector)) {
+            /* Earlier sectors may already have changed. Do not expose a
+             * partially completed write through the old cached metadata. */
+            diskfs_mounted = 0;
             return 0;
         }
         written += count;
@@ -413,7 +457,7 @@ int diskfs_write_file(const char *name, const uint8_t *buffer, uint32_t size) {
     return 1;
 }
 
-int diskfs_read_file(const char *name, uint8_t *buffer, uint32_t size) {
+static int diskfs_read_file_locked(const char *name, uint8_t *buffer, uint32_t size) {
     uint8_t sector[ATA_SECTOR_SIZE];
     uint32_t copied = 0;
     int index = diskfs_find_file(name);
@@ -439,22 +483,22 @@ int diskfs_read_file(const char *name, uint8_t *buffer, uint32_t size) {
     return (int)copied;
 }
 
-int diskfs_unlink_file(const char *name) {
+static int diskfs_unlink_file_locked(const char *name) {
     int index = diskfs_find_file(name);
 
     return index >= 0 ?
            diskfs_remove_entry((uint32_t)index, DISKFS_ENTRY_FILE) : 0;
 }
 
-int diskfs_is_mounted(void) {
+static int diskfs_is_mounted_locked(void) {
     return diskfs_mounted;
 }
 
-uint32_t diskfs_get_generation(void) {
+static uint32_t diskfs_get_generation_locked(void) {
     return diskfs_mounted ? diskfs_superblock.generation : 0;
 }
 
-uint32_t diskfs_get_file_count(void) {
+static uint32_t diskfs_get_file_count_locked(void) {
     uint32_t count = 0;
 
     if (!diskfs_mounted) return 0;
@@ -532,6 +576,7 @@ static int diskfs_write_slot(uint32_t index, uint32_t offset,
             if (!ata_read_sector(DISKFS_DATA_LBA +
                                  index * DISKFS_FILE_SECTORS + current,
                                  sector)) {
+                diskfs_mounted = 0;
                 return 0;
             }
         } else {
@@ -548,6 +593,7 @@ static int diskfs_write_slot(uint32_t index, uint32_t offset,
         if (!ata_write_sector(DISKFS_DATA_LBA +
                               index * DISKFS_FILE_SECTORS + current,
                               sector)) {
+            diskfs_mounted = 0;
             return 0;
         }
     }
@@ -558,31 +604,42 @@ static int diskfs_write_slot(uint32_t index, uint32_t offset,
     return 1;
 }
 
-static uint32_t diskfs_vfs_read(fs_node_t *node, uint32_t offset,
+static uint32_t diskfs_vfs_read_locked(fs_node_t *node, uint32_t offset,
                                 uint32_t size, uint8_t *buffer) {
     int result;
 
-    if (!node) return 0;
+    if (!diskfs_mounted || !node) return 0;
     result = diskfs_read_slot(node->impl, offset, buffer, size);
     return result < 0 ? 0 : (uint32_t)result;
 }
 
-static uint32_t diskfs_vfs_write(fs_node_t *node, uint32_t offset,
+static uint32_t diskfs_vfs_write_locked(fs_node_t *node, uint32_t offset,
                                  uint32_t size, uint8_t *buffer) {
-    if (!node || !diskfs_write_slot(node->impl, offset, buffer, size)) return 0;
+    if (!diskfs_mounted || !node ||
+        !diskfs_write_slot(node->impl, offset, buffer, size)) return 0;
     return size;
 }
 
 static void diskfs_vfs_open(fs_node_t *node) {
+    uint32_t flags = save_irq_disable();
+
     if (node && node->impl < DISKFS_MAX_FILES)
         diskfs_open_refs[node->impl]++;
+    restore_irq(flags);
 }
 
+/* Reference callbacks cannot wait for the operation gate: close is also called
+ * on task_exit's retired stack after current_task has changed. Existing owned
+ * references pin a slot; a new lookup is gated and must reach open without a
+ * scheduling point (the syscall interrupt gate supplies this today). */
 static void diskfs_vfs_close(fs_node_t *node) {
+    uint32_t flags = save_irq_disable();
+
     if (node && node->impl < DISKFS_MAX_FILES &&
         diskfs_open_refs[node->impl] != 0) {
         diskfs_open_refs[node->impl]--;
     }
+    restore_irq(flags);
 }
 
 static int diskfs_vfs_parent(fs_node_t *node, uint8_t *parent) {
@@ -601,7 +658,7 @@ static int diskfs_vfs_parent(fs_node_t *node, uint8_t *parent) {
     return 0;
 }
 
-static dirent_t *diskfs_vfs_readdir(fs_node_t *node, uint32_t index) {
+static dirent_t *diskfs_vfs_readdir_locked(fs_node_t *node, uint32_t index) {
     uint32_t child_index = 0;
     uint8_t parent;
 
@@ -619,7 +676,7 @@ static dirent_t *diskfs_vfs_readdir(fs_node_t *node, uint32_t index) {
     return NULL;
 }
 
-static fs_node_t *diskfs_vfs_finddir(fs_node_t *node, const char *name) {
+static fs_node_t *diskfs_vfs_finddir_locked(fs_node_t *node, const char *name) {
     int index;
     uint8_t parent;
 
@@ -628,7 +685,7 @@ static fs_node_t *diskfs_vfs_finddir(fs_node_t *node, const char *name) {
     return index < 0 ? NULL : &diskfs_nodes[index];
 }
 
-static fs_node_t *diskfs_vfs_create(fs_node_t *node, const char *name) {
+static fs_node_t *diskfs_vfs_create_locked(fs_node_t *node, const char *name) {
     int index;
     uint8_t parent;
 
@@ -637,7 +694,7 @@ static fs_node_t *diskfs_vfs_create(fs_node_t *node, const char *name) {
     return index < 0 ? NULL : &diskfs_nodes[index];
 }
 
-static int diskfs_vfs_unlink(fs_node_t *node, const char *name) {
+static int diskfs_vfs_unlink_locked(fs_node_t *node, const char *name) {
     int index;
     uint8_t parent;
 
@@ -647,7 +704,7 @@ static int diskfs_vfs_unlink(fs_node_t *node, const char *name) {
            diskfs_remove_entry((uint32_t)index, DISKFS_ENTRY_FILE) ? 0 : -1;
 }
 
-static int diskfs_vfs_mkdir(fs_node_t *node, const char *name) {
+static int diskfs_vfs_mkdir_locked(fs_node_t *node, const char *name) {
     uint8_t parent;
 
     if (!diskfs_mounted || !diskfs_vfs_parent(node, &parent)) return -1;
@@ -655,7 +712,7 @@ static int diskfs_vfs_mkdir(fs_node_t *node, const char *name) {
            0 : -1;
 }
 
-static int diskfs_vfs_rmdir(fs_node_t *node, const char *name) {
+static int diskfs_vfs_rmdir_locked(fs_node_t *node, const char *name) {
     int index;
     uint8_t parent;
 
@@ -666,6 +723,186 @@ static int diskfs_vfs_rmdir(fs_node_t *node, const char *name) {
            0 : -1;
 }
 
-fs_node_t *diskfs_get_root_node(void) {
+static fs_node_t *diskfs_get_root_node_locked(void) {
     return diskfs_mounted ? &diskfs_root_node : NULL;
+}
+
+/* Public and VFS entry points own the gate exactly once. Keeping the body in
+ * a helper gives every success/error return the same release path. */
+
+void diskfs_install(void) {
+    diskfs_begin_operation();
+    diskfs_install_locked();
+    diskfs_end_operation();
+}
+
+int diskfs_format(void) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_format_locked();
+    diskfs_end_operation();
+    return result;
+}
+
+int diskfs_mount(void) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_mount_locked();
+    diskfs_end_operation();
+    return result;
+}
+
+int diskfs_create_file(const char *name) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_create_file_locked(name);
+    diskfs_end_operation();
+    return result;
+}
+
+int diskfs_write_file(const char *name, const uint8_t *buffer, uint32_t size) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_write_file_locked(name, buffer, size);
+    diskfs_end_operation();
+    return result;
+}
+
+int diskfs_read_file(const char *name, uint8_t *buffer, uint32_t size) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_read_file_locked(name, buffer, size);
+    diskfs_end_operation();
+    return result;
+}
+
+int diskfs_unlink_file(const char *name) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_unlink_file_locked(name);
+    diskfs_end_operation();
+    return result;
+}
+
+int diskfs_is_mounted(void) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_is_mounted_locked();
+    diskfs_end_operation();
+    return result;
+}
+
+uint32_t diskfs_get_generation(void) {
+    uint32_t result;
+
+    diskfs_begin_operation();
+    result = diskfs_get_generation_locked();
+    diskfs_end_operation();
+    return result;
+}
+
+uint32_t diskfs_get_file_count(void) {
+    uint32_t result;
+
+    diskfs_begin_operation();
+    result = diskfs_get_file_count_locked();
+    diskfs_end_operation();
+    return result;
+}
+
+fs_node_t *diskfs_get_root_node(void) {
+    fs_node_t *result;
+
+    diskfs_begin_operation();
+    result = diskfs_get_root_node_locked();
+    diskfs_end_operation();
+    return result;
+}
+
+static uint32_t diskfs_vfs_read(fs_node_t *node, uint32_t offset,
+                                uint32_t size, uint8_t *buffer) {
+    uint32_t result;
+
+    /* A sibling can close the descriptor while we wait or sleep in ATA.
+     * Pin before the first possible scheduling point, and drop while the
+     * operation still excludes removal/reuse of this node's slot. */
+    diskfs_vfs_open(node);
+    diskfs_begin_operation();
+    result = diskfs_vfs_read_locked(node, offset, size, buffer);
+    diskfs_vfs_close(node);
+    diskfs_end_operation();
+    return result;
+}
+
+static uint32_t diskfs_vfs_write(fs_node_t *node, uint32_t offset,
+                                 uint32_t size, uint8_t *buffer) {
+    uint32_t result;
+
+    diskfs_vfs_open(node);
+    diskfs_begin_operation();
+    result = diskfs_vfs_write_locked(node, offset, size, buffer);
+    diskfs_vfs_close(node);
+    diskfs_end_operation();
+    return result;
+}
+
+static dirent_t *diskfs_vfs_readdir(fs_node_t *node, uint32_t index) {
+    dirent_t *result;
+
+    diskfs_begin_operation();
+    result = diskfs_vfs_readdir_locked(node, index);
+    diskfs_end_operation();
+    return result;
+}
+
+static fs_node_t *diskfs_vfs_finddir(fs_node_t *node, const char *name) {
+    fs_node_t *result;
+
+    diskfs_begin_operation();
+    result = diskfs_vfs_finddir_locked(node, name);
+    diskfs_end_operation();
+    return result;
+}
+
+static fs_node_t *diskfs_vfs_create(fs_node_t *node, const char *name) {
+    fs_node_t *result;
+
+    diskfs_begin_operation();
+    result = diskfs_vfs_create_locked(node, name);
+    diskfs_end_operation();
+    return result;
+}
+
+static int diskfs_vfs_unlink(fs_node_t *node, const char *name) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_vfs_unlink_locked(node, name);
+    diskfs_end_operation();
+    return result;
+}
+
+static int diskfs_vfs_mkdir(fs_node_t *node, const char *name) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_vfs_mkdir_locked(node, name);
+    diskfs_end_operation();
+    return result;
+}
+
+static int diskfs_vfs_rmdir(fs_node_t *node, const char *name) {
+    int result;
+
+    diskfs_begin_operation();
+    result = diskfs_vfs_rmdir_locked(node, name);
+    diskfs_end_operation();
+    return result;
 }

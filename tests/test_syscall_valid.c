@@ -113,11 +113,11 @@ static void test_buffer_mapping(void) {
 }
 
 static void test_alloc_fd(void) {
-    open_file_t files[MAX_OPEN_FILES];
+    /* Match the kernel's zero-initialized table, including idle slot gates. */
+    open_file_t files[MAX_OPEN_FILES] = {0};
     int i;
 
     TEST("alloc_fd hands out distinct descriptors then fails");
-    for (i = 0; i < MAX_OPEN_FILES; i++) files[i].kind = OF_NONE;
 
     for (i = 0; i < MAX_OPEN_FILES; i++) {
         int32_t fd = alloc_fd(files, OF_FILE, NULL, NULL);

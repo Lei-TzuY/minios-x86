@@ -189,14 +189,23 @@ def snapshots(log: str) -> list[dict[str, tuple[int, ...]]]:
 
 def validate(log: str) -> None:
     required = [
+        "[stress direction flag syscall ok]",
+        "[stress direction flag fault ok]",
         "[stress invalid pointers ok]",
         "[stress fault isolation ok]",
         "[stress heap exhaustion ok]",
         "[stress heap and paging ok]",
         "[stress fd and pipe exhaustion ok]",
         "[stress filesystems ok]",
+        "[stress interrupted sleep ok]",
         "[stress interrupts and preemption ok]",
         "[stress scheduling and context switches ok]",
+        "[stress diskfs operations ok]",
+        "[stress shared descriptor operations ok]",
+        "[stress standard stream operations ok]",
+        "[stress file buffer mappings ok]",
+
+        "[stress thread join callers ok]",
         "[stress process exhaustion ok]",
         "[stress repeated lifecycle ok]",
         "[stress PASS]",

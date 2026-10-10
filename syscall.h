@@ -55,7 +55,7 @@ enum syscall_number {
     SYS_SEM_POST    = 47,  /* V: increment and wake a waiter */
     SYS_MMAP        = 48,  /* allocate demand-paged pages in the mmap region */
     SYS_THREAD_CREATE = 49, /* spawn a thread sharing this address space */
-    SYS_THREAD_JOIN   = 50, /* block until all threads have exited */
+    SYS_THREAD_JOIN   = 50, /* main joins all workers; 0 on success, else -1 */
     SYS_MUNMAP        = 51, /* release pages previously obtained from SYS_MMAP */
     SYS_DUP           = 52, /* duplicate a descriptor into the lowest free fd */
 };
@@ -90,7 +90,10 @@ int32_t sys_fstat(int32_t fd, void *statbuf);
 int32_t sys_readdir(const char *path, uint32_t index, char *buffer);
 void sys_exit(int32_t status) __attribute__((noreturn));
 void syscall_close_user_files(struct process *process);
-/* Duplicate an open file table from one process to another (used by fork). */
+/* Fork into an unpublished child: snapshot indexed descriptors AND standard
+ * streams, waiting for each active operation and retaining its references.
+ * Final/failed-child cleanup releases streams in process.c and the table via
+ * syscall_close_user_files; neither cleanup path may wait. */
 void syscall_copy_user_files(struct process *parent, struct process *child);
 void syscall_install(void);
 

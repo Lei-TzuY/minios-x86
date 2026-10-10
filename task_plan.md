@@ -1,5 +1,54 @@
 # Task Plan — miniOS 全面審查與持續改善
 
+## DiskFS operation serialization run
+
+- Freshly inspected main `e63d4218ea91069506b05944ead5a9198bf8568a`, recent
+  storage/process commits, open PRs #36–#39 and their successful CI, current
+  roadmap, DiskFS/VFS/syscall/ATA code, scheduler and teardown paths, and tests.
+  No open non-PR issues. Re-fetched main before delivery; the base is unchanged.
+- Confirmed the distinction between implicit syscall serialization (IF=0,
+  nonblocking PIO) and preemptible kernel-shell callers. The latter can already
+  interleave sector read/modify/write and metadata publication. Blocking ATA
+  would expose the same gap inside syscalls.
+- Implemented one private sleepable volume gate with one release path per public
+  entry; internal helpers do not reacquire it. Reference callbacks remain IRQ-only
+  because `task_exit` invokes process teardown after changing `current_task`.
+  VFS read/write pins cover gate wait and I/O; node publication is IRQ-atomic
+  because generic VFS dispatch reads callback pointers before entering DiskFS.
+- Write errors take the volume offline; retained VFS nodes reject further I/O
+  while still permitting close/recovery. Physical sector rollback is not claimed.
+  Architecture, source evidence, cancellation and future-driver requirements are
+  in `docs/DISKFS_SERIALIZATION.md`.
+- Added a 1,486-check suspended-stack DiskFS/VFS suite to `make unit` and the
+  ASan/UBSan selection. It exercises PIO-return preemption and future device
+  sleeps, both partial-write orders, coherent reads, namespace persistence,
+  mount/format, spurious/kill wakeups, reference cleanup and overtaking callers,
+  and failures at every data/directory/superblock write plus RMW reads.
+- The unchanged main implementation fails actual byte comparisons (lost updates,
+  mixed read versions, lost directory entry and slot-reuse corruption). Five
+  isolated mutants are rejected by named assertions: missing ownership, missing
+  wakeup, missing queued-read pin, missing offline-read check, and a killable gate
+  wait. Mutants run in temporary copies; the reviewed source stays unchanged.
+- Added a ring-3 two-worker filesystem test to the existing stress workload and
+  required its success marker twice. Local QEMU stress passed twice with stable
+  resources using a scratch stdio-monitor adapter and unchanged workload/assertions.
+- Local clean kernel build passed without warnings. ATA-absent, disk boot and
+  real GRUB/ISO boot gates passed. The focused operation suite passed ASan/UBSan
+  on the 64-bit host; all Python regressions, inventory/ABI/registration/ownership/
+  GNU-stack checks, shell syntax, user incremental build and cppcheck passed.
+- The container cannot execute hosted i386 binaries or create AF_UNIX sockets.
+  Standard `make test`, `make sanitize` and `make static-analysis` encounter that
+  runtime constraint; exact full gates, shell regression and existing seven
+  QEMU mutants must run in GitHub Actions. Final hosted results are recorded
+  in the PR rather than claiming local i386 success here.
+- Self-review checked gate scope, all error exits, non-reentrancy, wakeup and
+  cancellation, retired-stack close, node publication, and in-flight references.
+  No VFS ABI, scheduler, ATA hardware protocol, on-disk format or existing check
+  was rewritten. Future targets: ATA IRQ request lifecycle, shared descriptor
+  offset/lifetime contracts across sleep, and DiskFS crash-consistent metadata.
+- Existing `findings.md` and `progress.md` contain non-UTF-8 binary data on main;
+  this section records this run's findings/progress without overwriting them.
+
 ## Goal
 對 miniOS（32-bit x86 教學型作業系統，~33K LOC C/ASM，位於本專案根目錄）進行全面程式碼審查，
 找出未完成項目、Bug、競態條件、記憶體安全問題、效能瓶頸、架構缺陷與技術債，依優先級修復、
@@ -529,6 +578,45 @@ Status: complete
 - 新增 CPL classification 與 generic exception status mutants；GitHub Actions 實測
   **7/7 killed**，健康快照維持 PMM `716/7476`、heap `11/33348`。
 
+## 2026-09-20 — BUILD1: kernel header dependencies
+Status: implementation and local validation complete; hosted CI results recorded in the PR.
+
+- 重新確認 main `e63d4218`、近期提交、0 個 open issues、開放 PR #36／#37／#38
+  與各自成功的 CI；三個 PR 分別處理中斷 DF、sleep slot 與 thread join，沒有
+  覆蓋本輪建置工作。另讀 roadmap、TODO、CLAUDE 與 PROJECT_STATE。
+- **問題／重現**：舊核心 C 規則只有 `.c` prerequisite。先建 main，再將
+  `TASK_KILL_STATUS` 從 -130 改為 -131，`make -q all` 仍回傳 0；增量核心
+  SHA256 不變，但 clean build 不同，證明會執行舊標頭常數。
+- **修法**：所有核心 C 編譯規則使用獨立 `DEPFLAGS=-MMD -MP`，載入 `.d`；
+  根 Makefile 成為核心物件 prerequisite，讓沒有 `.d` 的既有物件也能遷移；
+  clean 清除 `.d`，git 忽略產生檔。維持既有預設目標與嵌入程式建置規則。
+- **回歸**：隔離副本用真實 GCC/as/ld，固定時間戳而不 sleep，測直接／間接
+  標頭、只重建受影響物件、連結結果、Makefile 遷移、CFLAGS override、移除
+  標頭、phony clean，並比對增量與乾淨核心的 SHA256。接入 static-analysis
+  與 test registration gate；原生／QEMU 套件數不變。
+- **本地結果**：新回歸通過（7.7 秒）；完整核心建置成功，沒有 compiler
+  warning/error，未修改原始碼的核心與 main 位元組相同。5 個隔離 mutants
+  全由預期具名斷言抓到：取消產生 `.d`、取消 include、取消 Makefile
+  prerequisite、取消 `-MP`、把依賴旗標只放在可被覆蓋的 CFLAGS。
+- **環境限制**：本地不支援執行 hosted i386 與 AF_UNIX QEMU monitor；完整
+  `make test`、sanitize、static-analysis 與 QEMU mutants 交由 PR CI 執行，
+  不將未執行的測試記為通過。
+- `findings.md`／`progress.md` 在 main 是非 UTF-8 二進位內容，本輪不覆寫；
+  問題分析、進度與驗證記錄集中於此。
+
+## Phase 39: ISR/IRQ direction-flag ABI invariant
+Status: implemented; regression verification tracked in the pull request
+- 確認 ring-3 `STD; int 0x80` 會把 DF 帶進 C handler；真實 RAMFS read 在未修正
+  核心出現 `[stress direction flag syscall copy FAIL]`，寫壞目的 buffer 前的 canary。
+- ISR 與 IRQ common stub 各加一個 `CLD`，不改硬體保存的 EFLAGS，讓 `iret` 保留
+  caller 的 DF；避免 compiler-generated string instructions 反向複製。
+- `stress` 加入帶 DF 的 syscall canary 與 fork/COW #PF 測試；獨立 Multiboot probe
+  直接連結 production entry assembly，檢查兩種 DF 狀態、saved frame 與 `iret`。
+- probe 以 software INT 進入真實 IRQ stub，避免 scheduler 切換到另一個 task 時
+  還原不同 EFLAGS 而掩蓋缺陷；刪除任一 `CLD` 必須由對應具名 DF assertion 擊殺。
+- 本輪 findings/progress 記錄集中在此及 PR：既有 `findings.md` 與 `progress.md`
+  在 base commit 已是相同的非 UTF-8 二進位內容，本次不猜測其原文或改寫。
+
 ## Decisions & Assumptions Log
 重大設計決策集中在 `PROJECT_STATE.md` 第 4 節；每個項目的完整分析在 `findings.md`。
 
@@ -563,3 +651,175 @@ Status: complete
 - `shell_open_out` and `shell_open_in` now return owned references, with lookup/create and pin inside an IRQ boundary. Ordinary commands and pipelines retain those references across every image load and release the shell's ownership on success and all failure paths. Child startup publication and incoming IF behavior are preserved; image I/O remains outside the publication boundary.
 - The existing shell suite now links actual VFS/RAMFS dispatch and exercises unlink rejection during loading, append offsets, shared input/output nodes, both incoming IF states, early failures, partial pipeline launches and real process-exit cleanup. Local GCC13 hosted execution passed 481 checks. Seven isolated ownership/guard/cleanup mutants returned exit 1 with named failures (54/56/11/12/54/6/33); source bytes remained unchanged. `git diff --check` passed.
 - Full 32-bit/QEMU/sanitizer gates, exact updated-head CI and full temporary PR #40 compatibility remain PENDING VERIFICATION for this new correction. The existing draft PR #41 will be updated; no duplicate PR or default-branch merge. `findings.md` and `progress.md` retain their pre-existing non-text bytes; this section and the canonical Drive ledger hold the new evidence.
+## 2026-09-21 follow-up: indexed descriptor operations
+
+- Re-fetched main e63d4218 and PR #40 head e74d8875; all three PR workflows green.
+  PRs #36–#39 remain independent; no new code reviews or open non-PR issues.
+- Confirmed a caller-side gap with real syscall/VFS/DiskFS tests: serialized
+  DiskFS requests still receive stale shared descriptor offsets; completion can
+  also update a closed/reused slot. Current kernel PIO preemption reproduces it.
+- Added per-indexed-descriptor gates across file I/O and offset commit, seek,
+  fstat, close, dup/dup2 and fork copying. Sorted dup2 locking, empty destination
+  reservations and explicit payload copying preserve ownership without copying
+  lock state. Pipe waits and final process teardown remain outside the gate.
+- Added real suspended-stack tests, actual unmapping during descriptor wait,
+  and ring-3 shared-fd records. See docs/DESCRIPTOR_SERIALIZATION.md for evidence,
+  lookup semantics, lock order, cleanup and deliberately bounded scope.
+- Isolated previous-head and six targeted mutant checks fail named assertions;
+  the working source is never mutated in place. Native/ASan/UBSan, QEMU, static,
+  build and hosted CI results are recorded in the PR after final verification.
+- Existing findings.md/progress.md remain non-UTF-8 binary data, so this entry
+  records this run's findings and progress rather than rewriting those files.
+
+## 2026-09-22 follow-up: standard-stream operations
+
+- Re-inspected live main e63d4218, recent commits, PRs #36–#40, CI, issues,
+  reviews, roadmap and source. PR40 head 84150ab was green and unchanged;
+  no open non-PR issues or overlapping changes appeared.
+- Prior-head tests reproduce lost stdout records, repeated stdin bytes, and
+  completion advancing a replacement stream. Current kernel PIO preemption
+  also reproduces the lost write, without assuming syscall timer preemption.
+- Added two private per-process stream gates beside indexed descriptor gates.
+  Runtime file I/O/offset commit, dup2 replacement and fork snapshots acquire
+  ownership; stream-before-indexed-source order preserves independent progress.
+  Pipe/keyboard waits release the gate; final/failed-child cleanup stays
+  nonblocking. Existing offsets, reference ownership and return codes remain.
+- Extended the real suspended-stack suite and QEMU stress with both streams,
+  fork, late lookup, pipes, unmapping, errors and independent progress. The
+  new fixture initially filled a pipe from the last mapped page; ASan caught
+  that test-only overrun. The fill now has sufficient mapped capacity, and the
+  fake page query checks every page in the entire requested range.
+- Eight isolated mutations fail named assertions, plus three prior-head
+  behavioral failures. All mutations use scratch copies and verify that the
+  source tree is unchanged. The existing process lifecycle assertions are
+  preserved; its copy-hook stub now models the hook's added stream ownership.
+- Local native/ASan/UBSan, QEMU, build/static checks and hosted CI results are
+  recorded in PR40 after final verification. The environment still cannot run
+  i386 hosted binaries or AF_UNIX monitor sockets; hosted gates remain intact.
+- Self-review: no nested stream gates; fork releases each source before the
+  next; all error returns release; no gate over killable device waits; no lock
+  state copied; process slot reuse follows last-task cleanup. The kernel shell
+  still assumes redirection precedes a child's first run despite publishing
+  its task earlier. This existing initialization/publication gap is explicitly
+  documented rather than claiming runtime gates solve it. User buffers during
+  actual I/O sleep, IRQ ATA and crash consistency remain separate work.
+- findings.md/progress.md remain non-UTF-8 binary data; this entry records
+  findings and progress without overwriting their contents.
+
+
+## Follow-up: file read/write buffer mappings
+
+- Rechecked main e63d421, PR #40 head 636be97, open PRs #36–#39, recent commits,
+  successful CI, roadmap and current syscall/VFS/DiskFS/ATA/process/paging code.
+  Confirmed revalidation does not retain mappings during later volume/device
+  waits; the real munmap path could remove an active file buffer.
+- Added private per-process active ranges owned by syscall stacks around file
+  read/write callbacks. Munmap rejects overlap atomically before reservation/PTE
+  changes; unrelated pages/processes proceed. No extra allocation, I/O lock,
+  scheduler/VFS rewrite, or syscall number. Errors and kill wakeups return through
+  the one range-removal path. Completion order is independent of registration.
+- Expanded the real suspended-stack integration suite to include process.c mmap
+  reservation behavior. 3,462 checks passed local 64-bit ASan/UBSan; VM lifecycle
+  passed 36. Tests cover cross-page and overlapping ranges, either completion
+  order, PIO/device waits, independent mappings, read/RMW/write failure, kill/
+  spurious wakes, EOF/zero/invalid I/O, deferred validation and reuse.
+- Prior head plus seven isolated mutants fail named assertions; no crash/timeout
+  alone counts as proof. Added ring-3 mmap/COW file I/O and cleanup to stress,
+  retaining all existing assertions and requiring its marker twice.
+- Source/lifetime review checked every PTE teardown caller, last-task/exec/sbrk
+  behavior, descriptor ordering, IF preservation, zero-size and cleanup paths.
+  Contract and limitations are in docs/FILE_IO_BUFFERS.md and user_syscall.h.
+- Local standard gates encounter missing i386 execution / AF_UNIX support.
+  Full unmodified hosted regression/sanitizer/mutation results are recorded in
+  the PR after CI; local fallback results are identified separately there.
+- Scope remains file read/write buffers. Pipe/keyboard cancellation, borrowed
+  metadata/exec pointers, DMA pins, IRQ-driven ATA and crash consistency remain
+  distinct follow-ups. Existing non-UTF-8 findings/progress files are preserved.
+
+## 2026-09-19 — interrupted sleep reservation lifetime
+
+- Inspected live main `e63d4218ea91069506b05944ead5a9198bf8568a`, 12 recent
+  commits, all workflows, open issues (none), the only open PR #36 at
+  `4d9cfeff4193a735972dad4c238b2fdf3d951741`, its diff and discussion. Both
+  main and PR #36 had successful Tests, Static analysis and Kernel regression.
+  Reviewed README, PROJECT_STATE, CLAUDE, inventory, source TODOs (none), and
+  timer/process/scheduler/IPC implementation. PR #36 addresses interrupt-entry
+  DF handling; this independent branch addresses timer reservation lifetime.
+- Behavior: SYS_SLEEP enters with IF clear; timer_sleep reserves one of 16
+  slots and blocks. process_send_signal wakes the task by identity. The return
+  path released its reservation only for kill_pending, leaving ordinary early
+  returns occupied until their original deadline. Sixteen interrupted maximum
+  sleeps prevented the seventeenth sleep, potentially for about 248 days.
+- Reproduced on unchanged main timer.c: deterministic native model reported
+  54 failures; actual ring-3 SIGALRM workload failed the named
+  `[stress interrupted sleep capacity FAIL]` assertion in QEMU.
+- Fix: release a still-owned reservation after every block return, before the
+  kill check. Keep the owner check because a deadline can free the slot and a
+  different task can reuse it before the old sleeper resumes. No syscall ABI,
+  early-return semantics, deadline arithmetic or concurrency-model change.
+- Replace the timer's immediate-return scheduler stub with suspended pthread
+  stacks serialized by one test mutex. Verify deadlines/wrap/maximum duration,
+  16 actual sleepers, capacity recovery, 32 early wakes, cancellation of stale
+  deadlines, kill before/during sleep and slot takeover before normal/kill return.
+- Local validation: kernel build; 548 timer assertions on a 64-bit host build;
+  the same timer suite with ASan/UBSan; 39 Python regressions and all inventory,
+  ABI, test-registration, native-owner and GNU-stack checkers passed. Three
+  isolated native mutants (leak, owner-check deletion, early deadline) failed
+  named assertions without modifying the production tree. Ring-3 stress passed
+  twice in one QEMU boot, with both interrupted-sleep markers and matching
+  resource snapshots including zero remaining timer reservations.
+- Local environment cannot execute 32-bit hosted binaries or create Unix
+  monitor sockets. The QEMU check used an external scratch harness overriding
+  only the monitor transport to stdio; repository assertions were unchanged.
+  Full repository checks and the new eighth QEMU mutant are delegated to the
+  existing GitHub Actions workflows, with results to be recorded in the PR.
+- findings.md and progress.md are binary/non-UTF-8 on the base; this record
+  preserves those files and documents both findings and verification here.
+
+## 2026-09-19: Reject worker self-wait in thread_join
+Status: implementation and local verification complete; full CI results recorded in the pull request
+
+- Refreshed main (`e63d4218`), recent commits, issues, PRs, CI, roadmap and TODOs.
+  There were no open issues. PR #36 (interrupt DF) and #37 (timer slot lifetime)
+  remained open and green; neither implements the join contract. Based this
+  independent change on main rather than either unmerged patch.
+- The all-worker count includes a worker caller. Unchanged main reproduced
+  three named native failures (a self-wait reached the model's stuck-block
+  limit). With the new ring-3 workload, unchanged production code also failed
+  `[stress thread join caller liveness FAIL]`; its watchdog killed/reaped the
+  deadlocked child instead of relying on a QEMU timeout.
+- Only the process main task may join all workers. It retains the killable
+  condition loop and returns 0; other callers return -1 without blocking or
+  altering ownership. Syscall 50 and the user wrapper expose that result.
+  Existing callers that ignore the result remain source compatible.
+- Expanded the existing process suite to 532 checks: absent/kernel callers,
+  one/two workers before/after main exit, a main joining two workers through
+  spurious wakes, repeated empty joins, and kill before/after blocking.
+- The ring-3 child creates two worker join callers, checks errors, waits for
+  completion from main, repeats an empty join and frees both stacks. The
+  separate parent bounds and reaps a deadlock. Both stress rounds require the
+  new success marker and retain the existing exact resource snapshots.
+- Local native and ASan/UBSan process builds passed all 532 checks. Three
+  isolated native mutants (missing caller guard, early return with one worker
+  live, and unkillable wait) each failed the corresponding named assertion.
+  Added permanent QEMU caller-guard and lost-result mutants (nine total).
+- Fixed-kernel QEMU stress passed twice in one boot with stable PMM/heap
+  snapshots and zero user spaces, zombies, blocked tasks or sleeping slots.
+  Both new QEMU mutants produced their required liveness/result failures.
+  Kernel build, 39 Python checker tests, inventory/syscall ABI/test owner/
+  GNU-stack checks, incremental user build, cppcheck and diff checks passed.
+- The scratch QEMU adapter changes only the monitor transport to stdio;
+  this runtime cannot create Unix monitor sockets or execute hosted i386
+  binaries. Standard make test/sanitize/static-analysis/mutation gates
+  run unchanged in GitHub Actions; consult the PR for their final results.
+- Findings/progress are recorded here because the base findings.md and
+  progress.md contain non-UTF-8 binary data; those files were not rewritten.
+- Limits: join remains a main-only all-worker barrier, without a target TID,
+  per-worker exit statuses, or EINTR. Signal delivery and thread creation
+  semantics are unchanged.
+
+## PR36 follow-up — QEMU exit-device compatibility (2026-10-10)
+
+- On QEMU 10.2.1, the unchanged PR36 interrupt probe printed PASS but `make test-interrupt-entry` exited 2 after the 10-second timeout. QEMU's isa-debug-exit uses a guest-shutdown runstate request, which `-no-shutdown` prevents from terminating the process.
+- Removed `-no-shutdown` only from the standalone exit-device probe. The same binary then completed `make test-interrupt-entry` with exit 0. Retained the PASS marker, required exit code 33, timeout, and every ISR/IRQ observation; production assembly is unchanged.
+- Full candidate verification and mutation results are recorded in PR #36 and the canonical Engineering Conquest Ledger. Existing non-UTF-8 findings/progress records are preserved.

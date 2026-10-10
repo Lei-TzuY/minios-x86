@@ -10,7 +10,8 @@ python3 -m py_compile \
     tools/check_syscall_abi.py tests/test_syscall_abi.py \
     tools/check_test_gate_registration.py tests/test_test_gate_registration.py \
     tools/check_native_test_uniqueness.py tests/test_native_test_uniqueness.py \
-    tools/check_gnu_stack_notes.py tests/test_gnu_stack_notes.py
+    tools/check_gnu_stack_notes.py tests/test_gnu_stack_notes.py \
+    tests/test_kernel_incremental_build.py
 
 python3 tests/test_project_inventory.py
 python3 tools/project_inventory.py --check docs/PROJECT_INVENTORY.md
@@ -30,6 +31,7 @@ bash -n \
     tests/run_wait_concurrency_test.sh
 
 bash tests/test_user_incremental_build.sh
+python3 tests/test_kernel_incremental_build.py
 bash tests/run_fd_dup_test.sh
 bash tests/run_fd_index_ubsan.sh
 bash tests/run_wait_concurrency_test.sh
@@ -56,4 +58,4 @@ cppcheck \
     timer.c task.c rtc.c procfs.c vga.c ata.c isr.c process.c syscall.c elf_loader.c \
     user/fault.c user/stress.c user/ush.c
 
-echo "Python, test registration/ownership, inventory, syscall ABI, GNU-stack metadata, incremental user build, fd dup/index UBSan, concurrent waits, shell, and cppcheck static analysis passed"
+echo "Python, test registration/ownership, inventory, syscall ABI, GNU-stack metadata, incremental kernel/user builds, fd dup/index UBSan, concurrent waits, shell, and cppcheck static analysis passed"
