@@ -21,6 +21,7 @@
 #include "fat16.h"
 #include "procfs.h"
 #include "rtc.h"
+#include "irq.h"
 
 #define SHELL_CMD_SIZE 128
 #define SHELL_MAX_ARGS 8
@@ -687,6 +688,39 @@ static void shell_touch(const char *path) {
     }
 }
 
+static int32_t shell_spawn_argv(int argc, const char **argv,
+                                fs_node_t *out_node, uint32_t out_offset,
+                                fs_node_t *in_node, pipe_t *out_pipe,
+                                pipe_t *in_pipe) {
+    uint32_t entry, user_esp, heap_base;
+    address_space_t *space;
+    int32_t pid;
+
+    if (argc < 1 || !argv || !argv[0]) return -1;
+    /* Image loading can perform device I/O and schedule other tasks. Keep it
+     * outside the publication boundary, before this child is runnable. */
+    space = elf_load_image(argv[0], argc, argv, &entry, &user_esp, &heap_base);
+    if (!space) return -1;
+
+    /* create_task restores its incoming IF after adding the child to the ready
+     * ring. Keep IF clear until all of the child's startup bindings are set.
+     * These setup callbacks are nonblocking; no image or device I/O lives here. */
+    uint32_t flags = save_irq_disable();
+    pid = process_launch(entry, user_esp, space, argv[0], heap_base);
+    if (pid >= 0) {
+        process_set_cwd(pid, shell_cwd);
+        process_redirect(pid, out_node, out_offset, in_node);
+        process_pipe(pid, out_pipe, in_pipe);
+    }
+    restore_irq(flags);
+
+    if (pid < 0) {
+        terminal_writestring("exec: create_task failed\n");
+        paging_destroy_user_address_space(space);
+    }
+    return pid;
+}
+
 /* Run an N-stage pipeline (cmd0 | cmd1 | ... | cmdN-1). Stage i's stdout feeds
  * stage i+1's stdin through an in-kernel pipe; all stages run concurrently.
  * argv still contains the '|' separators, which this function splits on. */
@@ -758,16 +792,12 @@ static void shell_run_pipeline(const char **argv, int argc, int background) {
 
     /* Spawn each stage and wire its stdin/stdout to the adjacent pipes. */
     for (int i = 0; i < nstages; i++) {
-        pids[i] = elf_spawn_argv(stage_argc[i], stage_argv[i]);
+        pids[i] = shell_spawn_argv(stage_argc[i], stage_argv[i],
+                                   i == nstages - 1 ? out_node : NULL, out_off,
+                                   i == 0 ? in_node : NULL,
+                                   i < nstages - 1 ? pipes[i] : NULL,
+                                   i > 0 ? pipes[i - 1] : NULL);
         if (pids[i] < 0) break;
-        process_set_cwd(pids[i], shell_cwd);
-        process_pipe(pids[i],
-                     i < nstages - 1 ? pipes[i] : NULL,
-                     i > 0 ? pipes[i - 1] : NULL);
-        /* First stage may read a file; last stage may write one. */
-        if (i == 0 && in_node) process_redirect(pids[i], NULL, 0, in_node);
-        if (i == nstages - 1 && out_node)
-            process_redirect(pids[i], out_node, out_off, NULL);
         spawned++;
     }
 
@@ -966,11 +996,10 @@ static void kernel_shell(void) {
                 if (!in_node) redir_ok = 0;
             }
 
-            int32_t pid = redir_ok ? elf_spawn_argv(argc, argv) : -1;
-            if (pid >= 0) {
-                process_set_cwd(pid, shell_cwd);
-                process_redirect(pid, out_node, out_off, in_node);
-            }
+            int32_t pid = redir_ok
+                ? shell_spawn_argv(argc, argv, out_node, out_off, in_node,
+                                   NULL, NULL)
+                : -1;
 
             if (pid >= 0 && background) {
                 /* Detached: self-releases on exit; shell does not wait. */
