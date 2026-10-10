@@ -793,7 +793,8 @@ static void shell_run_pipeline(const char **argv, int argc, int background) {
     /* Spawn each stage and wire its stdin/stdout to the adjacent pipes. */
     for (int i = 0; i < nstages; i++) {
         pids[i] = shell_spawn_argv(stage_argc[i], stage_argv[i],
-                                   i == nstages - 1 ? out_node : NULL, out_off,
+                                   i == nstages - 1 ? out_node : NULL,
+                                   i == nstages - 1 ? out_off : 0,
                                    i == 0 ? in_node : NULL,
                                    i < nstages - 1 ? pipes[i] : NULL,
                                    i > 0 ? pipes[i - 1] : NULL);
