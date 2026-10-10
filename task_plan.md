@@ -557,3 +557,9 @@ Status: implemented; regression verification tracked in the pull request
 | 突變 pattern 對不上（CRLF 樹用 `\n`） | Python 字面替換 + LF 正規化後依原行尾寫回 |
 | `bigseek` 誤用 API 導致節點數飄移（Session 25） | `sys_create` 已回傳開啟的 fd；測試改為**斷言**清理成功 |
 | 往返測試沒模型化 handler 的 `ret`，在正確程式上也因錯的理由通過（Session 33） | 突變測試逼出來；補上 `useresp += 4` 才是真的往返 |
+
+## PR36 follow-up — QEMU exit-device compatibility (2026-10-10)
+
+- On QEMU 10.2.1, the unchanged PR36 interrupt probe printed PASS but `make test-interrupt-entry` exited 2 after the 10-second timeout. QEMU's isa-debug-exit uses a guest-shutdown runstate request, which `-no-shutdown` prevents from terminating the process.
+- Removed `-no-shutdown` only from the standalone exit-device probe. The same binary then completed `make test-interrupt-entry` with exit 0. Retained the PASS marker, required exit code 33, timeout, and every ISR/IRQ observation; production assembly is unchanged.
+- Full candidate verification and mutation results are recorded in PR #36 and the canonical Engineering Conquest Ledger. Existing non-UTF-8 findings/progress records are preserved.

@@ -807,6 +807,8 @@ test: unit test-interrupt-entry test-ata-absent test-boot test-iso test-stress t
 
 # Execute the real ISR/IRQ entry assembly in a minimal bootable image. Keep
 # the probe out of kernel.bin, and use QEMU's exit device for a bounded result.
+# Let the exit device terminate QEMU: -no-shutdown overrides its runstate
+# shutdown request on recent QEMU and would turn a successful probe into a timeout.
 tests/interrupt_entry_probe.o: tests/interrupt_entry_probe.c gdt.h idt.h io.h isr.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -817,7 +819,7 @@ tests/interrupt_entry_probe.bin: tests/interrupt_entry_probe.o boot.o gdt.o \
 test-interrupt-entry: tests/interrupt_entry_probe.bin
 	@log=$$(mktemp); status=0; \
 	timeout 10s $(QEMU) -display none -serial none -monitor none \
-	    -debugcon stdio -no-reboot -no-shutdown \
+	    -debugcon stdio -no-reboot \
 	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 	    -kernel tests/interrupt_entry_probe.bin > $$log 2>&1 || status=$$?; \
 	cat $$log; \
