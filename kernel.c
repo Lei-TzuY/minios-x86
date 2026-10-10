@@ -21,6 +21,7 @@
 #include "fat16.h"
 #include "procfs.h"
 #include "rtc.h"
+#include "irq.h"
 
 #define SHELL_CMD_SIZE 128
 #define SHELL_MAX_ARGS 8
@@ -579,7 +580,7 @@ static int shell_extract_redirects(const char **argv, int *argc,
 }
 
 /* Resolve the stdout redirect target (relative to shell_cwd), creating or
- * truncating as needed. Returns the node, or NULL on error (message printed). */
+ * truncating as needed. Returns an owned reference, or NULL on error. */
 static fs_node_t *shell_open_out(const char *path, int append, uint32_t *offset) {
     char abs[FS_MAX_PATH];
     fs_node_t *node;
@@ -591,6 +592,9 @@ static fs_node_t *shell_open_out(const char *path, int append, uint32_t *offset)
         return NULL;
     }
 
+    /* Lookup/create and pin form one boundary. File callbacks may wait before
+     * returning a node, but no task may unlink it between return and open. */
+    uint32_t flags = save_irq_disable();
     if (!append) {
         /* '>' truncates: drop any existing node and make a fresh writable one. */
         unlink_fs(abs);
@@ -601,6 +605,7 @@ static fs_node_t *shell_open_out(const char *path, int append, uint32_t *offset)
     }
 
     if (!node || node->flags != FS_FILE || !node->write) {
+        restore_irq(flags);
         terminal_writestring("cannot open for writing: ");
         terminal_writestring(path);
         terminal_putchar('\n');
@@ -608,22 +613,33 @@ static fs_node_t *shell_open_out(const char *path, int append, uint32_t *offset)
     }
 
     *offset = append ? node->length : 0;
+    open_fs(node);
+    restore_irq(flags);
     return node;
 }
 
-/* Resolve a stdin redirect source (relative to shell_cwd). NULL on error. */
+/* Resolve and pin a stdin source (relative to shell_cwd). NULL on error. */
 static fs_node_t *shell_open_in(const char *path) {
     char abs[FS_MAX_PATH];
     fs_node_t *node;
 
+    uint32_t flags = save_irq_disable();
     if (vfs_resolve_path(shell_cwd, path, abs) != 0 ||
         !(node = resolve_fs(abs)) || node->flags != FS_FILE) {
+        restore_irq(flags);
         terminal_writestring("cannot open for reading: ");
         terminal_writestring(path);
         terminal_putchar('\n');
         return NULL;
     }
+    open_fs(node);
+    restore_irq(flags);
     return node;
+}
+
+static void shell_close_redirects(fs_node_t *out_node, fs_node_t *in_node) {
+    if (out_node) close_fs(out_node);
+    if (in_node) close_fs(in_node);
 }
 
 /* Copy file `src` to `dst` (both relative to shell_cwd). Returns 0 on success. */
@@ -687,6 +703,66 @@ static void shell_touch(const char *path) {
     }
 }
 
+static int32_t shell_spawn_argv(int argc, const char **argv,
+                                fs_node_t *out_node, uint32_t out_offset,
+                                fs_node_t *in_node, pipe_t *out_pipe,
+                                pipe_t *in_pipe) {
+    uint32_t entry, user_esp, heap_base;
+    address_space_t *space;
+    int32_t pid;
+
+    if (argc < 1 || !argv || !argv[0]) return -1;
+    /* Image loading can perform device I/O and schedule other tasks. Keep it
+     * outside the publication boundary, before this child is runnable. */
+    space = elf_load_image(argv[0], argc, argv, &entry, &user_esp, &heap_base);
+    if (!space) return -1;
+
+    /* create_task restores its incoming IF after adding the child to the ready
+     * ring. Keep IF clear until all of the child's startup bindings are set.
+     * These setup callbacks are nonblocking; no image or device I/O lives here. */
+    uint32_t flags = save_irq_disable();
+    pid = process_launch(entry, user_esp, space, argv[0], heap_base);
+    if (pid >= 0) {
+        process_set_cwd(pid, shell_cwd);
+        process_redirect(pid, out_node, out_offset, in_node);
+        process_pipe(pid, out_pipe, in_pipe);
+    }
+    restore_irq(flags);
+
+    if (pid < 0) {
+        terminal_writestring("exec: create_task failed\n");
+        paging_destroy_user_address_space(space);
+    }
+    return pid;
+}
+
+/* Keep redirect references through image loading, which can schedule other
+ * tasks. A published child acquires its own references; every failure returns
+ * the shell's ownership here without changing the child's startup boundary. */
+static int32_t shell_spawn_command(int argc, const char **argv,
+                                   const char *out_path, int append,
+                                   const char *in_path) {
+    fs_node_t *out_node = NULL, *in_node = NULL;
+    uint32_t out_offset = 0;
+    int32_t pid;
+
+    if (out_path) {
+        out_node = shell_open_out(out_path, append, &out_offset);
+        if (!out_node) return -1;
+    }
+    if (in_path) {
+        in_node = shell_open_in(in_path);
+        if (!in_node) {
+            shell_close_redirects(out_node, NULL);
+            return -1;
+        }
+    }
+    pid = shell_spawn_argv(argc, argv, out_node, out_offset, in_node,
+                           NULL, NULL);
+    shell_close_redirects(out_node, in_node);
+    return pid;
+}
+
 /* Run an N-stage pipeline (cmd0 | cmd1 | ... | cmdN-1). Stage i's stdout feeds
  * stage i+1's stdin through an in-kernel pipe; all stages run concurrently.
  * argv still contains the '|' separators, which this function splits on. */
@@ -730,6 +806,7 @@ static void shell_run_pipeline(const char **argv, int argc, int background) {
         int ap;
         if (shell_extract_redirects(stage_argv[s], &stage_argc[s],
                                     &op, &ap, &ip) != 0 || stage_argc[s] == 0) {
+            shell_close_redirects(out_node, in_node);
             terminal_writestring("syntax error in pipeline\n");
             return;
         }
@@ -739,7 +816,10 @@ static void shell_run_pipeline(const char **argv, int argc, int background) {
         }
         if (s == nstages - 1 && op) {
             out_node = shell_open_out(op, ap, &out_off);
-            if (!out_node) return;
+            if (!out_node) {
+                shell_close_redirects(NULL, in_node);
+                return;
+            }
         }
     }
 
@@ -751,6 +831,7 @@ static void shell_run_pipeline(const char **argv, int argc, int background) {
                 pipe_close_read(pipes[j]);
                 pipe_close_write(pipes[j]);
             }
+            shell_close_redirects(out_node, in_node);
             terminal_writestring("pipe: out of memory\n");
             return;
         }
@@ -758,18 +839,16 @@ static void shell_run_pipeline(const char **argv, int argc, int background) {
 
     /* Spawn each stage and wire its stdin/stdout to the adjacent pipes. */
     for (int i = 0; i < nstages; i++) {
-        pids[i] = elf_spawn_argv(stage_argc[i], stage_argv[i]);
+        pids[i] = shell_spawn_argv(stage_argc[i], stage_argv[i],
+                                   i == nstages - 1 ? out_node : NULL,
+                                   i == nstages - 1 ? out_off : 0,
+                                   i == 0 ? in_node : NULL,
+                                   i < nstages - 1 ? pipes[i] : NULL,
+                                   i > 0 ? pipes[i - 1] : NULL);
         if (pids[i] < 0) break;
-        process_set_cwd(pids[i], shell_cwd);
-        process_pipe(pids[i],
-                     i < nstages - 1 ? pipes[i] : NULL,
-                     i > 0 ? pipes[i - 1] : NULL);
-        /* First stage may read a file; last stage may write one. */
-        if (i == 0 && in_node) process_redirect(pids[i], NULL, 0, in_node);
-        if (i == nstages - 1 && out_node)
-            process_redirect(pids[i], out_node, out_off, NULL);
         spawned++;
     }
+    shell_close_redirects(out_node, in_node);
 
     if (spawned < nstages) {
         /* A stage failed: close the ends no live process owns, then reap the
@@ -953,24 +1032,8 @@ static void kernel_shell(void) {
         } else if (strcmp(argv[0], "disktest") == 0) {
             shell_disk_test();
         } else {
-            fs_node_t *out_node = NULL, *in_node = NULL;
-            uint32_t out_off = 0;
-            int redir_ok = 1;
-
-            if (out_path) {
-                out_node = shell_open_out(out_path, append, &out_off);
-                if (!out_node) redir_ok = 0;
-            }
-            if (redir_ok && in_path) {
-                in_node = shell_open_in(in_path);
-                if (!in_node) redir_ok = 0;
-            }
-
-            int32_t pid = redir_ok ? elf_spawn_argv(argc, argv) : -1;
-            if (pid >= 0) {
-                process_set_cwd(pid, shell_cwd);
-                process_redirect(pid, out_node, out_off, in_node);
-            }
+            int32_t pid = shell_spawn_command(argc, argv, out_path, append,
+                                              in_path);
 
             if (pid >= 0 && background) {
                 /* Detached: self-releases on exit; shell does not wait. */

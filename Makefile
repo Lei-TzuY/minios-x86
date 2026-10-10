@@ -39,7 +39,7 @@ UNIT_BINS = tests/test_utils tests/test_fs_path tests/test_fs tests/test_pmm \
             tests/test_paging_cow tests/test_elf tests/test_ramfs \
             tests/test_kb tests/test_procfs tests/test_vga tests/test_ata \
             tests/test_fdtable tests/test_process tests/test_signal \
-            tests/test_vm_lifecycle
+            tests/test_vm_lifecycle tests/test_shell_spawn
 
 tests/test_utils: tests/test_utils.c tests/test.h utils.c utils.h
 	$(CC) $(UNIT_CFLAGS) tests/test_utils.c utils.c -o $@
@@ -154,6 +154,14 @@ tests/test_fdtable: tests/test_fdtable.c tests/test.h syscall.c syscall.h \
 tests/test_process: tests/test_process.c tests/test.h process.c process.h \
                     task.h paging.h fs.h pipe.h syscall.h elf_loader.h
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST tests/test_process.c -o $@
+
+# Include the actual shell startup helper and process setup paths. A modeled
+# timer runs the child at the first IF-enabled publication boundary; unrelated
+# boot/shell code is removed so no hardware or embedded user image is needed.
+tests/test_shell_spawn: tests/test_shell_spawn.c tests/test.h kernel.c process.c fs.c ramfs.c \
+                        $(wildcard *.h)
+	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
+	    -Wl,--gc-sections tests/test_shell_spawn.c -o $@
 
 # Signal delivery and return, driven against a REAL mapped user stack so the
 # frame is built and read back at genuine addresses. --gc-sections keeps the

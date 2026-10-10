@@ -50,3 +50,4 @@ tests/test_fdtable
 tests/test_process
 tests/test_signal
 tests/test_vm_lifecycle
+tests/test_shell_spawn

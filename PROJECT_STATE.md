@@ -17,7 +17,7 @@
 | `tests/` 原生單元測試 | ~12,700 行 |
 | 系統呼叫 | 52 |
 | 使用者程式 | 53 |
-| 單元測試套件 | 25 |
+| 單元測試套件 | 26 |
 
 ### 子系統
 
@@ -191,7 +191,7 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
   RAMFS 快照；另有 ASan/UBSan、cppcheck 與 7 個具名 QEMU capacity/leak/exception mutants
   的 CI gate。
 
-目前 25 套件，`make unit` <1 秒：
+目前 26 套件，`make unit` <1 秒：
 
 ```
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37455 /

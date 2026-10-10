@@ -29,6 +29,7 @@ sanitizer_bins=(
     tests/test_vga
     tests/test_ata
     tests/test_process
+    tests/test_shell_spawn
 )
 
 cleanup() {
