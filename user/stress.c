@@ -48,6 +48,65 @@ static int unknown_syscall(void) {
     return ret;
 }
 
+#define EFLAGS_DF 0x400u
+
+static int test_direction_flag_syscall(void) {
+    unsigned char guarded[8] __attribute__((aligned(4)));
+    unsigned flags;
+    int fd = sys_open("readme.txt");
+    int result;
+
+    if (fd < 0) return fail("direction flag open");
+    for (int i = 0; i < ARRAY_SIZE(guarded); i++) guarded[i] = 0xA5;
+
+    /* STD is legal in ring 3. Keep STD through CLD in one asm block so no
+     * compiler-generated user code runs with the C ABI's DF invariant broken.
+     * Two bytes at offset 3 exercise memcpy's unaligned head: a backwards
+     * copy damages a canary instead of running off the end of the kernel. */
+    __asm__ volatile("std; int $0x80; pushfl; popl %1; cld"
+                     : "=a"(result), "=r"(flags)
+                     : "a"(6), "b"(fd), "c"(guarded + 3), "d"(2)
+                     : "memory", "cc");
+    if (sys_close(fd) != 0) return fail("direction flag close");
+    if (result != 2 || !(flags & EFLAGS_DF))
+        return fail("direction flag syscall return");
+    for (int i = 0; i < ARRAY_SIZE(guarded); i++) {
+        unsigned char expected = i == 3 ? 'm' : i == 4 ? 'i' : 0xA5;
+        if (guarded[i] != expected) return fail("direction flag syscall copy");
+    }
+    pass("direction flag syscall");
+    return 0;
+}
+
+static int test_direction_flag_fault(void) {
+    volatile unsigned *page = (volatile unsigned *)sys_mmap(1);
+    int status = -1;
+    int pid;
+
+    if (!page) return fail("direction flag cow allocation");
+    page[0] = 0x12345678u;
+    page[1] = 0xABCDEF01u;
+    pid = sys_fork();
+    if (pid == 0) {
+        unsigned flags;
+
+        /* A real user #PF must also enter C with DF clear. The COW handler
+         * copies a whole frame, and iret must restore DF on the retried store. */
+        __asm__ volatile("std; movl $0x87654321, (%1); pushfl; popl %0; cld"
+                         : "=r"(flags) : "r"(page) : "memory", "cc");
+        sys_exit((flags & EFLAGS_DF) && page[0] == 0x87654321u &&
+                 page[1] == 0xABCDEF01u ? 0 : 83);
+    }
+    if (pid < 0 || sys_waitpid(pid, &status, 0) != pid || status != 0 ||
+        page[0] != 0x12345678u || page[1] != 0xABCDEF01u) {
+        sys_munmap((void *)page, 1);
+        return fail("direction flag cow isolation");
+    }
+    if (sys_munmap((void *)page, 1) != 0) return fail("direction flag cow cleanup");
+    pass("direction flag fault");
+    return 0;
+}
+
 static int test_invalid_pointers(void) {
     const char *bad = (const char *)0x1000;
     struct ustat st;
@@ -582,7 +641,9 @@ static int test_repeated_lifecycle(void) {
 int main(void) {
     write_str("[stress BEGIN]\n");
 
-    if (test_invalid_pointers() != 0 ||
+    if (test_direction_flag_syscall() != 0 ||
+        test_direction_flag_fault() != 0 ||
+        test_invalid_pointers() != 0 ||
         test_fault_isolation() != 0 ||
         test_heap_and_paging() != 0 ||
         test_descriptor_and_pipe_exhaustion() != 0 ||

@@ -2,6 +2,7 @@
 *.o
 *.elf
 kernel.bin
+tests/interrupt_entry_probe.bin
 
 # Generated embed sources (produced from user ELFs by gen_embed.py)
 *_embed.c

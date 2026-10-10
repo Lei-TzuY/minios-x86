@@ -31,6 +31,7 @@ run_mutant() {
     local old=$2
     local new=$3
     local expected_marker=$4
+    local target=${5:-test-stress}
     local rc
 
     active_file=$file
@@ -41,7 +42,7 @@ run_mutant() {
 
     rm -f tests/qemu-stress.log "$driver_log"
     set +e
-    make test-stress 2>&1 | tee "$driver_log"
+    make "$target" 2>&1 | tee "$driver_log"
     rc=${PIPESTATUS[0]}
     set -e
 
@@ -58,6 +59,20 @@ run_mutant() {
     fi
     echo "mutant killed by named assertion: $expected_marker"
 }
+
+run_mutant \
+    interrupt.s \
+    $'isr_common_stub:\n    cld' \
+    'isr_common_stub:' \
+    '[entry isr DF FAIL]' \
+    test-interrupt-entry
+
+run_mutant \
+    interrupt.s \
+    $'irq_common_stub:\n    cld' \
+    'irq_common_stub:' \
+    '[entry irq DF FAIL]' \
+    test-interrupt-entry
 
 run_mutant \
     syscall.c \
@@ -101,4 +116,4 @@ run_mutant \
     '        task_exit(-2); /* mutant: corrupt generic exception status */' \
     '[stress fault isolation status FAIL]'
 
-echo "QEMU stress mutations killed (7/7)"
+echo "QEMU entry/stress mutations killed (9/9)"

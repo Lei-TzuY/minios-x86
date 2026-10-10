@@ -17,16 +17,16 @@ python3）。Windows 端沒有編譯器。
 |---|---|---|
 | `make all -j4` | 建置核心（**不是** `make`，見下） | ~30s |
 | `make unit` | 25 套原生單元測試 | <1s |
-| `make test` | 完整回歸：`unit` + 5 個 QEMU 目標 | ~8-10 分鐘 |
+| `make test` | 完整回歸：`unit` + 6 個 QEMU 目標 | ~8-10 分鐘 |
 | `make bench` | 效能量測（資訊性，不在 `make test` 內） | ~5s |
 
 - 裸 `make` 只會建第一個目標（一個單元測試執行檔），**不是**核心。用 `make all`。
-- `make test` 的 QEMU 目標：`test-ata-absent`、`test-boot`、`test-iso`、
+- `make test` 的 QEMU 目標：`test-interrupt-entry`、`test-ata-absent`、`test-boot`、`test-iso`、
   `test-stress`、`test-shell`。
 - 額外品質 gate：`make sanitize`（hosted ASan + UBSan）、`make static-analysis`
   （Python bytecode + shell syntax + cppcheck）、`make test-stress-mutants`（兩個具名
   capacity、PMM leak、兩個 fault status、abnormal fd/pipe teardown、CPL classification，
-  共 7 個 mutants）。
+  加上 ISR/IRQ DF 入口，共 9 個 mutants）。
 
 ### ⚠️ 離開碼陷阱（會造成假綠燈）
 
