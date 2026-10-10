@@ -158,7 +158,7 @@ tests/test_process: tests/test_process.c tests/test.h process.c process.h \
 # Include the actual shell startup helper and process setup paths. A modeled
 # timer runs the child at the first IF-enabled publication boundary; unrelated
 # boot/shell code is removed so no hardware or embedded user image is needed.
-tests/test_shell_spawn: tests/test_shell_spawn.c tests/test.h kernel.c process.c \
+tests/test_shell_spawn: tests/test_shell_spawn.c tests/test.h kernel.c process.c fs.c ramfs.c \
                         $(wildcard *.h)
 	$(CC) $(UNIT_CFLAGS) -DHOSTED_TEST -ffunction-sections -fdata-sections \
 	    -Wl,--gc-sections tests/test_shell_spawn.c -o $@
