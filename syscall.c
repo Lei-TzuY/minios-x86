@@ -1146,7 +1146,8 @@ void signal_deliver(registers_t *regs) {
          * since that fault happens from kernel code (CS still 0x08 at the
          * point of the write) it would be treated as a kernel fault and halt
          * the whole system instead of just this process. */
-        if (regs->useresp < sizeof(sigcontext_t) + 8 ||
+        /* A zero frame base is outside every user stack region. */
+        if (regs->useresp <= sizeof(sigcontext_t) + 8 ||
             !signal_stack_range_valid(process,
                                       regs->useresp - sizeof(sigcontext_t) - 8,
                                       sizeof(sigcontext_t) + 8)) {
