@@ -1,3 +1,5 @@
+#include <stdint.h>
+
 #include "user_syscall.h"
 #include "umalloc.h"
 
@@ -417,7 +419,7 @@ static int test_interrupted_sleep(void) {
         if (!alarm_seen) return fail("interrupted sleep delivery");
     }
     sleep_alarm_rearm = 0;
-    if (sys_alarm(0) < 0 || sys_signal(SIGALRM, (void (*)(int))1) != 0 ||
+    if (sys_alarm(0) < 0 || sys_signal(SIGALRM, (void (*)(int))(uintptr_t)1) != 0 ||
         sys_sleep(2) != 0)
         return fail("interrupted sleep recovery");
 
