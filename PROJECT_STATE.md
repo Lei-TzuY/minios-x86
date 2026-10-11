@@ -195,7 +195,7 @@ F25 則是**權限提升**——ring 3 自己取得 IOPL）、
 
 ```
 utils 50032 / fs-path 36 / fs-vfs 277 / pmm 58 / heap 720 / fat16 37455 /
-diskfs 979 / pipe 89 / sem 38 / timer 63 / task 82 / rtc 35 /
+diskfs 979 / pipe 89 / sem 38 / timer 548 / task 82 / rtc 35 /
 process-env 47 / syscall-valid 46 / paging-cow 31 / elf 146 / ramfs 4335 /
 kb 1675 / procfs 183 / vga 4769 / ata 8995 / fdtable 489 / process 419 /
 signal 103 / vm-lifecycle 36
@@ -236,9 +236,11 @@ signal 103 / vm-lifecycle 36
    可捕捉的訊號。根治需要「可中斷睡眠 + EINTR 上拋」，牽涉所有阻塞點**以及使用者
    空間對「系統呼叫可能被中斷」的預期**，會動到 ABI。
 
-3. **`timer_sleep` 被訊號（非 kill）提早喚醒**時直接回傳 0，且 slot 佔到原到期
-   時間才被 `timer_callback` 清掉。提早返回符合 POSIX `sleep()` 語意，slot 滯留
-   有界且會自癒（不會被解參照）。修它需改動 `test_timer` 對「睡著」的建模。
+3. **2026-09-19 已修正：訊號提早喚醒的 sleep slot 滯留**。原版反覆中斷長睡眠
+   會耗盡 16 個全域槽位，第 17 次 sleep 回傳 -1；最長期限約 248 天，不能依賴
+   到期自癒。現在正常／kill 返回都先歸還仍屬於自己的槽位，保留既有提早回傳 0
+   語意。native 測試以序列化的 pthread 堆疊模型驗證真正暫停、到期、重用、kill
+   與提前釋放；ring-3 stress 另驗證連續 32 次 SIGALRM 中斷及後續 sleep 可用性。
 
 4. **`ramfs_write` 重用路徑的 memset 是冗餘防禦**（突變 R6 存活）：程式碼註解
    自承「already zero by the invariant, but make it explicit」。與成長路徑的

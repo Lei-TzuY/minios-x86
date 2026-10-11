@@ -101,4 +101,10 @@ run_mutant \
     '        task_exit(-2); /* mutant: corrupt generic exception status */' \
     '[stress fault isolation status FAIL]'
 
-echo "QEMU stress mutations killed (7/7)"
+run_mutant \
+    timer.c \
+    '            if (sleeping_tasks[i].task == task) sleeping_tasks[i].task = NULL;' \
+    '            if (task_kill_pending() && sleeping_tasks[i].task == task) sleeping_tasks[i].task = NULL;' \
+    '[stress interrupted sleep capacity FAIL]'
+
+echo "QEMU stress mutations killed (8/8)"

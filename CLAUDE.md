@@ -26,7 +26,7 @@ python3）。Windows 端沒有編譯器。
 - 額外品質 gate：`make sanitize`（hosted ASan + UBSan）、`make static-analysis`
   （Python bytecode + shell syntax + cppcheck）、`make test-stress-mutants`（兩個具名
   capacity、PMM leak、兩個 fault status、abnormal fd/pipe teardown、CPL classification，
-  共 7 個 mutants）。
+  加上 interrupted sleep slot 回收，共 8 個 mutants）。
 
 ### ⚠️ 離開碼陷阱（會造成假綠燈）
 

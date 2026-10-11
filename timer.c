@@ -85,14 +85,13 @@ int timer_sleep(uint32_t ticks) {
             sleeping_tasks[i].task = task;
             sleeping_tasks[i].wake_tick = timer_ticks + ticks;
             task_block_current(&sleeping_tasks[i]);
-            /* This is the one wait that cannot use task_block_killable(): the
-             * sleep slot must be handed back before the task goes away, or it
-             * would stay reserved with a pointer to freed memory until the
-             * original deadline passed. Only clear it while it is still ours --
-             * if the deadline fired, timer_callback already cleared it and
-             * another sleeper may have taken the slot over. */
+            /* Signals can end a sleep before its deadline, even without a
+             * pending kill. Release our reservation on every return path or
+             * repeated interrupted sleeps exhaust the global table. If the
+             * deadline fired first, another task may already own this slot. */
+            if (sleeping_tasks[i].task == task) sleeping_tasks[i].task = NULL;
+            /* task_block_killable() would exit before the cleanup above. */
             if (task_kill_pending()) {
-                if (sleeping_tasks[i].task == task) sleeping_tasks[i].task = NULL;
                 task_exit(TASK_KILL_STATUS);
             }
             restore_irq(flags);
